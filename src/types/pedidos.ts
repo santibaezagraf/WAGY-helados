@@ -10,9 +10,9 @@ export type PedidoInsert = {
     cantidad_crema: number
     metodo_pago: string
     estado: string
-    precio_unitario_agua: number
-    precio_unitario_crema: number
     costo_envio: number
+    monto_total_agua: number
+    monto_total_crema: number
     aclaracion?: string | null
     observaciones?: string | null
 }

@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase-server'
 import { redirect } from 'next/navigation'
 import { PedidosClient } from '@/components/pedidos/pedidos-client'
+import { Header } from '@/components/ui/header'
 
 
 export default async function Home() {
@@ -24,12 +25,13 @@ export default async function Home() {
     }
 
     return (
-        <div className="flex min-h-screen flex-col items-center p-24">
-            <h1 className="text-4xl font-bold mb-8">Bienvenido {user.email}</h1>
-
-            <div className="w-full max-w-7xl">
-                <PedidosClient initialData={pedidos || []} />
-            </div>
+        <div className="flex min-h-screen flex-col">
+            <Header />
+            <main className="flex-1 p-6 sm:p-8 lg:p-12 bg-slate-50">
+                <div className="max-w-7xl mx-auto">
+                    <PedidosClient initialData={pedidos || []} />
+                </div>
+            </main>
         </div>
     )
 }

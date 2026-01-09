@@ -43,14 +43,18 @@ export type Database = {
           costo_envio: number
           created_at: string
           direccion: string
+          enviado: boolean
+          es_cambio_manual: boolean | null
           estado: string
           ganancia: number | null
           id: number
           metodo_pago: string
+          monto_total_agua: number | null
+          monto_total_crema: number | null
           observaciones: string | null
           pagado: boolean | null
-          precio_unitario_agua: number
-          precio_unitario_crema: number
+          precio_unitario_agua: number | null
+          precio_unitario_crema: number | null
           telefono: string
           updated_at: string | null
         }
@@ -61,14 +65,18 @@ export type Database = {
           costo_envio?: number
           created_at?: string
           direccion?: string
+          enviado?: boolean
+          es_cambio_manual?: boolean | null
           estado?: string
           ganancia?: number | null
           id?: number
           metodo_pago: string
+          monto_total_agua?: number | null
+          monto_total_crema?: number | null
           observaciones?: string | null
           pagado?: boolean | null
-          precio_unitario_agua?: number
-          precio_unitario_crema?: number
+          precio_unitario_agua?: number | null
+          precio_unitario_crema?: number | null
           telefono: string
           updated_at?: string | null
         }
@@ -79,14 +87,18 @@ export type Database = {
           costo_envio?: number
           created_at?: string
           direccion?: string
+          enviado?: boolean
+          es_cambio_manual?: boolean | null
           estado?: string
           ganancia?: number | null
           id?: number
           metodo_pago?: string
+          monto_total_agua?: number | null
+          monto_total_crema?: number | null
           observaciones?: string | null
           pagado?: boolean | null
-          precio_unitario_agua?: number
-          precio_unitario_crema?: number
+          precio_unitario_agua?: number | null
+          precio_unitario_crema?: number | null
           telefono?: string
           updated_at?: string | null
         }

@@ -1,12 +1,12 @@
 'use client'
-import { useState } from 'react'
+import * as React from 'react'
 import { createClient } from '@/lib/supabase-client'
 import { useRouter } from 'next/navigation'
 
 export default function Login() {
-    const [email, setEmail] = useState('')
-    const [password, setPassword] = useState('')
-    const [loading, setLoading] = useState(false)
+    const [email, setEmail] = React.useState('')
+    const [password, setPassword] = React.useState('')
+    const [loading, setLoading] = React.useState(false)
     const router = useRouter()
     const supabase = createClient()
 
