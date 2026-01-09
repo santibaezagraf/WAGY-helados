@@ -1,8 +1,8 @@
-// 'use client'
-
 import { createClient } from '@/lib/supabase-server'
 import { redirect } from 'next/navigation'
-import RefreshButton from '@/components/RefreshButton'
+import { PedidosClient } from '@/components/pedidos/pedidos-client'
+import { Header } from '@/components/ui/header'
+
 
 export default async function Home() {
     const supabase = await createClient();
@@ -15,27 +15,23 @@ export default async function Home() {
 
     const { data: pedidos, error } = await supabase
         .from('pedidos')
-        .select('*');
+        .select('*')
+        .order('created_at', { ascending: false });
 
     if (error) {
         return ( 
-          <div>Error al cargar los pedidos: {error.message}</div>
+            <div>Error al cargar los pedidos: {error.message}</div>
         );
     }
 
     return (
-        <div className="flex min-h-screen flex-col items-center justify-center p-24 text-black">
-            <h1 className="text-blue-600 text-4xl font-bold">Bienvenido {user.email}</h1>
-            
-            <div className="mt-6">
-                <RefreshButton />
-            </div>
-
-            {pedidos && pedidos.length > 0 && (
-              <pre className="mt-8 bg-gray-100 p-4 rounded-lg">
-                {JSON.stringify(pedidos, null, 2)}
-              </pre>
-            )}
+        <div className="flex min-h-screen flex-col">
+            <Header />
+            <main className="flex-1 p-6 sm:p-8 lg:p-12 bg-slate-50">
+                <div className="max-w-7xl mx-auto">
+                    <PedidosClient initialData={pedidos || []} />
+                </div>
+            </main>
         </div>
     )
 }
