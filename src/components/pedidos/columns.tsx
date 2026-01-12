@@ -6,7 +6,7 @@ import { Pedido } from "@/types/pedidos"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { ArrowUpDown, MoreHorizontal, Check, X, Clock } from "lucide-react"
+import { ArrowUpDown, MoreHorizontal, Check, X, Clock, Copy, Edit } from "lucide-react"
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -132,12 +132,14 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
                 cell: ({ row }) => {
                     const pagado = row.getValue("pagado") as boolean
                     return (
-                    <Badge 
-                        variant="outline"
-                        className={`flex items-center justify-center w-8 h-6 ${pagado ? 'bg-green-100' : 'bg-red-100'}`}
-                    >
-                        {pagado ? <Check className="text-green-600 h-6 w-6 stroke-[5]" /> : <X className="text-red-600 h-6 w-6 stroke-[5]" />}
-                    </Badge>
+                    <div className="flex items-center justify-center">
+                        <Badge 
+                            variant="outline"
+                            className={`flex items-center justify-center w-8 h-6 ${pagado ? 'bg-green-100' : 'bg-red-100'}`}
+                        >
+                            {pagado ? <Check className="text-green-600 h-6 w-6 stroke-[5]" /> : <X className="text-red-600 h-6 w-6 stroke-[5]" />}
+                        </Badge>
+                    </div>
                     )
                 },
                 },
@@ -165,16 +167,18 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
     },
     {
         accessorKey: "enviado",
-        header: "Enviado",
+        header: "Wpp Enviado",
         cell: ({ row }) => {
             const enviado = row.getValue("enviado") as boolean
             return (
-                <Badge 
-                    variant="outline"  //{enviado ? "success" : "destructive"}
-                    className={`flex items-center justify-center w-8 h-6 ${enviado ? 'bg-green-100' : 'bg-red-100'}`}
-                >
-                    {enviado ? <Check className="text-green-600 h-6 w-6 stroke-[5]" /> : <X className="text-red-600 h-6 w-6 stroke-[5]" />}
-                </Badge>
+                <div className="flex items-center justify-center">
+                    <Badge 
+                        variant="outline"  //{enviado ? "success" : "destructive"}
+                        className={`flex items-center justify-center w-8 h-6 ${enviado ? 'bg-green-100' : 'bg-red-100'}`}
+                    >
+                        {enviado ? <Check className="text-green-600 h-6 w-6 stroke-[5]" /> : <X className="text-red-600 h-6 w-6 stroke-[5]" />}
+                    </Badge>
+                </div>
             )
         },
     },
@@ -247,9 +251,23 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                             <DropdownMenuLabel>Acciones</DropdownMenuLabel>
+
                             <DropdownMenuItem onClick={() => setEditModalOpen(true)}>
+                                <Edit className="h-4 w-4 mr-2" />
                                 Editar
                             </DropdownMenuItem>
+
+                            <DropdownMenuItem 
+                                onClick={() => {
+                                    const mensaje = crearMensajeWpp(pedido)
+                                    navigator.clipboard.writeText(mensaje)
+                                    actualizarEnviado(true)
+                                }}
+                            >
+                                <Copy className="h-4 w-4 mr-2" />
+                                Copiar mensaje
+                            </DropdownMenuItem>
+                            
                             <DropdownMenuSeparator />
                             
                             <DropdownMenuSub>
@@ -318,18 +336,10 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
                                 </DropdownMenuSubContent>
                             </DropdownMenuSub>
 
-                            <DropdownMenuSeparator />
+                            {/* <DropdownMenuSeparator /> */}
                                 
                                 
-                            <DropdownMenuItem 
-                                onClick={() => {
-                                    const mensaje = crearMensajeWpp(pedido)
-                                    navigator.clipboard.writeText(mensaje)
-                                    actualizarEnviado(true)
-                                }}
-                            >
-                                Copiar mensaje
-                            </DropdownMenuItem>
+                            
                                 
                             
                         </DropdownMenuContent>
