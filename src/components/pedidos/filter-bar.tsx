@@ -2,7 +2,7 @@ import { Button } from "../ui/button"
 import { Checkbox } from "../ui/checkbox"
 import { Input } from "../ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu"
-import { Filter, Calendar, Clock, Check, X } from "lucide-react"
+import { Filter, Calendar, Clock, Check, X, Mailbox, Van, VanIcon, LucideVan, DollarSign, BadgeDollarSign, Coins, Wallet, WalletCards, WalletMinimal, Wallet2, Smartphone, PhoneIncoming, WheatOff, MessageCircle, MessageCirclePlus, MessageCircleReply, MessageCircleMore, MessageCircleOff, MessageCircleCode, MessageCircleQuestionMark, MessageCircleQuestion } from "lucide-react"
 import * as React from "react"
 import { ColumnDef, RowData, Table } from "@tanstack/react-table"
 
@@ -11,7 +11,8 @@ interface FilterBarProps {
     onFiltersChange?: (filters: {
         periodo: 'dia' | 'semana' | 'mes' | 'todos',
         estados: string[],
-        pagado: (boolean | null)[]
+        pagado: (boolean | null)[],
+        mensaje: (boolean | null)[],
     }) => void
     onAddOrder?: () => void
 }
@@ -25,6 +26,7 @@ export function FilterBar({
     const [periodoTemporal, setPeriodoTemporal] = React.useState<'dia' | 'semana' | 'mes' | 'todos'>('semana')
     const [estadosFiltrados, setEstadosFiltrados] = React.useState<string[]>(["pendiente", "enviado"])
     const [pagadoFiltrado, setPagadoFiltrado] = React.useState<(boolean | null)[]>([true, false])
+    const [mensajeFiltrado, setMensajeFiltrado] = React.useState<(boolean | null)[]>([true, false])
 
     // busqueda por texto
     const [searchDireccion, setSearchDireccion] = React.useState("")
@@ -36,8 +38,9 @@ export function FilterBar({
             periodo: periodoTemporal,   
             estados: estadosFiltrados,
             pagado: pagadoFiltrado,
+            mensaje: mensajeFiltrado,
         })
-    }, [periodoTemporal, estadosFiltrados, pagadoFiltrado]) 
+    }, [periodoTemporal, estadosFiltrados, pagadoFiltrado, mensajeFiltrado]) 
 
     React.useEffect(() => {
         const timer = setTimeout(() => {
@@ -70,29 +73,41 @@ export function FilterBar({
         })
     }, [])
 
+    const toggleMensaje = React.useCallback((estado: boolean) => {
+        setMensajeFiltrado(prev => {
+            const filtered = prev.filter(v => v !== null) as boolean[]
+            return filtered.includes(estado)
+                ? filtered.filter(v => v !== estado)
+                : [...filtered, estado]
+        })        
+    }, [])
+
     return (
-        <div className="flex items-center gap-2">
-            <div className="flex gap-1 mr-2">
+        <div className="flex flex-wrap items-center gap-2 md:gap-3">
+            <div className="flex flex-wrap gap-1 mr-0 md:mr-2 w-full md:w-auto">
                 <Button
                     size="sm"
                     variant={periodoTemporal === 'dia' ? 'default' : 'outline'}
                     onClick={() => setPeriodoTemporal('dia')}
-                    className="gap-1"
+                    className="gap-1 text-xs md:text-sm"
                 >
                     <Calendar className="h-3 w-3" />
-                    Hoy
+                    <span className="hidden sm:inline">Hoy</span>
                 </Button>
                 <Button
                     size="sm"
                     variant={periodoTemporal === 'semana' ? 'default' : 'outline'}
                     onClick={() => setPeriodoTemporal('semana')}
+                    className="gap-1 text-xs md:text-sm"
                 >
-                    Semana
+                    <span className="hidden sm:inline">Semana</span>
+                    <span className="sm:hidden">Sem</span>
                 </Button>
                 <Button
                     size="sm"
                     variant={periodoTemporal === 'mes' ? 'default' : 'outline'}
                     onClick={() => setPeriodoTemporal('mes')}
+                    className="gap-1 text-xs md:text-sm"
                 >
                     Mes
                 </Button>
@@ -100,40 +115,46 @@ export function FilterBar({
                     size="sm"
                     variant={periodoTemporal === 'todos' ? 'default' : 'outline'}
                     onClick={() => setPeriodoTemporal('todos')}
+                    className="gap-1 text-xs md:text-sm"
                 >
-                    Todos
+                    <span className="hidden sm:inline">Todos</span>
+                    <span className="sm:hidden">Todo</span>
                 </Button>
             </div>
         
-            <div className="h-8 w-px bg-gray-300" />
+            <div className="hidden md:block h-8 w-px bg-gray-300" />
         
             <Input
-                placeholder="Buscar por dirección..."
+                placeholder="Dirección..."
                 value={searchDireccion}
                 onChange={(event) => setSearchDireccion(event.target.value)}
-                className="max-w-sm"
+                className="flex-1 min-w-[150px] md:max-w-sm text-sm"
             />
             <Input
-                placeholder="Buscar por teléfono..."
+                placeholder="Teléfono..."
                 value={searchTelefono}
                 onChange={(event) => setSearchTelefono(event.target.value)}
-                className="max-w-sm"
+                className="flex-1 min-w-[120px] md:max-w-sm text-sm"
             />
         
             <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="gap-2">
+                    <Button variant="outline" size="sm" className="gap-2 text-xs md:text-sm">
                         <Filter className="h-4 w-4" />
-                            Filtros
-                            {(estadosFiltrados.length < 3 || pagadoFiltrado.length < 2) && (
-                                <span className="ml-1 rounded-full bg-cyan-600 px-2 py-0.5 text-xs text-white">
-                                    {3 - estadosFiltrados.length + (2 - pagadoFiltrado.length)}
-                                </span>
-                            )}
+                        <span className="hidden sm:inline">Filtros</span>
+                        <span className="sm:hidden">F</span>
+                        {(estadosFiltrados.length < 3 || pagadoFiltrado.length < 2) && (
+                            <span className="ml-1 rounded-full bg-cyan-600 px-2 py-0.5 text-xs text-white">
+                                {3 - estadosFiltrados.length + (2 - pagadoFiltrado.length)}
+                            </span>
+                        )}
                     </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56">
-                    <DropdownMenuLabel>Estado del pedido</DropdownMenuLabel>
+                    <DropdownMenuLabel className="flex items-center gap-1">
+                        Estado del pedido
+                        <Van className="h-5 w-5" />
+                    </DropdownMenuLabel>
                     <div className="px-2 py-2 space-y-2">
                         <div className="flex items-center space-x-2">
                             <Checkbox
@@ -181,7 +202,10 @@ export function FilterBar({
                     
                     <DropdownMenuSeparator />
                     
-                    <DropdownMenuLabel>Estado de pago</DropdownMenuLabel>
+                    <DropdownMenuLabel className="flex items-center gap-1">                        
+                        Estado de pago
+                        <WalletMinimal className="h-4 w-4" />
+                    </DropdownMenuLabel>
                     <div className="px-2 py-2 space-y-2">
                         <div className="flex items-center space-x-2">
                             <Checkbox
@@ -191,8 +215,9 @@ export function FilterBar({
                             />
                             <label
                                 htmlFor="filter-pagado"
-                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
+                                <Check className="h-4 w-4 text-green-600" />
                                 Pagado
                                 </label>
                         </div>
@@ -204,20 +229,60 @@ export function FilterBar({
                             />
                             <label
                                 htmlFor="filter-no-pagado"
-                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
+                                <X className="h-4 w-4 text-red-600" />
                                 No pagado
                             </label>
                         </div>
                     </div>
+
+                    <DropdownMenuSeparator />
+
+                    <DropdownMenuLabel className="flex items-center gap-1">
+                        Estado de mensaje
+                        <MessageCircle className="h-4 w-4" />
+                    </DropdownMenuLabel>
+                    <div className="px-2 py-2 space-y-2">
+                        <div className="flex items-center space-x-2">
+                            <Checkbox
+                                id="filter-pagado"
+                                checked={mensajeFiltrado.includes(true)}
+                                onCheckedChange={() => toggleMensaje(true)}
+                            />
+                            <label
+                                htmlFor="filter-pagado"
+                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
+                            >
+                                <Check className="h-4 w-4 text-green-600" />
+                                Enviado
+                                </label>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            <Checkbox
+                                id="filter-no-pagado"
+                                checked={mensajeFiltrado.includes(false)}
+                                onCheckedChange={() => toggleMensaje(false)}
+                            />
+                            <label
+                                htmlFor="filter-no-pagado"
+                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
+                            >
+                                <X className="h-4 w-4 text-red-600" />
+                                No enviado
+                            </label>
+                        </div>
+                    </div>
+
                 </DropdownMenuContent>
             </DropdownMenu>
         
             <Button
                 onClick={onAddOrder}
-                className="ml-auto bg-cyan-600 hover:bg-cyan-700 text-white font-semibold"
+                className="w-full md:w-auto md:ml-auto bg-cyan-600 hover:bg-cyan-700 text-white font-semibold text-sm"
             >
-                + Agregar Pedido
+                <span className="hidden sm:inline">+ Agregar Pedido</span>
+                <span className="sm:hidden">+ Agregar</span>
             </Button>
         </div>
     )

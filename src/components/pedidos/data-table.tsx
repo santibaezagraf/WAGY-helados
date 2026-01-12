@@ -57,6 +57,7 @@ export function DataTable<TData, TValue>({
     periodo: 'semana' as 'dia' | 'semana' | 'mes' | 'todos',
     estados: ["pendiente", "enviado"] as string[],
     pagado: [true, false] as (boolean | null)[],
+    mensaje: [true, false] as (boolean | null)[],
   })
 
   // Aplicar filtros personalizados
@@ -67,6 +68,7 @@ export function DataTable<TData, TValue>({
       // Filtro por estado y pagado
       const cumpleEstado = filters.estados.length === 0 || filters.estados.includes(pedido.estado)
       const cumplePagado = filters.pagado.length === 0 || filters.pagado.includes(pedido.pagado)
+      const cumpleMensaje = filters.mensaje.length === 0 || filters.mensaje.includes(pedido.enviado)
       
       // Filtro temporal
       let cumpleTemporal = true
@@ -89,7 +91,7 @@ export function DataTable<TData, TValue>({
         }
       }
       
-      return cumpleEstado && cumplePagado && cumpleTemporal
+      return cumpleEstado && cumplePagado && cumpleMensaje && cumpleTemporal
     })
   }, [data, filters])
 
