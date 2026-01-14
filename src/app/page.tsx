@@ -1,6 +1,6 @@
 import { createClient } from '@/lib/supabase-server'
 import { redirect } from 'next/navigation'
-import { PedidosClient } from '@/components/pedidos/pedidos-client'
+import { DataTable } from '@/components/pedidos/data-table'
 import { Header } from '@/components/ui/header'
 
 
@@ -29,7 +29,7 @@ export default async function Home() {
             <Header />
             <main className="flex-1 p-6 sm:p-8 lg:p-12 bg-slate-50">
                 <div className="max-w-7xl mx-auto">
-                    <PedidosClient initialData={pedidos || []} />
+                    <DataTable data={pedidos || []} />
                 </div>
             </main>
         </div>

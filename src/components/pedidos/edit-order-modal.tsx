@@ -11,15 +11,16 @@ import { Pedido } from "@/types/pedidos"
 import { Check, Clock, X, IceCream, Droplet, Banknote, CreditCard } from "lucide-react"
 import { calcularPreciosUnitarios } from "@/lib/precio-utils"
 import { Logo } from "@/components/ui/logo"
+import { actualizarPedidoCompleto } from "@/lib/actions/pedidos"
+import { useRouter } from "next/navigation"
 
 interface EditOrderModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   pedido: Pedido
-  onOrderUpdated: () => void
 }
 
-export function EditOrderModal({ open, onOpenChange, pedido, onOrderUpdated }: EditOrderModalProps) {
+export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalProps) {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   
   // Estados con valores iniciales del pedido
@@ -41,6 +42,8 @@ export function EditOrderModal({ open, onOpenChange, pedido, onOrderUpdated }: E
   const [totalCremaManualStr, setTotalCremaManualStr] = React.useState<string>("")
   const [estado, setEstado] = React.useState<"pendiente" | "enviado" | "cancelado">("pendiente")
   const [pagado, setPagado] = React.useState(false)
+
+  const router = useRouter()
 
   // Actualizar estados cuando cambia el pedido o se abre el modal
   React.useEffect(() => {
@@ -111,36 +114,25 @@ export function EditOrderModal({ open, onOpenChange, pedido, onOrderUpdated }: E
     setIsSubmitting(true)
 
     try {
-      const supabase = createClient()
-      
-      const { error } = await supabase
-        .from("pedidos")
-        .update({
-          direccion,
-          telefono,
-          cantidad_agua: cantidadAgua,
-          cantidad_crema: cantidadCrema,
-          metodo_pago: metodoPago,
-          estado,
-          pagado,
-          costo_envio: costoEnvio,
-          aclaracion: aclaracion || null,
-          observaciones: observaciones || null,
-          monto_total_agua: parseInt(totalAgua || "0"),
-          monto_total_crema: parseInt(totalCrema || "0"),
-        })
-        .eq("id", pedido.id)
-
-      if (error) {
-        console.error("Error al actualizar pedido:", error)
-        alert("Error al actualizar el pedido: " + error.message)
-      } else {
-        onOpenChange(false)
-        onOrderUpdated()
-      }
+      await actualizarPedidoCompleto(pedido.id, {
+        direccion,
+        telefono,
+        cantidad_agua: cantidadAgua,
+        cantidad_crema: cantidadCrema,
+        metodo_pago: metodoPago,
+        estado,
+        pagado,
+        costo_envio: costoEnvio,
+        aclaracion: aclaracion || null,
+        observaciones: observaciones || null,
+        monto_total_agua: parseInt(totalAgua || "0"),
+        monto_total_crema: parseInt(totalCrema || "0"),
+      })
+      onOpenChange(false)
+      router.refresh()
     } catch (error) {
       console.error("Error:", error)
-      alert("Error inesperado al actualizar el pedido")
+      alert("Error al actualizar el pedido: " + (error as Error).message)
     } finally {
       setIsSubmitting(false)
     }

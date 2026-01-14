@@ -2,17 +2,18 @@ import { Button } from "../ui/button"
 import { MessageSquare, Copy, CheckCheck } from "lucide-react"
 import * as React from "react"
 import { createClient } from "@/lib/supabase-client"
+import { useRouter} from "next/navigation"
+import { actualizarEnviadoMasivo, actualizarEnviadoPedido } from "@/lib/actions/pedidos"
+
 
 interface MessageEditorProps {
   mensajes: { id: number; mensaje: string; enviado: boolean }[]
   onClose: () => void
-  onRefresh?: () => Promise<void>
 }
 
 export function MessageEditor({ 
   mensajes, 
   onClose, 
-  onRefresh 
 }: MessageEditorProps) {
   const editorWppRef = React.useRef<HTMLDivElement>(null)
   
@@ -21,6 +22,8 @@ export function MessageEditor({
   
   // Estado local: feedback visual de copiado
   const [copiados, setCopiados] = React.useState<Set<number>>(new Set())
+
+  const router = useRouter()
 
   // Sincronizar con props cuando cambian (por si se regeneran mensajes)
   React.useEffect(() => {
@@ -43,16 +46,16 @@ export function MessageEditor({
     
     // Si no estaba enviado, marcarlo como enviado en DB
     if (!enviado) {
-      const supabase = createClient()
-      const { error } = await supabase
-        .from("pedidos")
-        .update({ enviado: true })
-        .eq("id", id)
-      
-      if (error) {
+      try {
+        await actualizarEnviadoPedido(id, true)
+        // Actualizar estado local
+        setMensajesWpp(prev => 
+          prev.map(m => m.id === id ? { ...m, enviado: true } : m)
+        )
+        // Refrescar datos en el padre
+        router.refresh()
+      } catch (error) {
         console.error("Error al actualizar enviado:", error)
-      } else {
-        onRefresh?.()
       }
     }
     
@@ -64,7 +67,7 @@ export function MessageEditor({
         return newSet
       })
     }, 2000)
-  }, [onRefresh])
+  }, [])
 
   // Función local: copiar todos los mensajes
   const copiarTodos = React.useCallback(async () => {
@@ -74,23 +77,23 @@ export function MessageEditor({
 
     // Marcar todos como enviados en DB
     if (idsNoEnviados.length > 0) {
-      const supabase = createClient()
-      const { error } = await supabase
-        .from("pedidos")
-        .update({ enviado: true })
-        .in("id", idsNoEnviados)
-
-      if (error) {
-        console.error("Error al actualizar enviado:", error)
-      } else {
-        onRefresh?.()
+      try {
+        await actualizarEnviadoMasivo(idsNoEnviados, true)
+        // Actualizar estado local
+        setMensajesWpp(prev => 
+          prev.map(m => ({ ...m, enviado: true }))
+        )
+        // Refrescar datos en el padre
+        router.refresh()
+      } catch (error) {
+        console.error("Error al actualizar enviados masivamente:", error)
       }
     }
 
     // Copiar todos los mensajes concatenados
     const todosMensajes = mensajesWpp.map(m => m.mensaje).join('\n\n')
     navigator.clipboard.writeText(todosMensajes)
-  }, [mensajesWpp, onRefresh])
+  }, [mensajesWpp])
 
   // Función local: actualizar mensaje editado
   const actualizarMensaje = (id: number, nuevoMensaje: string) => {

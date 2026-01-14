@@ -10,9 +10,6 @@ export async function calcularPreciosUnitarios(
     cantidadCrema: number
 ): Promise<PrecioCalculado> {
     const supabase = createClient()
-    
-
-    console.log("Calculando precios para:", { cantidadAgua, cantidadCrema });
 
     // 1. Obtener la lista de precios activa
     const { data: listaActiva, error: errorLista } = await supabase
@@ -21,12 +18,6 @@ export async function calcularPreciosUnitarios(
         .eq("activa", true)
         .limit(1)
         .single();
-
-    // const listaActiva = listasActiva ? listasActiva[0] : null;
-
-    console.log("lista", listaActiva);
-
-
 
     if (errorLista) {
         throw new Error("Error al obtener la lista de precios activa: " + errorLista.message)
@@ -37,7 +28,7 @@ export async function calcularPreciosUnitarios(
     // 2. Obtener precio para AGUA
     let precioAgua = 0
     if (cantidadAgua > 0) {
-        const { data: reglaAgua, error: errorAgua } = await supabase
+        const { data: reglaAgua } = await supabase
             .from("reglas_precios")
             .select("precio_unitario")
             .eq("lista_id", listaActiva.id)
@@ -47,12 +38,8 @@ export async function calcularPreciosUnitarios(
             .limit(1)
             .single();
 
-        // if (errorAgua) {
-        //     throw new Error("Error al obtener la regla de precios para helados de agua: " + errorAgua.message)
-        // }
-
         if (!reglaAgua) {
-            const { data: reglaAgua, error: errorAgua } = await supabase
+            const { data: reglaAguaFallback, error: errorAgua } = await supabase
                 .from("reglas_precios")
                 .select("precio_unitario")
                 .eq("lista_id", listaActiva.id)
@@ -65,7 +52,7 @@ export async function calcularPreciosUnitarios(
                     throw new Error("Error al obtener la regla de precios para helados de agua: " + errorAgua.message)
                 }
 
-                precioAgua = reglaAgua ? reglaAgua.precio_unitario : 0;
+                precioAgua = reglaAguaFallback ? reglaAguaFallback.precio_unitario : 0;
         } else {
             precioAgua = reglaAgua.precio_unitario ;
         }
@@ -76,7 +63,7 @@ export async function calcularPreciosUnitarios(
     // 3. Obtener precio para CREMA
     let precioCrema = 0
     if (cantidadCrema > 0) {
-        const { data: reglaCrema, error: errorCrema } = await supabase
+        const { data: reglaCrema } = await supabase
             .from("reglas_precios")
             .select("precio_unitario")
             .eq("lista_id", listaActiva.id)
@@ -86,12 +73,8 @@ export async function calcularPreciosUnitarios(
             .limit(1)
             .single()
 
-        // if (errorCrema) {
-        //     throw new Error("Error al obtener la regla de precios para helados de crema: " + errorCrema.message)
-        // }
-
         if (!reglaCrema) {
-            const { data: reglaCrema, error: errorCrema } = await supabase
+            const { data: reglaCremaFallback, error: errorCrema } = await supabase
                 .from("reglas_precios")
                 .select("precio_unitario")
                 .eq("lista_id", listaActiva.id)
@@ -104,7 +87,7 @@ export async function calcularPreciosUnitarios(
                     throw new Error("Error al obtener la regla de precios para helados de crema: " + errorCrema.message)
                 }
 
-                precioCrema = reglaCrema ? reglaCrema.precio_unitario : 0;
+                precioCrema = reglaCremaFallback ? reglaCremaFallback.precio_unitario : 0;
         } else {
             precioCrema = reglaCrema.precio_unitario ;
         }
