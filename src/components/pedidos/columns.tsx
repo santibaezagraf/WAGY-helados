@@ -18,9 +18,14 @@ import {
     DropdownMenuSubTrigger,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { createClient } from "@/lib/supabase-client"
 import { EditOrderModal } from "./edit-order-modal"
 import { crearMensajeWpp } from "@/lib/mensaje-utils"
+import {
+    actualizarEstadoPedido,
+    actualizarPagadoPedido,
+    actualizarEnviadoPedido,
+} from "@/lib/actions/pedidos"
+import { useRouter } from "next/navigation"
 
 /**
  * Crea la configuración de columnas (ColumnDef<Pedido>[]) para la tabla de pedidos.
@@ -31,7 +36,7 @@ import { crearMensajeWpp } from "@/lib/mensaje-utils"
  * @param onRefresh - Callback opcional que se invoca tras actualizar un pedido para refrescar los datos.
  * @returns Un arreglo de ColumnDef<Pedido> que describe las columnas y sus celdas.
  */
-export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
+export const createColumns = (): ColumnDef<Pedido>[] => [
     {
         id: "select",
         header: ({ table }) => (
@@ -187,49 +192,35 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
         cell: ({ row }) => {
             const pedido = row.original
             const [editModalOpen, setEditModalOpen] = React.useState(false)
+            const router = useRouter()
             
             const actualizarEstado = async (nuevoEstado: string) => {
-                const supabase = createClient()
-                const { error } = await supabase
-                    .from("pedidos")
-                    .update({ estado: nuevoEstado })
-                    .eq("id", pedido.id)
-                
-                if (error) {
-                    console.error("Error al actualizar estado:", error)
+                try {
+                    await actualizarEstadoPedido(pedido.id, nuevoEstado)
+                    router.refresh()
+                } catch (error) {
+                    console.error(error)
                     alert("Error al actualizar el estado")
-                } else {
-                    onRefresh?.()
                 }
             }
 
             const actualizarPagado = async (pagado: boolean) => {
-                const supabase = createClient()
-                const { error } = await supabase
-                    .from("pedidos")
-                    .update({ pagado })
-                    .eq("id", pedido.id)
-                
-                if (error) {
-                    console.error("Error al actualizar pagado:", error)
+                try {
+                    await actualizarPagadoPedido(pedido.id, pagado)
+                    router.refresh()
+                } catch (error) {
+                    console.error(error)
                     alert("Error al actualizar el estado de pago")
-                } else {
-                    onRefresh?.()
                 }
             }
 
             const actualizarEnviado = async (enviado: boolean) => {
-                const supabase = createClient()
-                const { error } = await supabase
-                    .from("pedidos")
-                    .update({ enviado })
-                    .eq("id", pedido.id)
-                
-                if (error) {
-                    console.error("Error al actualizar enviado:", error)
+                try {
+                    await actualizarEnviadoPedido(pedido.id, enviado)
+                    router.refresh()
+                } catch (error) {
+                    console.error(error)
                     alert("Error al actualizar el estado de envío")
-                } else {
-                    onRefresh?.()
                 }
             }
         
@@ -239,7 +230,6 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
                         open={editModalOpen}
                         onOpenChange={setEditModalOpen}
                         pedido={pedido}
-                        onOrderUpdated={() => onRefresh?.()}
                     />
                     
                     <DropdownMenu>
@@ -335,12 +325,6 @@ export const createColumns = (onRefresh?: () => void): ColumnDef<Pedido>[] => [
                                     </DropdownMenuItem>
                                 </DropdownMenuSubContent>
                             </DropdownMenuSub>
-
-                            {/* <DropdownMenuSeparator /> */}
-                                
-                                
-                            
-                                
                             
                         </DropdownMenuContent>
                     </DropdownMenu>

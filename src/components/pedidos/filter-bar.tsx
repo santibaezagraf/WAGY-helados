@@ -40,7 +40,7 @@ export function FilterBar({
             pagado: pagadoFiltrado,
             mensaje: mensajeFiltrado,
         })
-    }, [periodoTemporal, estadosFiltrados, pagadoFiltrado, mensajeFiltrado]) 
+    }, [periodoTemporal, estadosFiltrados, pagadoFiltrado, mensajeFiltrado, onFiltersChange]) 
 
     React.useEffect(() => {
         const timer = setTimeout(() => {
@@ -143,9 +143,9 @@ export function FilterBar({
                         <Filter className="h-4 w-4" />
                         <span className="hidden sm:inline">Filtros</span>
                         <span className="sm:hidden">F</span>
-                        {(estadosFiltrados.length < 3 || pagadoFiltrado.length < 2) && (
+                        {(estadosFiltrados.length < 3 || pagadoFiltrado.length < 2 || mensajeFiltrado.length < 2) && (
                             <span className="ml-1 rounded-full bg-cyan-600 px-2 py-0.5 text-xs text-white">
-                                {3 - estadosFiltrados.length + (2 - pagadoFiltrado.length)}
+                                {3 - estadosFiltrados.length + (2 - pagadoFiltrado.length) + (2 - mensajeFiltrado.length)}
                             </span>
                         )}
                     </Button>
@@ -246,12 +246,12 @@ export function FilterBar({
                     <div className="px-2 py-2 space-y-2">
                         <div className="flex items-center space-x-2">
                             <Checkbox
-                                id="filter-pagado"
+                                id="filter-mensaje-enviado"
                                 checked={mensajeFiltrado.includes(true)}
                                 onCheckedChange={() => toggleMensaje(true)}
                             />
                             <label
-                                htmlFor="filter-pagado"
+                                htmlFor="filter-mensaje-enviado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
                                 <Check className="h-4 w-4 text-green-600" />
@@ -260,12 +260,12 @@ export function FilterBar({
                         </div>
                         <div className="flex items-center space-x-2">
                             <Checkbox
-                                id="filter-no-pagado"
+                                id="filter-mensaje-no-enviado"
                                 checked={mensajeFiltrado.includes(false)}
                                 onCheckedChange={() => toggleMensaje(false)}
                             />
                             <label
-                                htmlFor="filter-no-pagado"
+                                htmlFor="filter-mensaje-no-enviado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
                                 <X className="h-4 w-4 text-red-600" />

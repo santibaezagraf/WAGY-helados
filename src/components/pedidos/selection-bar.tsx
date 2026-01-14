@@ -1,14 +1,18 @@
 import { Button } from "@/components/ui/button"
-import { createClient } from "@/lib/supabase-client"
 import { Pedido } from "@/types/pedidos"
 import { Table } from "@tanstack/react-table"
 import { Check, Clock, MessageSquare, X } from "lucide-react"
 import * as React from "react"
+import {
+    actualizarEstadoMasivo,
+    actualizarPagadoMasivo,
+    actualizarEnviadoMasivo,
+} from "@/lib/actions/pedidos"
+import { useRouter } from "next/navigation"
 
 interface SelectionBarProps {
     selectedRowsCount: number
     table: Table<any>
-    onRefresh?: () => Promise<void>
     generarMensajesWpp: () => Promise<void>
     setRowSelection: (selection: {}) => void
 }
@@ -16,15 +20,13 @@ interface SelectionBarProps {
 export function SelectionBar({
     selectedRowsCount,
     table,
-    onRefresh,
     generarMensajesWpp,
     setRowSelection
 }: SelectionBarProps) {
 
-    /* ---- ACTUALIZACIONES MASIVAS ---- */
+    const router = useRouter()
 
-    const actualizarEstadoMasivo = React.useCallback(async (nuevoEstado: string) => {
-        const supabase = createClient()
+    const actualizarEstadoMasivoHandler = React.useCallback(async (nuevoEstado: string) => {
         const selectedRows = table.getFilteredSelectedRowModel().rows
         const idsAActualizar = selectedRows
             .filter(row => (row.original as Pedido).estado !== nuevoEstado)
@@ -35,24 +37,18 @@ export function SelectionBar({
             return
         }
         
-        const { error } = await supabase
-            .from("pedidos")
-            .update({ estado: nuevoEstado })
-            .in("id", idsAActualizar)
-        
-        if (error) {
-            console.error("Error al actualizar estados:", error)
-            alert("Error al actualizar los estados")
-        } else {
+        try {
+            await actualizarEstadoMasivo(idsAActualizar, nuevoEstado)
             setRowSelection({})
-            onRefresh?.()
+            router.refresh()
+        } catch (error) {
+            console.error(error)
+            alert("Error al actualizar los estados")
         }
-    }, [table, onRefresh])
+    }, [table, setRowSelection])
 
-    const actualizarPagadoMasivo = React.useCallback(async (pagado: boolean) => {
-        const supabase = createClient()
+    const actualizarPagadoMasivoHandler = React.useCallback(async (pagado: boolean) => {
         const selectedRows = table.getFilteredSelectedRowModel().rows
-
         const idsAActualizar = selectedRows
             .filter(row => (row.original as Pedido).pagado !== pagado)
             .map(row => (row.original as Pedido).id)
@@ -62,25 +58,18 @@ export function SelectionBar({
             return
         }
         
-        const { error } = await supabase
-            .from("pedidos")
-            .update({ pagado })
-            .in("id", idsAActualizar)
-        
-        if (error) {
-            console.error("Error al actualizar pagado:", error)
-            alert("Error al actualizar el estado de pago")
-        } else {
+        try {
+            await actualizarPagadoMasivo(idsAActualizar, pagado)
             setRowSelection({})
-            onRefresh?.()
+            router.refresh()
+        } catch (error) {
+            console.error(error)
+            alert("Error al actualizar el estado de pago")
         }
-    }, [table, onRefresh])
+    }, [table, setRowSelection])
 
-    const actualizarEnviadoMasivo = React.useCallback(async (enviado: boolean) => {
-        const supabase = createClient()
+    const actualizarEnviadoMasivoHandler = React.useCallback(async (enviado: boolean) => {
         const selectedRows = table.getFilteredSelectedRowModel().rows
-        
-        // Filtrar solo los que necesitan actualización
         const idsAActualizar = selectedRows
             .filter(row => (row.original as Pedido).enviado !== enviado)
             .map(row => (row.original as Pedido).id)
@@ -90,19 +79,15 @@ export function SelectionBar({
             return
         }
         
-        const { error } = await supabase
-            .from("pedidos")
-            .update({ enviado })
-            .in("id", idsAActualizar)
-        
-        if (error) {
-            console.error("Error al actualizar enviado:", error)
-            alert("Error al actualizar el estado de envío")
-        } else {
+        try {
+            await actualizarEnviadoMasivo(idsAActualizar, enviado)
             setRowSelection({})
-            onRefresh?.()
+            router.refresh()
+        } catch (error) {
+            console.error(error)
+            alert("Error al actualizar el estado de envío")
         }
-    }, [table, onRefresh])
+    }, [table, setRowSelection])
 
     return (
         <div className="bg-cyan-50 border border-cyan-300 rounded-lg p-3 sm:p-4 shadow-md">
@@ -129,7 +114,7 @@ export function SelectionBar({
                         <Button   
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarEstadoMasivo("pendiente")}
+                            onClick={() => actualizarEstadoMasivoHandler("pendiente")}
                             className="gap-1 border-gray-300 hover:bg-gray-50 text-xs sm:text-sm"
                         >
                             <Clock className="h-3 w-3 sm:h-4 sm:w-4 text-gray-500" />
@@ -138,7 +123,7 @@ export function SelectionBar({
                         <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarEstadoMasivo("enviado")}
+                            onClick={() => actualizarEstadoMasivoHandler("enviado")}
                             className="gap-1 border-green-300 hover:bg-green-50 text-xs sm:text-sm"
                         >
                             <Check className="h-3 w-3 sm:h-4 sm:w-4 text-green-600" />
@@ -147,7 +132,7 @@ export function SelectionBar({
                         <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarEstadoMasivo("cancelado")}
+                            onClick={() => actualizarEstadoMasivoHandler("cancelado")}
                             className="gap-1 border-red-300 hover:bg-red-50 text-xs sm:text-sm"
                         >
                             <X className="h-3 w-3 sm:h-4 sm:w-4 text-red-600" />
@@ -162,7 +147,7 @@ export function SelectionBar({
                         <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarPagadoMasivo(true)}
+                            onClick={() => actualizarPagadoMasivoHandler(true)}
                             className="border-green-300 hover:bg-green-50 text-xs sm:text-sm"
                         >
                             Pagado
@@ -170,7 +155,7 @@ export function SelectionBar({
                         <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarPagadoMasivo(false)}
+                            onClick={() => actualizarPagadoMasivoHandler(false)}
                             className="border-red-300 hover:bg-red-50 text-xs sm:text-sm"
                         >
                             No pagado
@@ -184,7 +169,7 @@ export function SelectionBar({
                         <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarEnviadoMasivo(true)}
+                            onClick={() => actualizarEnviadoMasivoHandler(true)}
                             className="border-cyan-300 hover:bg-cyan-50 text-xs sm:text-sm"
                         >
                             Wpp Enviado
@@ -192,7 +177,7 @@ export function SelectionBar({
                         <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => actualizarEnviadoMasivo(false)}
+                            onClick={() => actualizarEnviadoMasivoHandler(false)}
                             className="border-slate-300 hover:bg-slate-50 text-xs sm:text-sm"
                         >
                             Wpp no enviado

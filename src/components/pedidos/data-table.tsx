@@ -30,18 +30,16 @@ import { crearMensajeWpp } from "@/lib/mensaje-utils"
 import { SelectionBar } from "./selection-bar"
 import { FilterBar } from "./filter-bar"
 import { MessageEditor } from "./message-editor"
+import { createColumns } from "@/components/pedidos/columns"
 
-interface DataTableProps<TData, TValue> {
-  columns: ColumnDef<TData, TValue>[]
-  data: TData[]
-  onRefresh?: () => Promise<void>
+interface DataTableProps {
+  data: Pedido[]
 }
 
-export function DataTable<TData, TValue>({
-  columns,
+export function DataTable({
   data,
-  onRefresh,
-}: DataTableProps<TData, TValue>) {
+}: DataTableProps) {
+  const columns = React.useMemo(() => createColumns(), [])
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
   const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
@@ -52,13 +50,16 @@ export function DataTable<TData, TValue>({
   const [mostrarEditorWpp, setMostrarEditorWpp] = React.useState(false)
   const [mensajesWpp, setMensajesWpp] = React.useState<{id: number, mensaje: string, enviado: boolean}[]>([])
   
-  
+  // Estados para filtros personalizados
   const [filters, setFilters] = React.useState({
     periodo: 'semana' as 'dia' | 'semana' | 'mes' | 'todos',
     estados: ["pendiente", "enviado"] as string[],
     pagado: [true, false] as (boolean | null)[],
     mensaje: [true, false] as (boolean | null)[],
   })
+
+  // Estado para la paginación y el cambio de indice
+  const [pagination, setPagination] = React.useState({ pageIndex: 0, pageSize: 20 })
 
   // Aplicar filtros personalizados
   const filteredData = React.useMemo(() => {
@@ -106,16 +107,15 @@ export function DataTable<TData, TValue>({
     getFilteredRowModel: getFilteredRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
+    onPaginationChange: setPagination,
     state: {
       sorting,
       columnFilters,
       columnVisibility,
       rowSelection,
-      pagination: {
-        pageIndex: 0,
-        pageSize: 20,
-      },
-    }
+      pagination,
+    },
+
   })
 
   const selectedRowsCount = Object.keys(rowSelection).length
@@ -142,7 +142,6 @@ export function DataTable<TData, TValue>({
         <SelectionBar
           selectedRowsCount={selectedRowsCount}
           table={table}
-          onRefresh={onRefresh}
           generarMensajesWpp={generarMensajesWpp}
           setRowSelection={setRowSelection}
         />
@@ -203,8 +202,27 @@ export function DataTable<TData, TValue>({
       
       <div className="flex items-center justify-between space-x-2 py-4">
         <div className="text-sm text-muted-foreground">
-          {table.getFilteredRowModel().rows.length} pedido(s) total(es)
+          {'Mostrando '}
+          
+          <select
+            className="text-sm text-muted-foreground"
+            value={table.getState().pagination.pageSize} // Lee el valor del estado
+            onChange={e => {
+              table.setPageSize(Number(e.target.value)) // <--- ESTA ES LA FUNCIÓN CLAVE
+            }}
+          >
+            {[10, 20, 30, 40, 50].map(pageSize => (
+              <option key={pageSize} value={pageSize}>
+                {pageSize}
+              </option>
+            ))}
+          </select>
+
+          {' pedidos por página.'}
         </div>
+        
+        
+
         <div className="flex items-center space-x-2">
           <Button
             variant="outline"
@@ -226,6 +244,8 @@ export function DataTable<TData, TValue>({
           >
             Siguiente
           </Button>
+
+          
         </div>
       </div>
 
@@ -234,18 +254,12 @@ export function DataTable<TData, TValue>({
         <MessageEditor
           mensajes={mensajesWpp}
           onClose={() => setMostrarEditorWpp(false)}
-          onRefresh={onRefresh}
         />
       )}
 
       <AddOrderModal
         open={isAddModalOpen}
         onOpenChange={setIsAddModalOpen}
-        onOrderAdded={() => {
-          if (onRefresh) {
-            onRefresh()
-          }
-        }}
       />
     </div>
   )

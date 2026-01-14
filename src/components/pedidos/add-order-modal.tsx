@@ -11,14 +11,15 @@ import { calcularPreciosUnitarios } from "@/lib/precio-utils"
 import { PedidoInsert } from "@/types/pedidos"
 import { IceCream, Droplet, Banknote, CreditCard, AlertCircle } from "lucide-react"
 import { Logo } from "@/components/ui/logo"
+import { crearPedido } from "@/lib/actions/pedidos"
+import { useRouter } from "next/navigation"
 
 interface AddOrderModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onOrderAdded: () => void
 }
 
-export function AddOrderModal({ open, onOpenChange, onOrderAdded }: AddOrderModalProps) {
+export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
   const [step, setStep] = React.useState(1)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [isCalculating, setIsCalculating] = React.useState(false)
@@ -42,7 +43,6 @@ export function AddOrderModal({ open, onOpenChange, onOrderAdded }: AddOrderModa
   const [totalAguaManualStr, setTotalAguaManualStr] = React.useState<string>("")
   const [totalCremaManualStr, setTotalCremaManualStr] = React.useState<string>("")
 
-  
   // Step 2: Detalles
   const [direccion, setDireccion] = React.useState("")
   const [telefono, setTelefono] = React.useState("")
@@ -63,6 +63,8 @@ export function AddOrderModal({ open, onOpenChange, onOrderAdded }: AddOrderModa
 
   const subtotal = parseInt(totalCrema || "0") + parseInt(totalAgua || "0")
   const total = subtotal - costoEnvio
+
+  const router = useRouter()
 
   React.useEffect(() => {
     const timeoutId = setTimeout(async () => {
@@ -136,35 +138,24 @@ export function AddOrderModal({ open, onOpenChange, onOrderAdded }: AddOrderModa
     setIsSubmitting(true)
 
     try {
-      const supabase = createClient()
-      
-      const nuevoPedido: PedidoInsert = {
+      await crearPedido({
         direccion,
         telefono,
         cantidad_agua: cantidadAgua,
         cantidad_crema: cantidadCrema,
         metodo_pago: metodoPago,
-        estado: "pendiente",
         costo_envio: costoEnvio,
         aclaracion: aclaracion || null,
         observaciones: observaciones || null,
         monto_total_agua: parseInt(totalAgua || "0"),
         monto_total_crema: parseInt(totalCrema || "0"),
-      }
-
-      const { error } = await supabase.from("pedidos").insert([nuevoPedido])
-
-      if (error) {
-        console.error("Error al crear pedido:", error)
-        alert("Error al crear el pedido: " + error.message)
-      } else {
-        resetForm()
-        onOpenChange(false)
-        onOrderAdded()
-      }
+      })
+      resetForm()
+      onOpenChange(false)
+      router.refresh()
     } catch (error) {
       console.error("Error:", error)
-      alert("Error inesperado al crear el pedido")
+      alert("Error al crear el pedido: " + (error as Error).message)
     } finally {
       setIsSubmitting(false)
     }
