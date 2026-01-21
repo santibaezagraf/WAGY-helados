@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { createClient } from "@/lib/supabase-client"
-import { calcularPreciosUnitarios } from "@/lib/precio-utils"
+import { calcularPreciosUnitarios, obtenerReglasListaActiva, ReglaPrecios } from "@/lib/precio-utils"
 import { PedidoInsert } from "@/types/pedidos"
 import { IceCream, Droplet, Banknote, CreditCard, AlertCircle } from "lucide-react"
 import { Logo } from "@/components/ui/logo"
@@ -24,7 +24,11 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [isCalculating, setIsCalculating] = React.useState(false)
 
-    // Precios unitarios dinámicos
+  //Estado para las reglas
+  const [reglas, setReglas] = React.useState<ReglaPrecios[]>([])
+  // const [errorPrecios, setErrorPrecios] = React.useState<string | null>(null)
+
+  // Precios unitarios dinámicos
   const [precioUnitarioAgua, setPrecioUnitarioAgua] = React.useState(0)
   const [precioUnitarioCrema, setPrecioUnitarioCrema] = React.useState(0)
   const [errorPrecios, setErrorPrecios] = React.useState<string | null>(null)
@@ -66,7 +70,38 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
 
   const router = useRouter()
 
+  // Cargar reglas de precios al abrir el modal
   React.useEffect(() => {
+    if (!open) return
+
+    const cargarReglas = async () => {
+      try {
+        setIsCalculating(true)
+        setErrorPrecios(null)
+
+        const reglasObtenidas = await obtenerReglasListaActiva()
+        setReglas(reglasObtenidas)
+      } catch (error) {
+        console.error("Error al obtener reglas de precios:", error)
+        setErrorPrecios(error instanceof Error ? error.message : "Error desconocido al obtener reglas de precios")
+        setReglas([])
+      } finally {
+        setIsCalculating(false)
+      }
+    }
+
+    cargarReglas()
+  }, [open])
+
+
+  React.useEffect(() => {
+    if (reglas.length === 0) {
+      setPrecioUnitarioAgua(0)
+      setPrecioUnitarioCrema(0)
+      setErrorPrecios("No se pueden calcular los precios sin reglas de precios.")
+      return
+    }
+
     const timeoutId = setTimeout(async () => {
       if (cantidadAgua === 0 && cantidadCrema === 0) {
         setPrecioUnitarioAgua(0)
@@ -81,7 +116,7 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
       try {
         console.log("Calculando precios para:", { cantidadAgua, cantidadCrema });
 
-        const precios = await calcularPreciosUnitarios(cantidadAgua, cantidadCrema)
+        const precios = calcularPreciosUnitarios(cantidadAgua, cantidadCrema, reglas)
         setPrecioUnitarioAgua(precios.precioAgua)
         setPrecioUnitarioCrema(precios.precioCrema)
       } catch (error) {
@@ -92,10 +127,10 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
       } finally {
         setIsCalculating(false)
       }
-    }, 500)
+    }, 300)
 
     return () => clearTimeout(timeoutId)
-  }, [cantidadAgua, cantidadCrema])
+  }, [cantidadAgua, cantidadCrema, reglas])
 
   const resetForm = () => {
     setStep(1)
@@ -225,6 +260,22 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
                   +
                 </Button>
               </div>
+              <div className="flex gap-2 mt-4 flex-wrap justify-center">
+                <button
+                  type="button"
+                  onClick={() => setCantidadCremaStr('30')}
+                  className="px-3 py-1 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                >
+                  30
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCantidadCremaStr('60')}
+                  className="px-3 py-1 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                >
+                  60
+                </button>
+              </div>
               {cantidadCrema > 0 && (
                 <div className="mt-3 text-center text-base sm:text-lg font-semibold text-slate-700">
                   Subtotal: ${totalCrema}
@@ -279,6 +330,29 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
                 >
                   +
                 </Button>
+              </div>
+              <div className="flex gap-2 mt-4 flex-wrap justify-center">
+                <button
+                  type="button"
+                  onClick={() => setCantidadAguaStr('50')}
+                  className="px-3 py-1 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                >
+                  50
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCantidadAguaStr('100')}
+                  className="px-3 py-1 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                >
+                  100
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCantidadAguaStr('200')}
+                  className="px-3 py-1 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                >
+                  200
+                </button>
               </div>
               {cantidadAgua > 0 && (
                 <div className="mt-3 text-center text-base sm:text-lg font-semibold text-slate-700">

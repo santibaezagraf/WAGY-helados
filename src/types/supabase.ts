@@ -7,10 +7,30 @@ export type Json =
   | Json[]
 
 export type Database = {
-  // Allows to automatically instantiate createClient with right options
-  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
-  __InternalSupabase: {
-    PostgrestVersion: "14.1"
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
   }
   public: {
     Tables: {
@@ -46,13 +66,13 @@ export type Database = {
           enviado: boolean
           es_cambio_manual: boolean | null
           estado: string
-          ganancia: number | null
           id: number
           metodo_pago: string
           monto_total_agua: number | null
           monto_total_crema: number | null
           observaciones: string | null
           pagado: boolean | null
+          precio_total: number | null
           precio_unitario_agua: number | null
           precio_unitario_crema: number | null
           telefono: string
@@ -68,13 +88,13 @@ export type Database = {
           enviado?: boolean
           es_cambio_manual?: boolean | null
           estado?: string
-          ganancia?: number | null
           id?: number
           metodo_pago: string
           monto_total_agua?: number | null
           monto_total_crema?: number | null
           observaciones?: string | null
           pagado?: boolean | null
+          precio_total?: number | null
           precio_unitario_agua?: number | null
           precio_unitario_crema?: number | null
           telefono: string
@@ -90,13 +110,13 @@ export type Database = {
           enviado?: boolean
           es_cambio_manual?: boolean | null
           estado?: string
-          ganancia?: number | null
           id?: number
           metodo_pago?: string
           monto_total_agua?: number | null
           monto_total_crema?: number | null
           observaciones?: string | null
           pagado?: boolean | null
+          precio_total?: number | null
           precio_unitario_agua?: number | null
           precio_unitario_crema?: number | null
           telefono?: string
@@ -270,7 +290,11 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },
 } as const
+

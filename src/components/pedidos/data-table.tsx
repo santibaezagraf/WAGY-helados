@@ -31,13 +31,64 @@ import { SelectionBar } from "./selection-bar"
 import { FilterBar } from "./filter-bar"
 import { MessageEditor } from "./message-editor"
 import { createColumns } from "@/components/pedidos/columns"
+import { useRouter, useSearchParams, usePathname } from "next/navigation"
+
+type FilterPeriodo = 'dia' | 'semana' | 'mes' | 'todos'
+
+export interface Filters {
+  periodo: FilterPeriodo,
+  estados: string[]
+  pagado: (boolean | null)[]
+  enviado: (boolean | null)[]
+  direccion?: string
+  telefono?: string
+}
+
+const defaultFilters: Filters = {
+  periodo: 'semana',
+  estados: ["pendiente", "enviado"],
+  pagado: [true, false],
+  enviado: [true, false],
+  direccion: '',
+  telefono: '',
+}
+
+const areFiltersEqual = (f1: Filters, f2: Filters) => {
+  return (
+    f1.periodo === f2.periodo &&
+    f1.estados.join() === f2.estados.join() &&
+    f1.pagado.join() === f2.pagado.join() &&
+    f1.enviado.join() === f2.enviado.join() &&
+    f1.direccion === f2.direccion &&
+    f1.telefono === f2.telefono
+  )
+}
+
+const parseFiltersFromUrl = (searchParams: URLSearchParams): Filters => {
+  return {
+    periodo: (searchParams.get('periodo') || defaultFilters.periodo) as FilterPeriodo,
+    estados: searchParams.get('estado')?.split(',') || defaultFilters.estados,
+    pagado: searchParams.get('pagado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.pagado,
+    enviado: searchParams.get('enviado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.enviado,
+    direccion: searchParams.get('direccion') || defaultFilters.direccion,
+    telefono: searchParams.get('telefono') || defaultFilters.telefono,
+  }
+}
 
 interface DataTableProps {
-  data: Pedido[]
+  data: Pedido[],
+  pageIndex: number,
+  pageSize: number,
+  pageCount: number,
+  rowCount: number,
 }
 
 export function DataTable({
   data,
+  pageIndex,
+  pageSize,
+  pageCount,
+  rowCount
 }: DataTableProps) {
   const columns = React.useMemo(() => createColumns(), [])
   const [sorting, setSorting] = React.useState<SortingState>([])
@@ -49,56 +100,79 @@ export function DataTable({
   // Estados para mensajes de WhatsApp
   const [mostrarEditorWpp, setMostrarEditorWpp] = React.useState(false)
   const [mensajesWpp, setMensajesWpp] = React.useState<{id: number, mensaje: string, enviado: boolean}[]>([])
-  
-  // Estados para filtros personalizados
-  const [filters, setFilters] = React.useState({
-    periodo: 'semana' as 'dia' | 'semana' | 'mes' | 'todos',
-    estados: ["pendiente", "enviado"] as string[],
-    pagado: [true, false] as (boolean | null)[],
-    mensaje: [true, false] as (boolean | null)[],
-  })
 
-  // Estado para la paginación y el cambio de indice
-  const [pagination, setPagination] = React.useState({ pageIndex: 0, pageSize: 20 })
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const pathname = usePathname()
 
-  // Aplicar filtros personalizados
-  const filteredData = React.useMemo(() => {
-    const ahora = new Date()
+  // Estado para filtros personalizados
+  const [filters, setFilters] = React.useState<Filters>(() => parseFiltersFromUrl(searchParams))
+
+  const onPaginationChange = React.useCallback((updaterOrValue: any) => {
+    // TanStack devuelve una función o un valor, hay que resolverlo
+    const previousState = { pageIndex, pageSize, rowCount }
+    const nextState = typeof updaterOrValue === 'function'
+      ? updaterOrValue(previousState)
+      : updaterOrValue
+
+    const nextIndex = nextState.pageIndex + 1
+    const nextSize = nextState.pageSize
+
+    const currentIndex = Number(searchParams.get('page') ?? pageIndex + 1) // previousState.pageIndex + 1
+    const currentSize = Number(searchParams.get('limit') ?? pageSize) // previousState.pageSize
+
+    if (nextIndex === currentIndex && nextSize === currentSize) return
+
+    // Construimos la nueva URL
+    const params = new URLSearchParams(searchParams.toString())
+    params.set('page', nextIndex.toString())
+    params.set('limit', nextSize.toString())
+
+    // Navegamos (esto recargará los datos en el servidor automáticamente)
+    router.push(`${pathname}?${params.toString()}`)
+  }, [searchParams, pathname, router, pageIndex, pageSize])
+
+  const onFiltersChange = React.useCallback((newFilters: typeof filters) => {
+    if (areFiltersEqual(newFilters, filters)) return
+
+    setFilters(newFilters)
     
-    return data.filter((pedido: any) => {
-      // Filtro por estado y pagado
-      const cumpleEstado = filters.estados.length === 0 || filters.estados.includes(pedido.estado)
-      const cumplePagado = filters.pagado.length === 0 || filters.pagado.includes(pedido.pagado)
-      const cumpleMensaje = filters.mensaje.length === 0 || filters.mensaje.includes(pedido.enviado)
-      
-      // Filtro temporal
-      let cumpleTemporal = true
-      if (filters.periodo !== 'todos') {
-        const fechaPedido = new Date(pedido.created_at)
-        
-        if (filters.periodo === 'dia') {
-          // Mismo día
-          cumpleTemporal = fechaPedido.toDateString() === ahora.toDateString()
-        } else if (filters.periodo === 'semana') {
-          // Últimos 7 días
-          const hace7Dias = new Date(ahora)
-          hace7Dias.setDate(ahora.getDate() - 7)
-          cumpleTemporal = fechaPedido >= hace7Dias
-        } else if (filters.periodo === 'mes') {
-          // Último mes
-          const haceUnMes = new Date(ahora)
-          haceUnMes.setMonth(ahora.getMonth() - 1)
-          cumpleTemporal = fechaPedido >= haceUnMes
-        }
-      }
-      
-      return cumpleEstado && cumplePagado && cumpleMensaje && cumpleTemporal
-    })
-  }, [data, filters])
+    // Construir URL con filtros
+    const params = new URLSearchParams(searchParams.toString())
+    params.set('page', '1') // Volver a página 1 al filtrar
+
+    params.set('estado', newFilters.estados.join(','))
+    params.set('pagado', newFilters.pagado.join(','))
+    params.set('enviado', newFilters.enviado.join(','))
+    params.set('periodo', newFilters.periodo)
+
+    // Manejo de Dirección
+    if (newFilters.direccion) {
+        params.set('direccion', newFilters.direccion)
+    } else {
+        params.delete('direccion')
+    }
+    // Manejo de Teléfono
+    if (newFilters.telefono) {
+        params.set('telefono', newFilters.telefono)
+    } else {
+        params.delete('telefono')
+    }
+    
+    router.push(`${pathname}?${params.toString()}`)
+  }, [searchParams, pathname, router, filters])
+
+
+  React.useEffect(() => {
+    const urlFilters = parseFiltersFromUrl(searchParams)
+    setFilters(urlFilters)
+  }, [searchParams])
 
   const table = useReactTable({
-    data: filteredData,
+    data: data,
     columns,
+    pageCount,
+    manualPagination: true,
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     onSortingChange: setSorting,
@@ -107,13 +181,16 @@ export function DataTable({
     getFilteredRowModel: getFilteredRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
-    onPaginationChange: setPagination,
+    onPaginationChange: onPaginationChange,
     state: {
       sorting,
       columnFilters,
       columnVisibility,
       rowSelection,
-      pagination,
+      pagination: {
+        pageIndex,
+        pageSize,
+      },
     },
 
   })
@@ -150,8 +227,9 @@ export function DataTable({
       
       <FilterBar
         table={table}
-        onFiltersChange={setFilters}
+        onFiltersChange={onFiltersChange}
         onAddOrder={() => setIsAddModalOpen(true)}
+        currentFilters={filters}
       />
       
       {/* ---- TABLA ---- */}
@@ -206,9 +284,9 @@ export function DataTable({
           
           <select
             className="text-sm text-muted-foreground"
-            value={table.getState().pagination.pageSize} // Lee el valor del estado
+            value={table.getState().pagination.pageSize}
             onChange={e => {
-              table.setPageSize(Number(e.target.value)) // <--- ESTA ES LA FUNCIÓN CLAVE
+              table.setPageSize(Number(e.target.value)) 
             }}
           >
             {[10, 20, 30, 40, 50].map(pageSize => (
@@ -233,8 +311,7 @@ export function DataTable({
             Anterior
           </Button>
           <div className="text-sm font-medium">
-            Página {table.getState().pagination.pageIndex + 1} de{" "}
-            {table.getPageCount()}
+            Página {table.getPageCount() === 0 ? 0 : table.getState().pagination.pageIndex + 1} de {table.getPageCount() }
           </div>
           <Button
             variant="outline"
