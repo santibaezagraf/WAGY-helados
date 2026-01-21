@@ -129,46 +129,72 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                 </Badge>
             )
 
-                },
-                },
-                {
-                accessorKey: "pagado",
-                header: "Pagado",
-                cell: ({ row }) => {
-                    const pagado = row.getValue("pagado") as boolean
-                    return (
-                    <div className="flex items-center justify-center">
-                        <Badge 
-                            variant="outline"
-                            className={`flex items-center justify-center w-8 h-6 ${pagado ? 'bg-green-100' : 'bg-red-100'}`}
-                        >
-                            {pagado ? <Check className="text-green-600 h-6 w-6 stroke-[5]" /> : <X className="text-red-600 h-6 w-6 stroke-[5]" />}
-                        </Badge>
-                    </div>
-                    )
-                },
-                },
-                {
-                accessorKey: "ganancia",
-                header: ({ column }) => {
-        return (
-            <Button
-                variant="ghost"
-                onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-            >
-                Ganancia
-            <ArrowUpDown className="ml-2 h-4 w-4" />
-            </Button>
-        )
         },
+    },
+    {
+        accessorKey: "pagado",
+        header: "Pagado",
         cell: ({ row }) => {
-            const ganancia = parseFloat(row.getValue("ganancia"))
+            const pagado = row.getValue("pagado") as boolean
+            return (
+                <div className="flex items-center justify-center">
+                    <Badge 
+                        variant="outline"
+                        className={`flex items-center justify-center w-8 h-6 ${pagado ? 'bg-green-100' : 'bg-red-100'}`}
+                    >
+                        {pagado ? <Check className="text-green-600 h-6 w-6 stroke-[5]" /> : <X className="text-red-600 h-6 w-6 stroke-[5]" />}
+                    </Badge>
+                </div>
+            )
+        },
+    },
+    // {
+    //             accessorKey: "ganancia",
+    //             header: ({ column }) => {
+    //     return (
+    //         <Button
+    //             variant="ghost"
+    //             onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+    //         >
+    //             Ganancia
+    //         <ArrowUpDown className="ml-2 h-4 w-4" />
+    //         </Button>
+    //     )
+    //     },
+    //     cell: ({ row }) => {
+    //         const ganancia = parseFloat(row.getValue("ganancia"))
+    //         const formatted = new Intl.NumberFormat("es-AR", {
+    //             style: "currency",
+    //             currency: "ARS",
+    //         }).format(ganancia)
+    //         return <div className="font-medium">{formatted}</div>
+    //     },
+    // },
+    {
+        accessorKey: "precio_total",
+        header: "Precio",
+        cell: ({ row }) => {
+            const precio = parseFloat(row.getValue("precio_total") || "0")
             const formatted = new Intl.NumberFormat("es-AR", {
                 style: "currency",
                 currency: "ARS",
-            }).format(ganancia)
+            }).format(precio)
             return <div className="font-medium">{formatted}</div>
-        },
+
+        }
+    },
+    {
+        accessorKey: "costo_envio",
+        header: "Costo de Envío",
+        cell: ({ row }) => {
+            const precio = parseFloat(row.getValue("costo_envio") || "0")
+            const formatted = new Intl.NumberFormat("es-AR", {
+                style: "currency",
+                currency: "ARS",
+            }).format(precio)
+            return <div className="font-medium">{formatted}</div>
+
+        }
     },
     {
         accessorKey: "enviado",
@@ -194,7 +220,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
             const [editModalOpen, setEditModalOpen] = React.useState(false)
             const router = useRouter()
             
-            const actualizarEstado = async (nuevoEstado: string) => {
+            const actualizarEstado = React.useCallback(async (nuevoEstado: string) => {
                 try {
                     await actualizarEstadoPedido(pedido.id, nuevoEstado)
                     router.refresh()
@@ -202,9 +228,9 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                     console.error(error)
                     alert("Error al actualizar el estado")
                 }
-            }
+            }, [pedido.id, router])
 
-            const actualizarPagado = async (pagado: boolean) => {
+            const actualizarPagado = React.useCallback(async (pagado: boolean) => {
                 try {
                     await actualizarPagadoPedido(pedido.id, pagado)
                     router.refresh()
@@ -212,9 +238,9 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                     console.error(error)
                     alert("Error al actualizar el estado de pago")
                 }
-            }
+            }, [pedido.id, router])
 
-            const actualizarEnviado = async (enviado: boolean) => {
+            const actualizarEnviado = React.useCallback(async (enviado: boolean) => {
                 try {
                     await actualizarEnviadoPedido(pedido.id, enviado)
                     router.refresh()
@@ -222,7 +248,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                     console.error(error)
                     alert("Error al actualizar el estado de envío")
                 }
-            }
+            }, [pedido.id, router])
         
             return (
                 <>
@@ -291,18 +317,22 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                             </DropdownMenuSub>
 
                             <DropdownMenuSub>
-                                <DropdownMenuSubTrigger>Marcar como</DropdownMenuSubTrigger>
+                                <DropdownMenuSubTrigger>Marcar pago como</DropdownMenuSubTrigger>
                                 <DropdownMenuSubContent>
                                     <DropdownMenuItem 
                                         onClick={() => actualizarPagado(true)}
                                         disabled={pedido.pagado === true}
+                                        className="gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800"
                                     >
+                                        <Check className="h-4 w-4" />
                                         Pagado
                                     </DropdownMenuItem>
                                     <DropdownMenuItem 
                                         onClick={() => actualizarPagado(false)}
                                         disabled={pedido.pagado === false}
+                                        className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800"
                                     >
+                                        <X className="h-4 w-4" />
                                         No pagado
                                     </DropdownMenuItem>
                                 </DropdownMenuSubContent>
@@ -314,13 +344,17 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                                     <DropdownMenuItem 
                                         onClick={() => actualizarEnviado(true)}
                                         disabled={pedido.enviado === true}
+                                        className="gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800"
                                     >
+                                        <Check className="h-4 w-4" />
                                         Enviado
                                     </DropdownMenuItem>
                                     <DropdownMenuItem 
                                         onClick={() => actualizarEnviado(false)}
                                         disabled={pedido.enviado === false}
+                                        className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800"
                                     >
+                                        <X className="h-4 w-4" />
                                         No enviado
                                     </DropdownMenuItem>
                                 </DropdownMenuSubContent>

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { createClient } from "@/lib/supabase-client"
 import { Pedido } from "@/types/pedidos"
 import { Check, Clock, X, IceCream, Droplet, Banknote, CreditCard } from "lucide-react"
-import { calcularPreciosUnitarios } from "@/lib/precio-utils"
+import { calcularPreciosUnitarios, obtenerReglasListaActiva, ReglaPrecios } from "@/lib/precio-utils"
 import { Logo } from "@/components/ui/logo"
 import { actualizarPedidoCompleto } from "@/lib/actions/pedidos"
 import { useRouter } from "next/navigation"
@@ -43,10 +43,14 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
   const [estado, setEstado] = React.useState<"pendiente" | "enviado" | "cancelado">("pendiente")
   const [pagado, setPagado] = React.useState(false)
 
+  // Estado para las reglas de precios
+  const [reglas, setReglas] = React.useState<ReglaPrecios[]>([])
+
   const router = useRouter()
 
   // Actualizar estados cuando cambia el pedido o se abre el modal
   React.useEffect(() => {
+
     if (open) {
       setCantidadCremaStr(pedido.cantidad_crema.toString())
       setCantidadAguaStr(pedido.cantidad_agua.toString())
@@ -64,7 +68,20 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
       setPagado(pedido.pagado || false)
       setTotalAguaEditado(true)
       setTotalCremaEditado(true)
-    }
+
+      const cargarReglas = async () => {
+        try {
+            const reglasObtenidas = await obtenerReglasListaActiva()
+            setReglas(reglasObtenidas)
+        } catch (error) {
+            console.error("Error al obtener reglas de precios:", error)
+            setReglas([])
+        }
+      }
+
+      cargarReglas()
+
+    } else return
   }, [pedido, open])
 
   const cantidadCrema = parseInt(cantidadCremaStr) || 0
@@ -90,7 +107,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
         }
 
         try {
-            const precios = await calcularPreciosUnitarios(cantidadAgua, cantidadCrema)
+            const precios = calcularPreciosUnitarios(cantidadAgua, cantidadCrema, reglas)
             setPrecioUnitarioAgua(precios.precioAgua)
             setPrecioUnitarioCrema(precios.precioCrema)
         } catch (error) {
@@ -101,7 +118,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
     }, 500)
 
     return () => clearTimeout(timeoutId)
-  }, [cantidadAgua, cantidadCrema])
+  }, [cantidadAgua, cantidadCrema, reglas])
 
   
 

@@ -67,7 +67,7 @@ export function MessageEditor({
         return newSet
       })
     }, 2000)
-  }, [])
+  }, [router])
 
   // Función local: copiar todos los mensajes
   const copiarTodos = React.useCallback(async () => {
@@ -93,7 +93,7 @@ export function MessageEditor({
     // Copiar todos los mensajes concatenados
     const todosMensajes = mensajesWpp.map(m => m.mensaje).join('\n\n')
     navigator.clipboard.writeText(todosMensajes)
-  }, [mensajesWpp])
+  }, [mensajesWpp, router])
 
   // Función local: actualizar mensaje editado
   const actualizarMensaje = (id: number, nuevoMensaje: string) => {

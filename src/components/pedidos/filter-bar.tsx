@@ -5,90 +5,116 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSepar
 import { Filter, Calendar, Clock, Check, X, Mailbox, Van, VanIcon, LucideVan, DollarSign, BadgeDollarSign, Coins, Wallet, WalletCards, WalletMinimal, Wallet2, Smartphone, PhoneIncoming, WheatOff, MessageCircle, MessageCirclePlus, MessageCircleReply, MessageCircleMore, MessageCircleOff, MessageCircleCode, MessageCircleQuestionMark, MessageCircleQuestion } from "lucide-react"
 import * as React from "react"
 import { ColumnDef, RowData, Table } from "@tanstack/react-table"
+import { type Filters } from "./data-table"
+import { on } from "events"
 
 interface FilterBarProps {
     table: Table<any>
-    onFiltersChange?: (filters: {
-        periodo: 'dia' | 'semana' | 'mes' | 'todos',
-        estados: string[],
-        pagado: (boolean | null)[],
-        mensaje: (boolean | null)[],
-    }) => void
+    onFiltersChange?: (filters: Filters) => void
     onAddOrder?: () => void
+    currentFilters: Filters
 }
 
 export function FilterBar({ 
     table,
     onFiltersChange,
     onAddOrder,
+    currentFilters,
 }: FilterBarProps) {
     // Estados internos
-    const [periodoTemporal, setPeriodoTemporal] = React.useState<'dia' | 'semana' | 'mes' | 'todos'>('semana')
-    const [estadosFiltrados, setEstadosFiltrados] = React.useState<string[]>(["pendiente", "enviado"])
-    const [pagadoFiltrado, setPagadoFiltrado] = React.useState<(boolean | null)[]>([true, false])
-    const [mensajeFiltrado, setMensajeFiltrado] = React.useState<(boolean | null)[]>([true, false])
+    // const [periodoTemporal, setPeriodoTemporal] = React.useState<'dia' | 'semana' | 'mes' | 'todos'>('semana')
+    // const [estadosFiltrados, setEstadosFiltrados] = React.useState<string[]>(["pendiente", "enviado"])
+    // const [pagadoFiltrado, setPagadoFiltrado] = React.useState<(boolean | null)[]>([true, false])
+    // const [mensajeFiltrado, setMensajeFiltrado] = React.useState<(boolean | null)[]>([true, false])
 
     // busqueda por texto
-    const [searchDireccion, setSearchDireccion] = React.useState("")
-    const [searchTelefono, setSearchTelefono] = React.useState("")
+    const [searchDireccion, setSearchDireccion] = React.useState(currentFilters.direccion)
+    const [searchTelefono, setSearchTelefono] = React.useState(currentFilters.telefono)
 
-    // Notificar cambios al padre
     React.useEffect(() => {
+        setSearchDireccion(currentFilters.direccion)
+        setSearchTelefono(currentFilters.telefono)
+    }, [currentFilters.direccion, currentFilters.telefono])
+
+    React.useEffect(() => {
+        const timer = setTimeout(() => {
+            if (searchDireccion !== currentFilters.direccion) {
+                onFiltersChange?.({
+                    ...currentFilters,
+                    direccion: searchDireccion,
+                })
+            }
+        }, 500) 
+        return () => clearTimeout(timer)
+    }, [searchDireccion, currentFilters, onFiltersChange])
+
+    React.useEffect(() => {
+        const timer = setTimeout(() => {
+            if (searchTelefono !== currentFilters.telefono) {
+                onFiltersChange?.({
+                    ...currentFilters,
+                    telefono: searchTelefono,
+                })
+            }
+        }, 500) 
+        return () => clearTimeout(timer)
+    }, [searchTelefono, currentFilters, onFiltersChange])
+
+    const handlePeriodoChange = React.useCallback((periodo: 'dia' | 'semana' | 'mes' | 'todos') => {
         onFiltersChange?.({
-            periodo: periodoTemporal,   
-            estados: estadosFiltrados,
-            pagado: pagadoFiltrado,
-            mensaje: mensajeFiltrado,
+            ...currentFilters,
+            periodo,
         })
-    }, [periodoTemporal, estadosFiltrados, pagadoFiltrado, mensajeFiltrado, onFiltersChange]) 
-
-    React.useEffect(() => {
-        const timer = setTimeout(() => {
-            table.getColumn("direccion")?.setFilterValue(searchDireccion || undefined)
-        }, 300) 
-        return () => clearTimeout(timer)
-    }, [searchDireccion, table])
-
-    React.useEffect(() => {
-        const timer = setTimeout(() => {
-            table.getColumn("telefono")?.setFilterValue(searchTelefono || undefined)
-        }, 300) 
-        return () => clearTimeout(timer)
-    }, [searchTelefono, table])
+    }, [currentFilters, onFiltersChange])
 
     const toggleEstado = React.useCallback((estado: string) => {
-        setEstadosFiltrados(prev => 
-            prev.includes(estado) 
-                ? prev.filter(e => e !== estado)
-                : [...prev, estado]
-        )
-    }, [])
+        const currentEstados = currentFilters.estados;
+
+        const newEstados = currentEstados.includes(estado)
+            ? currentEstados.filter(e => e !== estado)
+            : [...currentEstados, estado]
+
+        onFiltersChange?.({
+            ...currentFilters,
+            estados: newEstados,
+        })
+
+        
+    }, [currentFilters, onFiltersChange])
 
     const togglePagado = React.useCallback((valor: boolean) => {
-        setPagadoFiltrado(prev => {
-            const filtered = prev.filter(v => v !== null) as boolean[]
-            return filtered.includes(valor)
-                ? filtered.filter(v => v !== valor)
-                : [...filtered, valor]
+        const currentPagado = currentFilters.pagado.filter(v => v !== null) as boolean[];
+
+        const newPagado = currentPagado.includes(valor)
+            ? currentPagado.filter(p => p !== valor)
+            : [...currentPagado, valor]
+
+        onFiltersChange?.({
+            ...currentFilters,
+            pagado: newPagado,
         })
-    }, [])
+    }, [currentFilters, onFiltersChange])
 
     const toggleMensaje = React.useCallback((estado: boolean) => {
-        setMensajeFiltrado(prev => {
-            const filtered = prev.filter(v => v !== null) as boolean[]
-            return filtered.includes(estado)
-                ? filtered.filter(v => v !== estado)
-                : [...filtered, estado]
-        })        
-    }, [])
+        const currentEnviado = currentFilters.enviado.filter(v => v !== null) as boolean[];
+        
+        const newEnviado = currentEnviado.includes(estado)
+            ? currentEnviado.filter(e => e !== estado)
+            : [...currentEnviado, estado]
+
+        onFiltersChange?.({
+            ...currentFilters,
+            enviado: newEnviado,
+        })
+    }, [currentFilters, onFiltersChange])
 
     return (
         <div className="flex flex-wrap items-center gap-2 md:gap-3">
             <div className="flex flex-wrap gap-1 mr-0 md:mr-2 w-full md:w-auto">
                 <Button
                     size="sm"
-                    variant={periodoTemporal === 'dia' ? 'default' : 'outline'}
-                    onClick={() => setPeriodoTemporal('dia')}
+                    variant={currentFilters.periodo === 'dia' ? 'default' : 'outline'}
+                    onClick={() => handlePeriodoChange('dia')}
                     className="gap-1 text-xs md:text-sm"
                 >
                     <Calendar className="h-3 w-3" />
@@ -96,8 +122,8 @@ export function FilterBar({
                 </Button>
                 <Button
                     size="sm"
-                    variant={periodoTemporal === 'semana' ? 'default' : 'outline'}
-                    onClick={() => setPeriodoTemporal('semana')}
+                    variant={currentFilters.periodo === 'semana' ? 'default' : 'outline'}
+                    onClick={() => handlePeriodoChange('semana')}
                     className="gap-1 text-xs md:text-sm"
                 >
                     <span className="hidden sm:inline">Semana</span>
@@ -105,16 +131,16 @@ export function FilterBar({
                 </Button>
                 <Button
                     size="sm"
-                    variant={periodoTemporal === 'mes' ? 'default' : 'outline'}
-                    onClick={() => setPeriodoTemporal('mes')}
+                    variant={currentFilters.periodo === 'mes' ? 'default' : 'outline'}
+                    onClick={() => handlePeriodoChange('mes')}
                     className="gap-1 text-xs md:text-sm"
                 >
                     Mes
                 </Button>
                 <Button
                     size="sm"
-                    variant={periodoTemporal === 'todos' ? 'default' : 'outline'}
-                    onClick={() => setPeriodoTemporal('todos')}
+                    variant={currentFilters.periodo === 'todos' ? 'default' : 'outline'}
+                    onClick={() => handlePeriodoChange('todos')}
                     className="gap-1 text-xs md:text-sm"
                 >
                     <span className="hidden sm:inline">Todos</span>
@@ -124,18 +150,41 @@ export function FilterBar({
         
             <div className="hidden md:block h-8 w-px bg-gray-300" />
         
-            <Input
-                placeholder="Dirección..."
-                value={searchDireccion}
-                onChange={(event) => setSearchDireccion(event.target.value)}
-                className="flex-1 min-w-[150px] md:max-w-sm text-sm"
-            />
-            <Input
-                placeholder="Teléfono..."
-                value={searchTelefono}
-                onChange={(event) => setSearchTelefono(event.target.value)}
-                className="flex-1 min-w-[120px] md:max-w-sm text-sm"
-            />
+            <div className="relative flex-1 min-w-[150px] md:max-w-sm">
+                <Input
+                    placeholder="Dirección..."
+                    value={searchDireccion}
+                    onChange={(event) => setSearchDireccion(event.target.value)}
+                    className="text-sm pr-8"
+                />
+                {searchDireccion && (
+                    <button
+                        onClick={() => setSearchDireccion('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                        type="button"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                )}
+            </div>
+            
+            <div className="relative flex-1 min-w-[120px] md:max-w-sm">
+                <Input
+                    placeholder="Teléfono..."
+                    value={searchTelefono}
+                    onChange={(event) => setSearchTelefono(event.target.value)}
+                    className="text-sm pr-8"
+                />
+                {searchTelefono && (
+                    <button
+                        onClick={() => setSearchTelefono('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+                        type="button"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                )}
+            </div>
         
             <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -143,9 +192,9 @@ export function FilterBar({
                         <Filter className="h-4 w-4" />
                         <span className="hidden sm:inline">Filtros</span>
                         <span className="sm:hidden">F</span>
-                        {(estadosFiltrados.length < 3 || pagadoFiltrado.length < 2 || mensajeFiltrado.length < 2) && (
+                        {(currentFilters.estados.length < 3 || currentFilters.pagado.length < 2 || currentFilters.enviado.length < 2) && (
                             <span className="ml-1 rounded-full bg-cyan-600 px-2 py-0.5 text-xs text-white">
-                                {3 - estadosFiltrados.length + (2 - pagadoFiltrado.length) + (2 - mensajeFiltrado.length)}
+                                {3 - currentFilters.estados.length + (2 - currentFilters.pagado.length) + (2 - currentFilters.enviado.length)}
                             </span>
                         )}
                     </Button>
@@ -159,7 +208,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-pendiente"
-                                checked={estadosFiltrados.includes("pendiente")}
+                                checked={currentFilters.estados.includes("pendiente")}
                                 onCheckedChange={() => toggleEstado("pendiente")}
                             />
                             <label
@@ -173,7 +222,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-enviado"
-                                checked={estadosFiltrados.includes("enviado")}
+                                checked={currentFilters.estados.includes("enviado")}
                                 onCheckedChange={() => toggleEstado("enviado")}
                             />
                             <label
@@ -187,7 +236,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-cancelado"
-                                checked={estadosFiltrados.includes("cancelado")}
+                                checked={currentFilters.estados.includes("cancelado")}
                                 onCheckedChange={() => toggleEstado("cancelado")}
                             />
                             <label
@@ -210,7 +259,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-pagado"
-                                checked={pagadoFiltrado.includes(true)}
+                                checked={currentFilters.pagado.includes(true)}
                                 onCheckedChange={() => togglePagado(true)}
                             />
                             <label
@@ -224,7 +273,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-no-pagado"
-                                checked={pagadoFiltrado.includes(false)}
+                                checked={currentFilters.pagado.includes(false)}
                                 onCheckedChange={() => togglePagado(false)}
                             />
                             <label
@@ -247,7 +296,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-mensaje-enviado"
-                                checked={mensajeFiltrado.includes(true)}
+                                checked={currentFilters.enviado.includes(true)}
                                 onCheckedChange={() => toggleMensaje(true)}
                             />
                             <label
@@ -261,7 +310,7 @@ export function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-mensaje-no-enviado"
-                                checked={mensajeFiltrado.includes(false)}
+                                checked={currentFilters.enviado.includes(false)}
                                 onCheckedChange={() => toggleMensaje(false)}
                             />
                             <label
