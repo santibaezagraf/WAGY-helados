@@ -152,6 +152,7 @@ export function calcularPreciosUnitarios(
     if (cantidadAgua > 0) {
         const reglasAgua = reglas
             .filter(regla => regla.tipo_producto === "agua")
+            .sort((a, b) => b.min_cantidad - a.min_cantidad);
             
         const reglaAplicable = reglasAgua.find(r => r.min_cantidad <= cantidadAgua)
         precioAgua = reglaAplicable?.precio_unitario ?? reglasAgua[reglasAgua.length - 1]?.precio_unitario ?? 0
@@ -160,6 +161,7 @@ export function calcularPreciosUnitarios(
     if (cantidadCrema > 0) {
         const reglasCrema = reglas
             .filter(regla => regla.tipo_producto === "crema")
+            .sort((a, b) => b.min_cantidad - a.min_cantidad);
             
         const reglaAplicable = reglasCrema.find(r => r.min_cantidad <= cantidadCrema)
         precioCrema = reglaAplicable?.precio_unitario ?? reglasCrema[reglasCrema.length - 1]?.precio_unitario ?? 0
