@@ -127,21 +127,21 @@ export type Database = {
       reglas_precios: {
         Row: {
           id: number
-          lista_id: number | null
+          lista_id: number
           min_cantidad: number
           precio_unitario: number
           tipo_producto: string
         }
         Insert: {
           id?: number
-          lista_id?: number | null
+          lista_id: number
           min_cantidad: number
           precio_unitario: number
           tipo_producto: string
         }
         Update: {
           id?: number
-          lista_id?: number | null
+          lista_id?: number
           min_cantidad?: number
           precio_unitario?: number
           tipo_producto?: string
@@ -161,7 +161,19 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      obtener_balance: {
+        Args: { fecha_fin: string; fecha_inicio: string }
+        Returns: {
+          cantidad_envios: number
+          costo_envio_total: number
+          efectivo_final: number
+          ingreso_total: number
+          plata_efectivo: number
+          plata_transferencia: number
+          total_agua: number
+          total_crema: number
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never

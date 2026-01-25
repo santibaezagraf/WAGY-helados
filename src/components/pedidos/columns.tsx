@@ -27,15 +27,6 @@ import {
 } from "@/lib/actions/pedidos"
 import { useRouter } from "next/navigation"
 
-/**
- * Crea la configuración de columnas (ColumnDef<Pedido>[]) para la tabla de pedidos.
- *
- * Incluye columnas de selección, dirección, teléfono, cantidades, método de pago,
- * estado, pagado, ganancia y acciones (con menús para editar/actualizar estado y pago).
- *
- * @param onRefresh - Callback opcional que se invoca tras actualizar un pedido para refrescar los datos.
- * @returns Un arreglo de ColumnDef<Pedido> que describe las columnas y sus celdas.
- */
 export const createColumns = (): ColumnDef<Pedido>[] => [
     {
         id: "select",
@@ -148,28 +139,6 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
             )
         },
     },
-    // {
-    //             accessorKey: "ganancia",
-    //             header: ({ column }) => {
-    //     return (
-    //         <Button
-    //             variant="ghost"
-    //             onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-    //         >
-    //             Ganancia
-    //         <ArrowUpDown className="ml-2 h-4 w-4" />
-    //         </Button>
-    //     )
-    //     },
-    //     cell: ({ row }) => {
-    //         const ganancia = parseFloat(row.getValue("ganancia"))
-    //         const formatted = new Intl.NumberFormat("es-AR", {
-    //             style: "currency",
-    //             currency: "ARS",
-    //         }).format(ganancia)
-    //         return <div className="font-medium">{formatted}</div>
-    //     },
-    // },
     {
         accessorKey: "precio_total",
         header: "Precio",
@@ -292,7 +261,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                                     <DropdownMenuItem 
                                         onClick={() => actualizarEstado("pendiente")}
                                         disabled={pedido.estado === "pendiente"}
-                                        className="gap-2 text-gray-700 hover:text-gray-800 hover:bg-gray-50 focus:bg-gray-50 focus:text-gray-800"
+                                        className="gap-2 text-gray-700 hover:text-gray-800 hover:bg-gray-50 focus:bg-gray-50 focus:text-gray-800 data-[disabled]:bg-gray-100"
                                     >
                                         <Clock className="h-4 w-4 text-gray-500" />
                                         Pendiente
@@ -300,7 +269,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                                     <DropdownMenuItem 
                                         onClick={() => actualizarEstado("enviado")}
                                         disabled={pedido.estado === "enviado"}
-                                        className="gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800"
+                                        className={`gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800 data-[disabled]:bg-green-50`}
                                     >
                                         <Check className="h-4 w-4" />
                                         Enviado
@@ -308,7 +277,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                                     <DropdownMenuItem 
                                         onClick={() => actualizarEstado("cancelado")}
                                         disabled={pedido.estado === "cancelado"}
-                                        className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800"
+                                        className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800 data-[disabled]:bg-red-50"
                                     >
                                         <X className="h-4 w-4" />
                                         Cancelado

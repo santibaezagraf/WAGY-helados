@@ -1,12 +1,15 @@
+"use client"
+
 import { Button } from "../ui/button"
 import { Checkbox } from "../ui/checkbox"
 import { Input } from "../ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu"
-import { Filter, Calendar, Clock, Check, X, Mailbox, Van, VanIcon, LucideVan, DollarSign, BadgeDollarSign, Coins, Wallet, WalletCards, WalletMinimal, Wallet2, Smartphone, PhoneIncoming, WheatOff, MessageCircle, MessageCirclePlus, MessageCircleReply, MessageCircleMore, MessageCircleOff, MessageCircleCode, MessageCircleQuestionMark, MessageCircleQuestion } from "lucide-react"
+import { Filter, Calendar, Clock, Check, X, Van, WalletMinimal, MessageCircle, BarChart3 } from "lucide-react"
 import * as React from "react"
-import { ColumnDef, RowData, Table } from "@tanstack/react-table"
+import { Table } from "@tanstack/react-table"
 import { type Filters } from "./data-table"
-import { on } from "events"
+import { useRouter } from "next/navigation"
+
 
 interface FilterBarProps {
     table: Table<any>
@@ -21,12 +24,7 @@ export function FilterBar({
     onAddOrder,
     currentFilters,
 }: FilterBarProps) {
-    // Estados internos
-    // const [periodoTemporal, setPeriodoTemporal] = React.useState<'dia' | 'semana' | 'mes' | 'todos'>('semana')
-    // const [estadosFiltrados, setEstadosFiltrados] = React.useState<string[]>(["pendiente", "enviado"])
-    // const [pagadoFiltrado, setPagadoFiltrado] = React.useState<(boolean | null)[]>([true, false])
-    // const [mensajeFiltrado, setMensajeFiltrado] = React.useState<(boolean | null)[]>([true, false])
-
+    const router = useRouter()
     // busqueda por texto
     const [searchDireccion, setSearchDireccion] = React.useState(currentFilters.direccion)
     const [searchTelefono, setSearchTelefono] = React.useState(currentFilters.telefono)
@@ -201,8 +199,9 @@ export function FilterBar({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56">
                     <DropdownMenuLabel className="flex items-center gap-1">
-                        Estado del pedido
                         <Van className="h-5 w-5" />
+                        Estado del pedido
+                        
                     </DropdownMenuLabel>
                     <div className="px-2 py-2 space-y-2">
                         <div className="flex items-center space-x-2">
@@ -215,7 +214,7 @@ export function FilterBar({
                                 htmlFor="filter-pendiente"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <Clock className="h-4 w-4 text-gray-500" />
+                                <Clock className="h-4 w-4 text-gray-500 flex-shrink-0" />
                                 Pendiente
                             </label>
                         </div>
@@ -229,7 +228,7 @@ export function FilterBar({
                                 htmlFor="filter-enviado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <Check className="h-4 w-4 text-green-600" />
+                                <Check className="h-4 w-4 text-green-600 flex-shrink-0" />
                                 Enviado
                             </label>
                         </div>
@@ -243,7 +242,7 @@ export function FilterBar({
                                 htmlFor="filter-cancelado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <X className="h-4 w-4 text-red-600" />
+                                <X className="h-4 w-4 text-red-600 flex-shrink-0" />
                                 Cancelado
                             </label>
                         </div>
@@ -252,8 +251,9 @@ export function FilterBar({
                     <DropdownMenuSeparator />
                     
                     <DropdownMenuLabel className="flex items-center gap-1">                        
-                        Estado de pago
                         <WalletMinimal className="h-4 w-4" />
+                        Estado de pago
+                        
                     </DropdownMenuLabel>
                     <div className="px-2 py-2 space-y-2">
                         <div className="flex items-center space-x-2">
@@ -266,7 +266,7 @@ export function FilterBar({
                                 htmlFor="filter-pagado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <Check className="h-4 w-4 text-green-600" />
+                                <Check className="h-4 w-4 text-green-600 flex-shrink-0" />
                                 Pagado
                                 </label>
                         </div>
@@ -280,7 +280,7 @@ export function FilterBar({
                                 htmlFor="filter-no-pagado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <X className="h-4 w-4 text-red-600" />
+                                <X className="h-4 w-4 text-red-600 flex-shrink-0" />
                                 No pagado
                             </label>
                         </div>
@@ -289,8 +289,9 @@ export function FilterBar({
                     <DropdownMenuSeparator />
 
                     <DropdownMenuLabel className="flex items-center gap-1">
-                        Estado de mensaje
                         <MessageCircle className="h-4 w-4" />
+                        Estado de mensaje
+                        
                     </DropdownMenuLabel>
                     <div className="px-2 py-2 space-y-2">
                         <div className="flex items-center space-x-2">
@@ -303,7 +304,7 @@ export function FilterBar({
                                 htmlFor="filter-mensaje-enviado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <Check className="h-4 w-4 text-green-600" />
+                                <Check className="h-4 w-4 text-green-600 flex-shrink-0" />
                                 Enviado
                                 </label>
                         </div>
@@ -317,7 +318,7 @@ export function FilterBar({
                                 htmlFor="filter-mensaje-no-enviado"
                                 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 flex items-center gap-2 cursor-pointer"
                             >
-                                <X className="h-4 w-4 text-red-600" />
+                                <X className="h-4 w-4 text-red-600 flex-shrink-0" />
                                 No enviado
                             </label>
                         </div>
@@ -326,6 +327,15 @@ export function FilterBar({
                 </DropdownMenuContent>
             </DropdownMenu>
         
+            <Button
+                onClick={() => router.push('/balances')}
+                className="w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm gap-2"
+            >
+                <BarChart3 className="h-4 w-4" />
+                <span className="hidden sm:inline">Ver Balances</span>
+                <span className="sm:hidden">Balances</span>
+            </Button>
+
             <Button
                 onClick={onAddOrder}
                 className="w-full md:w-auto md:ml-auto bg-cyan-600 hover:bg-cyan-700 text-white font-semibold text-sm"
