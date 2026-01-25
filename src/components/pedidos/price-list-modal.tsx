@@ -102,7 +102,8 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
     // Log para demostración (aquí irían las server actions)
     console.log("Lista de precios creada:", priceList)
 
-    const { success } = await guardarListaPrecios(
+    try {
+      await guardarListaPrecios(
       priceList.name, 
       priceList.agua.map(item => ({
         fromQuantity: Number(item.fromQuantity),
@@ -113,13 +114,11 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
         pricePerUnit: Number(item.pricePerUnit)
       }))
     )
-
-    if (!success) {
-      alert("Error al crear la lista de precios")
-      return
-    }
-
-
+  } catch (error) {
+    alert("Error al crear la lista de precios: " + (error as Error).message)
+    return
+  }
+  
     // Reset y cierre
     setPriceList({
       name: "",
