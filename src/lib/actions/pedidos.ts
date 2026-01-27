@@ -191,3 +191,25 @@ export async function crearPedido(datos: {
     revalidatePath('/')
     return { success: true }
 }
+
+export async function actualizarCostoEnvioPedido(
+    id: number,
+    nuevoCostoEnvio: number
+) {
+    const supabase = await createClient()
+
+    try {
+        const { error } = await supabase
+            .from("pedidos")
+            .update({ costo_envio: nuevoCostoEnvio })
+            .eq("id", id)
+
+        if (error) throw new Error(`Error al actualizar costo de envío: ${error.message}`)
+
+        revalidatePath('/')
+        return { success: true }
+    } catch (error) {
+        console.error("Error al actualizar costo de envío:", error)
+        throw error
+    }
+}

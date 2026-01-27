@@ -1,6 +1,7 @@
 import { Button } from "../ui/button"
 import { MessageSquare, Copy, CheckCheck } from "lucide-react"
 import * as React from "react"
+import { memo } from "react"
 import { createClient } from "@/lib/supabase-client"
 import { useRouter} from "next/navigation"
 import { actualizarEnviadoMasivo, actualizarEnviadoPedido } from "@/lib/actions/pedidos"
@@ -11,7 +12,7 @@ interface MessageEditorProps {
   onClose: () => void
 }
 
-export function MessageEditor({ 
+export const MessageEditor = memo(function MessageEditor({ 
   mensajes, 
   onClose, 
 }: MessageEditorProps) {
@@ -59,14 +60,6 @@ export function MessageEditor({
       }
     }
     
-    // Quitar feedback visual después de 2 segundos
-    setTimeout(() => {
-      setCopiados(prev => {
-        const newSet = new Set(prev)
-        newSet.delete(id)
-        return newSet
-      })
-    }, 2000)
   }, [router])
 
   // Función local: copiar todos los mensajes
@@ -168,4 +161,4 @@ export function MessageEditor({
             </div>
         </div>
     )
-}
+})

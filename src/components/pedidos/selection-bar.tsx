@@ -3,6 +3,7 @@ import { Pedido } from "@/types/pedidos"
 import { Table } from "@tanstack/react-table"
 import { ArrowDown, Check, ChevronDown, Clock, MessageCircle, MessageSquare, Van, WalletMinimal, X } from "lucide-react"
 import * as React from "react"
+import { memo } from "react"
 import {
     actualizarEstadoMasivo,
     actualizarPagadoMasivo,
@@ -18,7 +19,7 @@ interface SelectionBarProps {
     setRowSelection: (selection: {}) => void
 }
 
-export function SelectionBar({
+export const SelectionBar = memo(function SelectionBar({
     selectedRowsCount,
     table,
     generarMensajesWpp,
@@ -246,4 +247,4 @@ export function SelectionBar({
             </div>
         </div>
     )
-}
+})

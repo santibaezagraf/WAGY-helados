@@ -19,3 +19,10 @@ export type PedidoInsert = {
 
 // Tipo para actualizar un pedido
 export type PedidoUpdate = Partial<Pedido>
+
+export type ReglaPrecio = Tables<'reglas_precios'>
+
+export type ListaPrecios = Tables<'listas_precios'> & {
+    agua: { fromQuantity: number; pricePerUnit: number }[]
+    crema: { fromQuantity: number; pricePerUnit: number }[]
+}

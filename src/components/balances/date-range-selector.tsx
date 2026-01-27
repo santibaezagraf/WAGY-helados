@@ -1,167 +1,3 @@
-// "use client"
-
-// import * as React from "react"
-// import { Button } from "@/components/ui/button"
-// import { Badge } from "@/components/ui/badge"
-// import { ChevronLeft, ChevronRight, Calendar } from "lucide-react"
-
-// interface DateRangeSelectorProps {
-//   onDateRangeChange: (startDate: Date, endDate: Date, mode: "dia" | "semana") => void
-//   defaultMode?: "dia" | "semana"
-// }
-
-// export function DateRangeSelector({
-//   onDateRangeChange,
-//   defaultMode = "semana",
-// }: DateRangeSelectorProps) {
-//   const [mode, setMode] = React.useState<"dia" | "semana">(defaultMode)
-//   const [currentDate, setCurrentDate] = React.useState(new Date())
-
-//   React.useEffect(() => {
-//     updateDateRange(currentDate, mode)
-//   }, [currentDate, mode])
-
-//   const updateDateRange = (date: Date, selectedMode: "dia" | "semana") => {
-//     const startDate = new Date(date)
-//     const endDate = new Date(date)
-
-//     if (selectedMode === "dia") {
-//       startDate.setHours(0, 0, 0, 0)
-//       endDate.setHours(23, 59, 59, 999)
-//     } else {
-//       // Semana: domingo a sabado
-//       const day = startDate.getDay()
-//       const diff = startDate.getDate() - day + (day === 0 ? 0 : -6)
-//       startDate.setDate(diff)
-//       startDate.setHours(0, 0, 0, 0)
-
-//       endDate.setDate(startDate.getDate() + 6)
-//       endDate.setHours(23, 59, 59, 999)
-//     }
-
-//     onDateRangeChange(startDate, endDate, selectedMode)
-//   }
-
-//   const handlePrev = () => {
-//     const newDate = new Date(currentDate)
-//     if (mode === "dia") {
-//       newDate.setDate(newDate.getDate() - 1)
-//     } else {
-//       newDate.setDate(newDate.getDate() - 7)
-//     }
-//     setCurrentDate(newDate)
-//   }
-
-//   const handleNext = () => {
-//     const newDate = new Date(currentDate)
-//     if (mode === "dia") {
-//       newDate.setDate(newDate.getDate() + 1)
-//     } else {
-//       newDate.setDate(newDate.getDate() + 7)
-//     }
-//     setCurrentDate(newDate)
-//   }
-
-//   const handleToday = () => {
-//     setCurrentDate(new Date())
-//   }
-
-//   const handleSemana = () => {
-//     const newDate = new Date(currentDate)
-//     const day = newDate.getDay()
-//     const diff = currentDate.getDate() - day // + (day === 0 ? 0 : -6)
-    
-//     newDate.setDate(diff)
-//     setCurrentDate(newDate)
-//     setMode("semana")
-//   }
-
-//   const getDisplayText = () => {
-//     const startDate = new Date(currentDate)
-//     const day = startDate.getDay()
-//     const diff = startDate.getDate() - day + (day === 0 ? 0 : -7) // si es domingo, la startDate es currentDate
-//     startDate.setDate(diff)
-
-//     if (mode === "dia") {
-//       return currentDate.toLocaleDateString("es-ES", {
-//         weekday: "long",
-//         year: "numeric",
-//         month: "long",
-//         day: "numeric",
-//       })
-//     } else {
-//       const endDate = new Date(startDate)
-//       endDate.setDate(endDate.getDate() + 6)
-
-//       return `${startDate.toLocaleDateString("es-ES", {
-//         day: "numeric",
-//         month: "short",
-//       })} - ${endDate.toLocaleDateString("es-ES", {
-//         day: "numeric",
-//         month: "long",
-//         year: "numeric",
-//       })}`
-//     }
-//   }
-
-//   return (
-//     <div className="flex flex-col gap-4 rounded-lg border p-4">
-//       <div className="flex items-center gap-2">
-//         <Calendar className="h-5 w-5 text-gray-600" />
-//         <h3 className="text-lg font-semibold">Selecciona el período</h3>
-//       </div>
-
-//       <div className="flex gap-2">
-//         <Button
-//           variant={mode === "dia" ? "default" : "outline"}
-//           onClick={() => setMode("dia")}
-//           className="flex-1"
-//         >
-//           Día
-//         </Button>
-//         <Button
-//           variant={mode === "semana" ? "default" : "outline"}
-//           onClick={handleSemana}
-//           className="flex-1"
-//         >
-//           Semana
-//         </Button>
-//       </div>
-
-//       <div className="flex items-center justify-between gap-4">
-//         <Button
-//           variant="outline"
-//           size="sm"
-//           onClick={handlePrev}
-//           className="h-8 w-8 p-0"
-//         >
-//           <ChevronLeft className="h-4 w-4" />
-//         </Button>
-
-//         <div className="flex-1 text-center">
-//           <Badge variant="secondary" className="text-sm font-medium">
-//             {getDisplayText()}
-//           </Badge>
-//         </div>
-
-//         <Button
-//           variant="outline"
-//           size="sm"
-//           onClick={handleNext}
-//           className="h-8 w-8 p-0"
-//           // disabled={mode === "dia" ? currentDate > new Date() : currentDate < new Date(new Date().setDate(new Date().getDate() - 7))}
-//         >
-//           <ChevronRight className="h-4 w-4" />
-//         </Button>
-//       </div>
-
-//       <Button variant="ghost" size="sm" onClick={handleToday} className="w-full">
-//         Hoy
-//       </Button>
-//     </div>
-//   )
-// }
-
 "use client"
 
 import * as React from "react"
@@ -177,13 +13,14 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { memo }  from "react"
 
 interface DateRangeSelectorProps {
   onDateRangeChange: (startDate: Date, endDate: Date, mode: "dia" | "semana") => void
   defaultMode?: "dia" | "semana"
 }
 
-export function DateRangeSelector({
+export const DateRangeSelector = memo(function DateRangeSelector({
   onDateRangeChange,
   defaultMode = "semana",
 }: DateRangeSelectorProps) {
@@ -250,38 +87,41 @@ export function DateRangeSelector({
 
   // --- HANDLERS ---
 
-  const handlePrev = () => {
-    const newDate = new Date(currentDate)
-    if (mode === "dia") {
-      newDate.setDate(newDate.getDate() - 1)
-    } else {
-      newDate.setDate(newDate.getDate() - 7)
-    }
-    setCurrentDate(newDate)
-  }
+  const handlePrev = React.useCallback(() => {
+    setCurrentDate(prevDate => {
+      const newDate = new Date(prevDate)
+      if (mode === "dia") {
+        newDate.setDate(newDate.getDate() - 1)
+      } else {
+        newDate.setDate(newDate.getDate() - 7)
+      }
+      return newDate
+    })
+  }, [mode])
 
-  const handleNext = () => {
-    const newDate = new Date(currentDate)
-    if (mode === "dia") {
-      newDate.setDate(newDate.getDate() + 1)
-    } else {
-      newDate.setDate(newDate.getDate() + 7)
-    }
-    setCurrentDate(newDate)
-  }
+  const handleNext = React.useCallback(() => {
+    setCurrentDate(prevDate => {
+      const newDate = new Date(prevDate)
+      if (mode === "dia") {
+        newDate.setDate(newDate.getDate() + 1)
+      } else {
+        newDate.setDate(newDate.getDate() + 7)
+      }
+      return newDate
+    })
+  }, [mode])
 
-  const handleToday = () => {
+  const handleToday = React.useCallback(() => {
     setCurrentDate(new Date())
-  }
+  }, [])
 
   // Al cambiar a modo semana, alineamos la fecha actual al domingo para evitar confusiones visuales
-  const handleSetModeSemana = () => {
+  const handleSetModeSemana = React.useCallback(() => {
     setMode("semana")
-    // Opcional: Si quieres que al cambiar a semana se acomode visualmente al domingo:
-    setCurrentDate(getStartOfWeek(currentDate)) 
-  }
+    setCurrentDate(prevDate => getStartOfWeek(prevDate))
+  }, [getStartOfWeek])
 
-  const getDisplayText = () => {
+  const getDisplayText = React.useCallback(() => {
     if (mode === "dia") {
       return currentDate.toLocaleDateString("es-ES", {
         weekday: "long",
@@ -303,7 +143,7 @@ export function DateRangeSelector({
         year: "numeric",
       })}`
     }
-  }
+  }, [currentDate, mode, getStartOfWeek])
 
   return (
     <div className="flex flex-col gap-4 rounded-lg border p-4 bg-white shadow-sm">
@@ -420,4 +260,4 @@ export function DateRangeSelector({
       </Button>
     </div>
   )
-}
+})

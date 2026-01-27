@@ -37,12 +37,12 @@ export default function BalancesPage() {
     }
   }, [])
 
-  const handleDateRangeChange = (startDate: Date, endDate: Date, mode: "dia" | "semana") => {
+  const handleDateRangeChange = React.useCallback((startDate: Date, endDate: Date, mode: "dia" | "semana") => {
     setDateRange({ startDate, endDate, mode })
     fetchBalance(startDate, endDate)
-  }
+  }, [fetchBalance])
 
-  const formatCurrency = (value: number | null | undefined) => {
+  const formatCurrency = React.useCallback((value: number | null | undefined) => {
     if (value === null || value === undefined) return "$0"
     return new Intl.NumberFormat("es-AR", {
       style: "currency",
@@ -50,9 +50,9 @@ export default function BalancesPage() {
       minimumFractionDigits: 0,
       maximumFractionDigits: 2,
     }).format(value)
-  }
+  }, [])
 
-  const balanceRows: BalanceRow[] = balance
+  const balanceRows: BalanceRow[] = React.useMemo(() => (balance
     ? [
         {
           label: "Total Helados Agua",
@@ -79,11 +79,6 @@ export default function BalancesPage() {
           value: `${formatCurrency(balance.costo_envio_total)} (${balance.cantidad_envios ?? 0})`,
           highlight: false,
         },
-        // {
-        //   label: "Cantidad de Envíos",
-        //   value: balance.cantidad_envios,
-        //   format: "number",
-        // },
         {
           label: "Efectivo Final (Efectivo - Envíos)",
           value: formatCurrency(balance.efectivo_final),
@@ -95,7 +90,8 @@ export default function BalancesPage() {
           highlight: true,
         },
       ]
-    : []
+    : [])
+  , [balance, formatCurrency])
 
   return (
     <div className="min-h-screen bg-gray-50">
