@@ -26,6 +26,7 @@ import {
     actualizarEnviadoPedido,
 } from "@/lib/actions/pedidos"
 import { useRouter } from "next/navigation"
+import { EditCostoEnvioModal } from "./edit-costo-envio-modal"
 
 export const createColumns = (): ColumnDef<Pedido>[] => [
     {
@@ -67,6 +68,40 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
     {
         accessorKey: "telefono",
         header: "Teléfono",
+    },
+    {
+        accessorKey: "costo_envio_movil",
+        header: () => <span className="md:hidden">Costo de Envío</span>,
+        cell: ({ row }) => {
+            const costo_envio = parseFloat(row.getValue("costo_envio") || "0")
+            const formatted = new Intl.NumberFormat("es-AR", {
+                style: "currency",
+                currency: "ARS",
+            }).format(costo_envio)
+            const [open, setOpen] = React.useState(false);
+
+            return (
+                <>
+                    <EditCostoEnvioModal
+                        id={row.original.id}
+                        costoEnvio={costo_envio}
+                        open={open}
+                        onOpenChange={setOpen}
+                    />
+
+                    <Button 
+                        variant="link" 
+                        className="md:hidden"
+                        onClick={() => setOpen(!open)}
+                    >
+                        {formatted}
+                    </Button>
+                </>
+            )
+        },
+        meta: {
+            className: "md:hidden"
+        }
     },
     {
         accessorKey: "cantidad_agua",
@@ -154,15 +189,18 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
     },
     {
         accessorKey: "costo_envio",
-        header: "Costo de Envío",
+        header: () => <span className="hidden md:inline">Costo de Envío</span>,
         cell: ({ row }) => {
             const precio = parseFloat(row.getValue("costo_envio") || "0")
             const formatted = new Intl.NumberFormat("es-AR", {
                 style: "currency",
                 currency: "ARS",
             }).format(precio)
-            return <div className="font-medium">{formatted}</div>
+            return <div className="font-medium hidden md:block">{formatted}</div>
 
+        },
+        meta: {
+            className: "hidden md:table-cell"
         }
     },
     {

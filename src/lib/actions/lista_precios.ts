@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache"
 import { createClient } from "@/lib/supabase-server"
+import { ListaPrecios } from "@/types/pedidos"
+import { PriceList } from "@/components/pedidos/price-list-modal"
 
 // Definimos el tipo de retorno para tener autocompletado en el front
 type ActionResponse = {
@@ -86,5 +88,57 @@ export async function guardarListaPrecios(
             .eq("id", listaId)
 
         return { success: false, error: `Error al guardar los detalles: ${error.message || error}` }
+    }
+}
+
+export async function getListaActiva(): Promise<PriceList | null> {
+    const supabase = await createClient()
+
+    try {
+        // Obtener la lista activa
+        const { data: listas, error: listaError } = await supabase
+            .from("listas_precios")
+            .select("*")
+            .eq("activa", true)
+            .single()
+
+        if (listaError) {
+            console.error("Error al obtener la lista activa:", listaError)
+            return null
+        }
+
+        const listaId = listas.id
+
+        // Obtener las reglas de precios asociadas
+        const { data: reglas, error: reglasError } = await supabase
+            .from("reglas_precios")
+            .select("*")
+            .eq("lista_id", listaId)
+
+        if (reglasError) {
+            console.error("Error al obtener las reglas de precios:", reglasError)
+            return null
+        }
+
+        // Estructurar los datos en el formato esperado
+        const listaPrecios: PriceList = {
+            name: listas.nombre || "",
+            agua: reglas.filter(r => r.tipo_producto === "agua").map(r => ({
+                id: r.id.toString(),
+                fromQuantity: r.min_cantidad,
+                pricePerUnit: r.precio_unitario
+            })),
+            crema: reglas.filter(r => r.tipo_producto === "crema").map(r => ({
+                id: r.id.toString(),
+                fromQuantity: r.min_cantidad,
+                pricePerUnit: r.precio_unitario
+            }))
+        }
+
+        return listaPrecios
+
+    } catch (error) {
+        console.error("Error al obtener la lista activa:", error)
+        return null
     }
 }

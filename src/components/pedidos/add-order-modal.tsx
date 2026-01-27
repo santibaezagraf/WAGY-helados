@@ -132,7 +132,7 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
     return () => clearTimeout(timeoutId)
   }, [cantidadAgua, cantidadCrema, reglas])
 
-  const resetForm = () => {
+  const resetForm = React.useCallback(() => {
     setStep(1)
     setCantidadCremaStr("")
     setCantidadAguaStr("")
@@ -146,25 +146,25 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
     setTotalCremaManualStr("")
     setTotalAguaEditado(false)
     setTotalCremaEditado(false)
-  }
+  }, [])
 
 
 
-  const handleNext = () => {
+  const handleNext = React.useCallback(() => {
     if (cantidadCrema > 0 || cantidadAgua > 0) {
       setStep(2)
     }
-  }
+  }, [cantidadCrema, cantidadAgua])
 
-  const handleBack = () => {
+  const handleBack = React.useCallback(() => {
     setStep(1)
     setTotalAguaManualStr("")
     setTotalCremaManualStr("")
     setTotalAguaEditado(false)
     setTotalCremaEditado(false)
-  }
+  }, [])
 
-  const handleSubmit = async () => {
+  const handleSubmit = React.useCallback(async () => {
     if (!direccion || !telefono) {
       alert("Por favor completa los campos obligatorios (Dirección y Teléfono)")
       return
@@ -194,7 +194,7 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
     } finally {
       setIsSubmitting(false)
     }
-  }
+  }, [direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, resetForm, onOpenChange, router])
 
   
 

@@ -122,7 +122,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
 
   
 
-  const handleSubmit = async () => {
+  const handleSubmit = React.useCallback(async () => {
     if (!direccion || !telefono) {
       alert("Por favor completa los campos obligatorios (Dirección y Teléfono)")
       return
@@ -153,7 +153,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
     } finally {
       setIsSubmitting(false)
     }
-  }
+  }, [pedido.id, direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, estado, pagado, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, onOpenChange, router])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

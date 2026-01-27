@@ -6,6 +6,7 @@ import { Input } from "../ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu"
 import { Filter, Calendar, Clock, Check, X, Van, WalletMinimal, MessageCircle, BarChart3 } from "lucide-react"
 import * as React from "react"
+import { memo } from "react"
 import { Table } from "@tanstack/react-table"
 import { type Filters } from "./data-table"
 import { useRouter } from "next/navigation"
@@ -18,7 +19,7 @@ interface FilterBarProps {
     currentFilters: Filters
 }
 
-export function FilterBar({ 
+export const FilterBar = memo(function FilterBar({ 
     table,
     onFiltersChange,
     onAddOrder,
@@ -345,4 +346,4 @@ export function FilterBar({
             </Button>
         </div>
     )
-}
+})

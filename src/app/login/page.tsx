@@ -10,7 +10,7 @@ export default function Login() {
     const router = useRouter()
     const supabase = createClient()
 
-    const handleLogin = async (e: React.FormEvent) => {
+    const handleLogin = React.useCallback(async (e: React.FormEvent) => {
         e.preventDefault()
         setLoading(true)
 
@@ -26,7 +26,7 @@ export default function Login() {
             router.refresh()
         }
         setLoading(false)
-    }
+    }, [email, password, supabase.auth, router])
 
     return (
         <div className="flex min-h-screen items-center justify-center bg-gray-50 text-black">
