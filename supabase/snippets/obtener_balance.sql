@@ -57,6 +57,7 @@ begin
     from public.gastos
     where created_at >= fecha_inicio 
       and created_at <= fecha_fin
+      and activo != false
   )
   -- Ahora sí, seleccionamos y hacemos la resta simple
   select 

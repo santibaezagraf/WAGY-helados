@@ -3,11 +3,12 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { obtenerBalance, Balance } from "@/lib/actions/balances"
-import { ObtenerGastos } from "@/lib/actions/gastos"
+import { EliminarGasto, ObtenerGastos } from "@/lib/actions/gastos"
 import { DateRangeSelector } from "@/components/balances/date-range-selector"
 import { Button } from "@/components/ui/button"
 import { Header } from "@/components/ui/header"
-import { ArrowLeft, Loader2, ChevronDown, ChevronUp } from "lucide-react"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import { ArrowLeft, Loader2, ChevronDown, ChevronUp, Trash2 } from "lucide-react"
 
 interface BalanceRow {
   label: string
@@ -20,9 +21,11 @@ interface BalanceRow {
 export default function BalancesPage() {
   const router = useRouter()
   const [balance, setBalance] = React.useState<Balance | null>(null)
-  const [gastos, setGastos] = React.useState<{ monto: number }[]>([])
+  const [gastos, setGastos] = React.useState<{ id: number, monto: number }[]>([])
   const [gastosDropdownOpen, setGastosDropdownOpen] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
+  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false)
+  const [gastoToDelete, setGastoToDelete] = React.useState<{ id: number, monto: number } | null>(null)
   const [dateRange, setDateRange] = React.useState<{
     startDate: Date
     endDate: Date
@@ -59,6 +62,23 @@ export default function BalancesPage() {
       maximumFractionDigits: 2,
     }).format(value)
   }, [])
+
+  const handleDeleteGasto = React.useCallback(async () => {
+    if (!gastoToDelete) return
+    
+    try {
+      await EliminarGasto(gastoToDelete.id)
+      setDeleteDialogOpen(false)
+      setGastoToDelete(null)
+      
+      // Refrescar los datos
+      if (dateRange) {
+        await fetchBalance(dateRange.startDate, dateRange.endDate)
+      }
+    } catch (error) {
+      console.error("Error al eliminar gasto:", error)
+    }
+  }, [gastoToDelete, dateRange, fetchBalance])
 
   const balanceRows: BalanceRow[] = React.useMemo(() => (balance
     ? [
@@ -185,11 +205,21 @@ export default function BalancesPage() {
                     
                     {/* Dropdown de gastos individuales */}
                     {row.label === "Gastos Varios" && gastosDropdownOpen && gastos.length > 0 && (
-                      <div className="mt-2 ml-6 space-y-1 border-l-2 border-red-200 pl-4">
+                      <div className="mt-2 ml-6 space-y-2 border-l-2 border-red-200 pl-4">
                         {gastos.map((gasto, gastosIndex) => (
-                          <div key={gastosIndex} className="flex justify-between text-sm text-red-900 bg-red-100 py-1">
-                            {/* <span>Gasto {gastosIndex + 1}</span> */}
-                            <span className=" font-medium">+ {formatCurrency(gasto.monto)}</span>
+                          <div key={gastosIndex} className="flex justify-between items-center text-sm text-red-900 bg-red-100 px-3 py-2 rounded-md">
+                            <span className="font-medium">{formatCurrency(gasto.monto)}</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 hover:bg-red-200 text-red-600 hover:text-red-700"
+                              onClick={() => {
+                                setGastoToDelete(gasto)
+                                setDeleteDialogOpen(true)
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
                           </div>
                         ))}
                       </div>
@@ -207,6 +237,43 @@ export default function BalancesPage() {
           </div>
         </div>
       </div>
+
+      {/* Dialog de confirmación para eliminar gasto */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>¿Eliminar gasto?</DialogTitle>
+          </DialogHeader>
+          <div className="py-4">
+            <p className="text-sm text-gray-600">
+              ¿Estás seguro que deseas eliminar este gasto de{" "}
+              <span className="font-semibold text-red-600">
+                {gastoToDelete && formatCurrency(gastoToDelete.monto)}
+              </span>?
+            </p>
+            <p className="text-sm text-gray-500 mt-2">
+              Esta acción no se puede deshacer.
+            </p>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteDialogOpen(false)
+                setGastoToDelete(null)
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteGasto}
+            >
+              Eliminar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
