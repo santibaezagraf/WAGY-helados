@@ -3,7 +3,6 @@ import { Pedido } from "@/types/pedidos"
 import { Table } from "@tanstack/react-table"
 import { ArrowDown, Check, ChevronDown, Clock, MessageCircle, MessageSquare, Van, WalletMinimal, X } from "lucide-react"
 import * as React from "react"
-import { memo } from "react"
 import {
     actualizarEstadoMasivo,
     actualizarPagadoMasivo,
@@ -19,7 +18,7 @@ interface SelectionBarProps {
     setRowSelection: (selection: {}) => void
 }
 
-export const SelectionBar = memo(function SelectionBar({
+export const SelectionBar = React.memo(function SelectionBar({
     selectedRowsCount,
     table,
     generarMensajesWpp,
@@ -42,7 +41,7 @@ export const SelectionBar = memo(function SelectionBar({
         try {
             await actualizarEstadoMasivo(idsAActualizar, nuevoEstado)
             setRowSelection({})
-            router.refresh()
+
         } catch (error) {
             console.error(error)
             alert("Error al actualizar los estados")
@@ -63,7 +62,7 @@ export const SelectionBar = memo(function SelectionBar({
         try {
             await actualizarPagadoMasivo(idsAActualizar, pagado)
             setRowSelection({})
-            router.refresh()
+
         } catch (error) {
             console.error(error)
             alert("Error al actualizar el estado de pago")
@@ -84,7 +83,7 @@ export const SelectionBar = memo(function SelectionBar({
         try {
             await actualizarEnviadoMasivo(idsAActualizar, enviado)
             setRowSelection({})
-            router.refresh()
+
         } catch (error) {
             console.error(error)
             alert("Error al actualizar el estado de envío")

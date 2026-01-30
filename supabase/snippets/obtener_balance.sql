@@ -6,12 +6,16 @@ returns table (
   plata_efectivo numeric,
   costo_envio_total numeric,
   cantidad_envios numeric,
+  total_gastos numeric,
+  cantidad_gastos numeric,
   efectivo_final numeric,
   ingreso_total numeric
 ) as $$
 begin
   return query
-  with calculos_previos as (
+
+  -- 1. Calculamos los totales de PEDIDOS
+  with resumen_pedidos as (
     select
       -- 1. Suma de cantidades (excluyendo cancelados) 
       coalesce(sum(cantidad_agua), 0):: numeric as t_agua,
@@ -41,19 +45,36 @@ begin
     where created_at >= fecha_inicio 
       and created_at <= fecha_fin
       and estado != 'cancelado'
+  ),
+
+  -- 2. Calculamos los totales de GASTOS
+  resumen_gastos as (
+    select 
+      coalesce(sum(monto), 0):: numeric as t_gastos,
+
+      count(*):: numeric as q_gastos
+
+    from public.gastos
+    where created_at >= fecha_inicio 
+      and created_at <= fecha_fin
   )
   -- Ahora sí, seleccionamos y hacemos la resta simple
   select 
-    t_agua,
-    t_crema,
-    p_transferencia,
-    p_efectivo,
-    c_envio,
-    q_envios,
-    (p_efectivo - c_envio) as efectivo_final,
-    (p_efectivo + p_transferencia) as ingreso_total
-  from calculos_previos;
+    p.t_agua,
+    p.t_crema,
+    p.p_transferencia,
+    p.p_efectivo,
+    p.c_envio,
+    p.q_envios,
+    g.t_gastos,
+    g.q_gastos,
+    (p.p_efectivo - p.c_envio - g.t_gastos) as efectivo_final,
+    (p.p_efectivo + p.p_transferencia) as ingreso_total
+  from resumen_pedidos p
+  cross join resumen_gastos g;
 end;
 $$ language plpgsql;
+
+
 
 drop function obtener_balance

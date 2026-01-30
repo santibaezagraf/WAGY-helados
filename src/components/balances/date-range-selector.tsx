@@ -13,14 +13,14 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { memo }  from "react"
+
 
 interface DateRangeSelectorProps {
   onDateRangeChange: (startDate: Date, endDate: Date, mode: "dia" | "semana") => void
   defaultMode?: "dia" | "semana"
 }
 
-export const DateRangeSelector = memo(function DateRangeSelector({
+export const DateRangeSelector = React.memo(function DateRangeSelector({
   onDateRangeChange,
   defaultMode = "semana",
 }: DateRangeSelectorProps) {

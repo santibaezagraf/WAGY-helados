@@ -15,7 +15,7 @@ interface PriceRow {
 }
 
 export interface PriceList {
-  name: string | ""
+  name: string 
   agua: PriceRow[]
   crema: PriceRow[]
 }
@@ -51,7 +51,7 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
     }
 
     fetchActivePriceList()
-  }, [creatingPriceList])
+  }, [creatingPriceList, open])
 
   // Limpiar datos de priceList al salir de la vista de creación
   React.useEffect(() => {
@@ -62,7 +62,7 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
         crema: [{ id: "crema-1", fromQuantity: "", pricePerUnit: "" }],
       })
     }
-  }, [creatingPriceList])
+  }, [creatingPriceList, open])
 
   const handleNameChange = (newName: string) => {
     setPriceList((prev) => ({ ...prev, name: newName }))
@@ -281,7 +281,6 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
             <div className="flex justify-end gap-3 pt-4 border-t">
               <Button
                 variant="outline"
-                // onClick={() => onOpenChange(false)}
                 onClick={() => setCreatingPriceList(false)}
               >
                 Volver

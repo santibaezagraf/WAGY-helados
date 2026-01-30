@@ -31,7 +31,7 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
         try {
             await actualizarCostoEnvioPedido(id, newCostoEnvio);
             onOpenChange(false);
-            router.refresh();
+            
         } catch (error) {
             console.error("Error al actualizar costo de envío:", error);
         } 
@@ -51,15 +51,6 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
                         <label className="block text-sm font-medium text-slate-700 mb-3">Costo de Envío:</label>
                         
                         <div className="flex items-center gap-2 sm:gap-4">
-                            {/* <Button
-                                type="button"
-                                variant="outline"
-                                size="lg"
-                                onClick={() => setNewCostoEnvioStr(Math.max(0, newCostoEnvio - 100).toString())}
-                                className="w-10 h-10 sm:w-12 sm:h-12 rounded-full text-lg sm:text-xl font-bold bg-slate-500 text-white hover:bg-slate-600 flex-shrink-0"
-                            >
-                                -
-                            </Button> */}
                             <div className="flex-1 relative">
                                 <span className="absolute left-4 top-1/2 -translate-y-1/2 text-2xl sm:text-3xl font-bold text-slate-700">$</span>
                                 <Input
@@ -73,19 +64,10 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
                                     }}
                                     onWheel={(e) => e.currentTarget.blur()}
                                     placeholder="0"
-                                    className="h-14 sm:h-16 text-center text-2xl sm:text-4xl font-bold text-cyan-600 border-2 border-cyan-300 placeholder:text-cyan-400 pl-10"
+                                    className="h-14 sm:h-16 text-center text-2xl sm:text-4xl font-bold text-cyan-600 border-2 border-cyan-300 placeholder:text-cyan-400"
                                     min="0"
                                 />
                             </div>
-                            {/* <Button
-                                type="button"
-                                variant="outline"
-                                size="lg"
-                                onClick={() => setNewCostoEnvioStr((newCostoEnvio + 100).toString())}
-                                className="w-10 h-10 sm:w-12 sm:h-12 rounded-full text-lg sm:text-xl font-bold bg-cyan-600 text-white hover:bg-cyan-700 flex-shrink-0"
-                            >
-                                +
-                            </Button> */}
                         </div>
 
                         <div className="flex gap-2 mt-4 flex-wrap justify-center">

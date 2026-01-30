@@ -187,7 +187,7 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
       })
       resetForm()
       onOpenChange(false)
-      router.refresh()
+      
     } catch (error) {
       console.error("Error:", error)
       alert("Error al crear el pedido: " + (error as Error).message)

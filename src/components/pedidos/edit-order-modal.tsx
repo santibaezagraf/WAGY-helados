@@ -146,7 +146,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
         monto_total_crema: parseInt(totalCrema || "0"),
       })
       onOpenChange(false)
-      router.refresh()
+
     } catch (error) {
       console.error("Error:", error)
       alert("Error al actualizar el pedido: " + (error as Error).message)

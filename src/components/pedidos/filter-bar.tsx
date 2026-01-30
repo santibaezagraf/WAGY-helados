@@ -4,9 +4,8 @@ import { Button } from "../ui/button"
 import { Checkbox } from "../ui/checkbox"
 import { Input } from "../ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu"
-import { Filter, Calendar, Clock, Check, X, Van, WalletMinimal, MessageCircle, BarChart3 } from "lucide-react"
+import { Filter, Calendar, Clock, Check, X, Van, WalletMinimal, MessageCircle, BarChart3, DollarSign } from "lucide-react"
 import * as React from "react"
-import { memo } from "react"
 import { Table } from "@tanstack/react-table"
 import { type Filters } from "./data-table"
 import { useRouter } from "next/navigation"
@@ -16,13 +15,15 @@ interface FilterBarProps {
     table: Table<any>
     onFiltersChange?: (filters: Filters) => void
     onAddOrder?: () => void
+    onAddGasto?: () => void
     currentFilters: Filters
 }
 
-export const FilterBar = memo(function FilterBar({ 
+export const FilterBar = React.memo(function FilterBar({ 
     table,
     onFiltersChange,
     onAddOrder,
+    onAddGasto,
     currentFilters,
 }: FilterBarProps) {
     const router = useRouter()
@@ -335,6 +336,15 @@ export const FilterBar = memo(function FilterBar({
                 <BarChart3 className="h-4 w-4" />
                 <span className="hidden sm:inline">Ver Balances</span>
                 <span className="sm:hidden">Balances</span>
+            </Button>
+
+            <Button
+                onClick={onAddGasto}
+                className="w-full md:w-auto bg-rose-600 hover:bg-rose-700 text-white font-semibold text-sm gap-2"
+            >
+                <DollarSign className="h-4 w-4" />
+                <span className="hidden sm:inline">+ Agregar Gasto</span>
+                <span className="sm:hidden">+ Gasto</span>
             </Button>
 
             <Button

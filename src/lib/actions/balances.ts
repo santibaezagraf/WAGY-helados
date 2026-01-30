@@ -9,6 +9,8 @@ export interface Balance {
   plata_efectivo: number
   costo_envio_total: number
   cantidad_envios: number
+  total_gastos: number
+  cantidad_gastos: number
   efectivo_final: number
   ingreso_total: number
 }

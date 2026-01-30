@@ -2,7 +2,6 @@
 
 import { revalidatePath } from "next/cache"
 import { createClient } from "@/lib/supabase-server"
-import { ListaPrecios } from "@/types/pedidos"
 import { PriceList } from "@/components/pedidos/price-list-modal"
 
 // Definimos el tipo de retorno para tener autocompletado en el front

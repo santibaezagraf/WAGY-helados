@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { AddOrderModal } from "@/components/pedidos/add-order-modal"
+import { AddGastoModal } from "@/components/gastos/add-gasto-modal"
 import { Pedido } from "@/types/pedidos"
 import { crearMensajeWpp } from "@/lib/mensaje-utils"
 import { SelectionBar } from "./selection-bar"
@@ -32,6 +33,8 @@ import { FilterBar } from "./filter-bar"
 import { MessageEditor } from "./message-editor"
 import { createColumns } from "@/components/pedidos/columns"
 import { useRouter, useSearchParams, usePathname } from "next/navigation"
+import { EditOrderModal } from "./edit-order-modal"
+import { EditCostoEnvioModal } from "./edit-costo-envio-modal"
 
 type FilterPeriodo = 'dia' | 'semana' | 'mes' | 'todos'
 
@@ -90,16 +93,27 @@ export function DataTable({
   pageCount,
   rowCount
 }: DataTableProps) {
-  const columns = React.useMemo(() => createColumns(), [])
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
   const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
   const [rowSelection, setRowSelection] = React.useState({})
   const [isAddModalOpen, setIsAddModalOpen] = React.useState(false)
+  const [isAddGastoModalOpen, setIsAddGastoModalOpen] = React.useState(false)
+  
+  // Estados para modales
+  const [editingOrderId, setEditingOrderId] = React.useState<number | null>(null)
+  const [editingCostoId, setEditingCostoId] = React.useState<number | null>(null)
   
   // Estados para mensajes de WhatsApp
   const [mostrarEditorWpp, setMostrarEditorWpp] = React.useState(false)
   const [mensajesWpp, setMensajesWpp] = React.useState<{id: number, mensaje: string, enviado: boolean}[]>([])
+
+  const columns = React.useMemo(() => createColumns({
+    editingOrderId,
+    setEditingOrderId,
+    editingCostoId,
+    setEditingCostoId,
+  }), [editingOrderId, editingCostoId])
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -197,6 +211,14 @@ export function DataTable({
 
   const selectedRowsCount = Object.keys(rowSelection).length
 
+  React.useEffect(() => {
+    if (mostrarEditorWpp && mensajesWpp.length !== selectedRowsCount) {
+      setMensajesWpp([])
+      setMostrarEditorWpp(false)
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }, [selectedRowsCount])
+
   const generarMensajesWpp = React.useCallback(async () => {
     const selectedRows = table.getFilteredSelectedRowModel().rows
     const mensajes = selectedRows.map(row => {
@@ -229,6 +251,7 @@ export function DataTable({
         table={table}
         onFiltersChange={onFiltersChange}
         onAddOrder={() => setIsAddModalOpen(true)}
+        onAddGasto={() => setIsAddGastoModalOpen(true)}
         currentFilters={filters}
       />
       
@@ -338,6 +361,32 @@ export function DataTable({
         open={isAddModalOpen}
         onOpenChange={setIsAddModalOpen}
       />
+
+      <AddGastoModal
+        open={isAddGastoModalOpen}
+        onOpenChange={setIsAddGastoModalOpen}
+      />
+
+      {editingOrderId !== null && (
+        <EditOrderModal 
+          open={true}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) setEditingOrderId(null)
+          }}
+          pedido={data.find(p => p.id === editingOrderId)!}
+        />
+      )}
+
+      {editingCostoId !== null && (
+        <EditCostoEnvioModal
+          id={editingCostoId}
+          costoEnvio={data.find(p => p.id === editingCostoId)?.costo_envio || 0}
+          open={true}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) setEditingCostoId(null)
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -34,6 +34,24 @@ export type Database = {
   }
   public: {
     Tables: {
+      gastos: {
+        Row: {
+          created_at: string
+          id: number
+          monto: number
+        }
+        Insert: {
+          created_at?: string
+          id?: number
+          monto: number
+        }
+        Update: {
+          created_at?: string
+          id?: number
+          monto?: number
+        }
+        Relationships: []
+      }
       listas_precios: {
         Row: {
           activa: boolean | null
@@ -165,6 +183,7 @@ export type Database = {
         Args: { fecha_fin: string; fecha_inicio: string }
         Returns: {
           cantidad_envios: number
+          cantidad_gastos: number
           costo_envio_total: number
           efectivo_final: number
           ingreso_total: number
@@ -172,6 +191,7 @@ export type Database = {
           plata_transferencia: number
           total_agua: number
           total_crema: number
+          total_gastos: number
         }[]
       }
     }

@@ -86,12 +86,6 @@ export default async function Home({
 
     const { data: pedidos, error, count } = await query.range(from, to)
 
-    // const { data: pedidos, error, count } = await supabase
-    //     .from('pedidos')
-    //     .select('*', { count: 'exact' })
-    //     .order('created_at', { ascending: false })
-    //     .range(from, to)
-
     if (error) {
         return ( 
             <div>Error al cargar los pedidos: {error.message}</div>

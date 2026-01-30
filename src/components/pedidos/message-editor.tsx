@@ -1,7 +1,6 @@
 import { Button } from "../ui/button"
 import { MessageSquare, Copy, CheckCheck } from "lucide-react"
 import * as React from "react"
-import { memo } from "react"
 import { createClient } from "@/lib/supabase-client"
 import { useRouter} from "next/navigation"
 import { actualizarEnviadoMasivo, actualizarEnviadoPedido } from "@/lib/actions/pedidos"
@@ -12,7 +11,7 @@ interface MessageEditorProps {
   onClose: () => void
 }
 
-export const MessageEditor = memo(function MessageEditor({ 
+export const MessageEditor = React.memo(function MessageEditor({ 
   mensajes, 
   onClose, 
 }: MessageEditorProps) {
@@ -53,8 +52,8 @@ export const MessageEditor = memo(function MessageEditor({
         setMensajesWpp(prev => 
           prev.map(m => m.id === id ? { ...m, enviado: true } : m)
         )
-        // Refrescar datos en el padre
-        router.refresh()
+
+        
       } catch (error) {
         console.error("Error al actualizar enviado:", error)
       }
@@ -77,7 +76,7 @@ export const MessageEditor = memo(function MessageEditor({
           prev.map(m => ({ ...m, enviado: true }))
         )
         // Refrescar datos en el padre
-        router.refresh()
+        
       } catch (error) {
         console.error("Error al actualizar enviados masivamente:", error)
       }
@@ -86,6 +85,8 @@ export const MessageEditor = memo(function MessageEditor({
     // Copiar todos los mensajes concatenados
     const todosMensajes = mensajesWpp.map(m => m.mensaje).join('\n\n')
     navigator.clipboard.writeText(todosMensajes)
+
+    
   }, [mensajesWpp, router])
 
   // Función local: actualizar mensaje editado

@@ -18,7 +18,6 @@ import {
     DropdownMenuSubTrigger,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { EditOrderModal } from "./edit-order-modal"
 import { crearMensajeWpp } from "@/lib/mensaje-utils"
 import {
     actualizarEstadoPedido,
@@ -26,9 +25,13 @@ import {
     actualizarEnviadoPedido,
 } from "@/lib/actions/pedidos"
 import { useRouter } from "next/navigation"
-import { EditCostoEnvioModal } from "./edit-costo-envio-modal"
 
-export const createColumns = (): ColumnDef<Pedido>[] => [
+export const createColumns = (config: {
+    editingOrderId: number | null
+    setEditingOrderId: (id: number | null) => void
+    editingCostoId: number | null
+    setEditingCostoId: (id: number | null) => void
+}): ColumnDef<Pedido>[] => [
     {
         id: "select",
         header: ({ table }) => (
@@ -70,7 +73,8 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
         header: "Teléfono",
     },
     {
-        accessorKey: "costo_envio_movil",
+        id: "costo_envio_mobile",
+        accessorFn: (row) => row.costo_envio,
         header: () => <span className="md:hidden">Costo de Envío</span>,
         cell: ({ row }) => {
             const costo_envio = parseFloat(row.getValue("costo_envio") || "0")
@@ -78,25 +82,15 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                 style: "currency",
                 currency: "ARS",
             }).format(costo_envio)
-            const [open, setOpen] = React.useState(false);
 
             return (
-                <>
-                    <EditCostoEnvioModal
-                        id={row.original.id}
-                        costoEnvio={costo_envio}
-                        open={open}
-                        onOpenChange={setOpen}
-                    />
-
-                    <Button 
-                        variant="link" 
-                        className="md:hidden"
-                        onClick={() => setOpen(!open)}
-                    >
-                        {formatted}
-                    </Button>
-                </>
+                <Button 
+                    variant="link" 
+                    className="md:hidden"
+                    onClick={() => config.setEditingCostoId(row.original.id)}
+                >
+                    {formatted}
+                </Button>
             )
         },
         meta: {
@@ -224,13 +218,12 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
         id: "actions",
         cell: ({ row }) => {
             const pedido = row.original
-            const [editModalOpen, setEditModalOpen] = React.useState(false)
             const router = useRouter()
             
             const actualizarEstado = React.useCallback(async (nuevoEstado: string) => {
                 try {
                     await actualizarEstadoPedido(pedido.id, nuevoEstado)
-                    router.refresh()
+                    
                 } catch (error) {
                     console.error(error)
                     alert("Error al actualizar el estado")
@@ -240,7 +233,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
             const actualizarPagado = React.useCallback(async (pagado: boolean) => {
                 try {
                     await actualizarPagadoPedido(pedido.id, pagado)
-                    router.refresh()
+                    
                 } catch (error) {
                     console.error(error)
                     alert("Error al actualizar el estado de pago")
@@ -250,7 +243,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
             const actualizarEnviado = React.useCallback(async (enviado: boolean) => {
                 try {
                     await actualizarEnviadoPedido(pedido.id, enviado)
-                    router.refresh()
+                    
                 } catch (error) {
                     console.error(error)
                     alert("Error al actualizar el estado de envío")
@@ -259,12 +252,6 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
         
             return (
                 <>
-                    <EditOrderModal 
-                        open={editModalOpen}
-                        onOpenChange={setEditModalOpen}
-                        pedido={pedido}
-                    />
-                    
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                             <Button variant="ghost" className="h-8 w-8 p-0">
@@ -275,7 +262,7 @@ export const createColumns = (): ColumnDef<Pedido>[] => [
                         <DropdownMenuContent align="end">
                             <DropdownMenuLabel>Acciones</DropdownMenuLabel>
 
-                            <DropdownMenuItem onClick={() => setEditModalOpen(true)}>
+                            <DropdownMenuItem onClick={() => config.setEditingOrderId(pedido.id)}>
                                 <Edit className="h-4 w-4 mr-2" />
                                 Editar
                             </DropdownMenuItem>

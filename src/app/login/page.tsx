@@ -26,7 +26,7 @@ export default function Login() {
             router.refresh()
         }
         setLoading(false)
-    }, [email, password, supabase.auth, router])
+    }, [email, password, router])
 
     return (
         <div className="flex min-h-screen items-center justify-center bg-gray-50 text-black">
