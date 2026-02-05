@@ -108,12 +108,57 @@ export function DataTable({
   const [mostrarEditorWpp, setMostrarEditorWpp] = React.useState(false)
   const [mensajesWpp, setMensajesWpp] = React.useState<{id: number, mensaje: string, enviado: boolean}[]>([])
 
+  const lastSelectedRowIdRef = React.useRef<string | null>(null)
+  const tableRef = React.useRef<ReturnType<typeof useReactTable<Pedido>> | null>(null)
+
+  const handleRowSelect = React.useCallback((row: any, event: React.MouseEvent<HTMLButtonElement>) => {
+    const tableInstance = tableRef.current
+
+    if (!tableInstance) {
+      row.toggleSelected()
+      lastSelectedRowIdRef.current = row.id
+      return
+    }
+
+    const rows = tableInstance.getRowModel().rows
+    const currentIndex = rows.findIndex(r => r.id === row.id)
+
+    if (event.shiftKey && lastSelectedRowIdRef.current) {
+      const lastIndex = rows.findIndex(r => r.id === lastSelectedRowIdRef.current)
+
+      if (currentIndex !== -1 && lastIndex !== -1) {
+        const start = Math.min(currentIndex, lastIndex)
+        const end = Math.max(currentIndex, lastIndex)
+        const shouldSelect = !row.getIsSelected()
+
+        setRowSelection(prev => {
+          const next = { ...prev } as Record<string, boolean>
+          for (let i = start; i <= end; i += 1) {
+            if (shouldSelect) {
+              next[rows[i].id] = true
+            } else {
+              delete next[rows[i].id]
+            }
+          }
+          return next
+        })
+
+        lastSelectedRowIdRef.current = row.id
+        return
+      }
+    }
+
+    row.toggleSelected()
+    lastSelectedRowIdRef.current = row.id
+  }, [])
+
   const columns = React.useMemo(() => createColumns({
     editingOrderId,
     setEditingOrderId,
     editingCostoId,
     setEditingCostoId,
-  }), [editingOrderId, editingCostoId])
+    onRowSelect: handleRowSelect,
+  }), [editingOrderId, editingCostoId, handleRowSelect])
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -182,6 +227,11 @@ export function DataTable({
     setFilters(urlFilters)
   }, [searchParams])
 
+  React.useEffect(() => {
+    setRowSelection({})
+    lastSelectedRowIdRef.current = null
+  }, [ filters, pageIndex, pageSize])
+
   const table = useReactTable({
     data: data,
     columns,
@@ -208,6 +258,8 @@ export function DataTable({
     },
 
   })
+
+  tableRef.current = table
 
   const selectedRowsCount = Object.keys(rowSelection).length
 
@@ -321,10 +373,20 @@ export function DataTable({
 
           {' pedidos por página.'}
         </div>
+
+        <div 
+          className="text-sm text-muted-foreground"
+          onClick={() => table.setPageIndex(0)}
+          aria-disabled={!table.getCanPreviousPage()}
+          style={{ cursor: table.getCanPreviousPage() ? 'pointer' : 'not-allowed', opacity: table.getCanPreviousPage() ? 1 : 0.5 }}
+          >
+          Volver a la primer página
+        </div>
         
         
 
         <div className="flex items-center space-x-2">
+          
           <Button
             variant="outline"
             size="sm"
