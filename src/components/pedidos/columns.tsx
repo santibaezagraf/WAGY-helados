@@ -1,11 +1,12 @@
 "use client"
 
 import * as React from "react"
-import { ColumnDef } from "@tanstack/react-table"
+import { ColumnDef, Row } from "@tanstack/react-table"
 import { Pedido } from "@/types/pedidos"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { TruncatedText } from "@/components/ui/truncated-text"
 import { ArrowUpDown, MoreHorizontal, Check, X, Clock, Copy, Edit } from "lucide-react"
 import {
     DropdownMenu,
@@ -31,6 +32,7 @@ export const createColumns = (config: {
     setEditingOrderId: (id: number | null) => void
     editingCostoId: number | null
     setEditingCostoId: (id: number | null) => void
+    onRowSelect: (row: Row<Pedido>, event: React.MouseEvent<HTMLButtonElement>) => void
 }): ColumnDef<Pedido>[] => [
     {
         id: "select",
@@ -47,7 +49,7 @@ export const createColumns = (config: {
         cell: ({ row }) => (
             <Checkbox
                 checked={row.getIsSelected()}
-                onCheckedChange={(value) => row.toggleSelected(!!value)}
+                onClick={(event) => config.onRowSelect(row, event)}
                 aria-label="Seleccionar fila"
             />
         ),
@@ -56,16 +58,10 @@ export const createColumns = (config: {
     },
     {
         accessorKey: "direccion",
-        header: ({ column }) => {
-            return (
-                <Button
-                    variant="ghost"
-                    onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-                >
-                    Dirección
-                <ArrowUpDown className="ml-2 h-4 w-4" />
-                </Button>
-            )
+        header: "Dirección",
+        cell: ({ row }) => {
+            const direccion = row.getValue("direccion") as string
+            return <TruncatedText text={direccion} maxLength={25} />
         },
     },
     {
@@ -98,32 +94,42 @@ export const createColumns = (config: {
         }
     },
     {
-        accessorKey: "cantidad_agua",
-        header: ({ column }) => {
-            return (
-                <Button
-                    variant="ghost"
-                    onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-                >
-                    Helados Agua
-                <ArrowUpDown className="ml-2 h-4 w-4" />
-                </Button>
-            )
+        accessorKey: "observaciones",
+        header: "Observaciones",
+        cell: ({ row }) => {
+            const observaciones = row.getValue("observaciones") as string
+            return <TruncatedText text={observaciones} maxLength={25} />
         },
     },
     {
+        accessorKey: "cantidad_agua",
+        // header: ({ column }) => {
+        //     return (
+        //         <Button
+        //             variant="ghost"
+        //             onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+        //         >
+        //             Helados Agua
+        //         <ArrowUpDown className="ml-2 h-4 w-4" />
+        //         </Button>
+        //     )
+        // },
+        header: "Cant. Agua",
+    },
+    {
         accessorKey: "cantidad_crema",
-        header: ({ column }) => {
-            return (
-                <Button
-                    variant="ghost"
-                    onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-                >
-                    Helados Crema
-                <ArrowUpDown className="ml-2 h-4 w-4" />
-                </Button>
-            )
-        },
+        // header: ({ column }) => {
+        //     return (
+        //         <Button
+        //             variant="ghost"
+        //             onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+        //         >
+        //             Helados Crema
+        //         <ArrowUpDown className="ml-2 h-4 w-4" />
+        //         </Button>
+        //     )
+        // },
+        header: "Cant. Crema",
     },
     {
         accessorKey: "metodo_pago",
