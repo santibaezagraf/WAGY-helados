@@ -375,12 +375,27 @@ export function DataTable({
         </div>
 
         <div 
-          className="text-sm text-muted-foreground"
-          onClick={() => table.setPageIndex(0)}
-          aria-disabled={!table.getCanPreviousPage()}
-          style={{ cursor: table.getCanPreviousPage() ? 'pointer' : 'not-allowed', opacity: table.getCanPreviousPage() ? 1 : 0.5 }}
-          >
-          Volver a la primer página
+          className="text-sm text-muted-foreground"         
+        >
+          {'Ir a la '} 
+            <span
+              className="underline cursor-pointer"
+              onClick={() => table.setPageIndex(0)}
+              aria-disabled={!table.getCanPreviousPage()}
+              style={{ cursor: table.getCanPreviousPage() ? 'pointer' : 'not-allowed', opacity: table.getCanPreviousPage() ? 1 : 0.5 }}
+            >
+              primer
+            </span>
+            /
+            <span
+              className="underline cursor-pointer"
+              onClick={() => table.setPageIndex(table.getPageCount() - 1)}
+              aria-disabled={!table.getCanNextPage()}
+              style={{ cursor: table.getCanNextPage() ? 'pointer' : 'not-allowed', opacity: table.getCanNextPage() ? 1 : 0.5 }}
+            >
+              última
+            </span>
+          {' página'}
         </div>
         
         
