@@ -56,6 +56,27 @@ export type Database = {
         }
         Relationships: []
       }
+      mensajes_chat: {
+        Row: {
+          created_at: string
+          id: string
+          telefono: string | null
+          texto: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          telefono?: string | null
+          texto?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          telefono?: string | null
+          texto?: string | null
+        }
+        Relationships: []
+      }
       pedidos: {
         Row: {
           aclaracion: string | null
