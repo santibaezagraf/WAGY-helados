@@ -204,7 +204,42 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
  * si dos wake-ups de QStash se solapan, solo uno se lleva los mensajes y
  * procesa; el otro recibe 0 filas y sale sin hacer nada.
  */
+// Si el último mensaje pendiente llegó hace menos que este umbral, asumimos
+// que el cliente sigue tipeando y diferimos el procesamiento al próximo
+// wake-up. Cada mensaje ya agenda su propio wake-up de QStash, así que con
+// que UNO de ellos vea silencio suficiente alcanza para procesar todo el
+// batch junto. Tiene que ser menor a DEBOUNCE_SECONDS (8s) del webhook para
+// que la última wake-up siempre vea su propio mensaje como "viejo" y procese.
+const DEFER_THRESHOLD_MS = 5000;
+
 export async function procesarMensajesDeCliente(numeroCliente: string) {
+  // 0. DEBOUNCE: chequeamos si el último mensaje pendiente es muy reciente.
+  //    El claim atómico solo evita doble-procesamiento del MISMO mensaje;
+  //    no evita que dos wake-ups consecutivos procesen SUBSETS distintos
+  //    cuando los mensajes llegan espaciados (el primer wake-up se lleva
+  //    los primeros mensajes, llega uno nuevo, el segundo wake-up se lleva
+  //    ese, y ambos terminan respondiendo). Con este defer, esperamos a
+  //    que haya silencio antes de claimear.
+  const { data: ultimoPendiente } = await supabaseAdmin
+    .from('mensajes_chat')
+    .select('created_at')
+    .eq('telefono', numeroCliente)
+    .eq('procesado', false)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!ultimoPendiente) {
+    console.log(`⏭️ Sin mensajes pendientes para ${numeroCliente}. Otro worker ya los procesó.`);
+    return;
+  }
+
+  const msDesdeUltimo = Date.now() - new Date(ultimoPendiente.created_at).getTime();
+  if (msDesdeUltimo < DEFER_THRESHOLD_MS) {
+    console.log(`⏳ Mensaje pendiente muy reciente (${msDesdeUltimo}ms < ${DEFER_THRESHOLD_MS}ms) para ${numeroCliente}. Difiriendo al próximo wake-up.`);
+    return;
+  }
+
   // 1. CLAIM ATÓMICO: marcamos los mensajes nuevos como procesados y traemos
   //    su contenido. Esto es lo que nos da la dedupliación entre wake-ups
   //    concurrentes: si otro worker ya los reclamó, este recibe 0 filas y sale.
