@@ -106,11 +106,11 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
   const yaExisteEnCocina = pedidoActivo && pedidoActivo.estado === 'pendiente' && !pedidoEnviado;
   const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
 
-  if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
+  if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion || pedidoEnviado)) {
     return `
       ACTÚA COMO UNA API DE EXTRACCIÓN Y MODIFICACIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
 
-      CONTEXTO: El cliente tiene un pedido activo en el sistema con el estado "${pedidoActivo.estado}". Tu objetivo es devolver el objeto JSON final con los datos combinados y actualizados.
+      CONTEXTO: El cliente tiene un pedido activo en el sistema con el estado "${pedidoActivo.estado}"${pedidoEnviado ? ' (YA FUE DESPACHADO, no se puede modificar)' : ''}. Tu objetivo es devolver el objeto JSON final con los datos combinados y actualizados.
 
       DATOS ACTUALES DEL PEDIDO EN LA BASE DE DATOS:
       - cantidad_crema: ${pedidoActivo.cantidad_crema}
@@ -521,7 +521,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
     // 2. SALUDO
     if (pedido.es_saludo) {
-      if (yaExisteEnCocina) {
+      if (pedidoEnviado) {
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya fue despachado y está en camino. 🛵 ¡Gracias por elegirnos!");
+      } else if (yaExisteEnCocina) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Recordá que ya tenemos tu pedido en preparación. ¿Querés agregar o modificar algo, o te puedo ayudar con otra cosa?");
       } else if (tieneBorrador) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tengo el resumen de tu pedido en pausa. ¿Me confirmás si los datos están bien con un *SÍ* o un *NO*?");
@@ -538,6 +540,18 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     if (pedido.es_modificacion_sin_datos && (tieneBorrador || yaExisteEnCocina)) {
       await enviarMensajeWhatsApp(numeroCliente, "Entendido. ¿Qué te gustaría modificar o agregar? Escribime los detalles así actualizo el pedido. 📝");
       console.log("⚠️ El cliente quiere modificar pero no dio datos nuevos.");
+      return;
+    }
+
+    // 3b. PEDIDO YA ENVIADO. Si llegamos acá con un pedido enviado, no era ni
+    // cancelación (esa se maneja arriba con UPDATE condicional) ni saludo ni
+    // modificación sin datos. Probablemente el cliente está tratando de
+    // modificar (cantidades, dirección, etc.) un pedido que ya está en moto.
+    // No se puede: avisamos y cortamos antes de que el código intente INSERT
+    // de un pedido nuevo por error.
+    if (pedidoEnviado) {
+      await enviarMensajeWhatsApp(numeroCliente, "Tu pedido ya fue despachado y está en camino, no puedo modificarlo a esta altura. 🛵 Si querés hacer otro pedido, escribime más tarde y armamos uno nuevo.");
+      console.log(`ℹ️ Cliente intentó interactuar con pedido ${pedidoActivo?.id} ya enviado. Aviso enviado.`);
       return;
     }
 
