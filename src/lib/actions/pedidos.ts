@@ -4,6 +4,22 @@ import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase-server'
 
 /**
+ * Mantiene el flag booleano `enviado` consistente con el `estado`:
+ *  - estado='enviado'   → enviado=true
+ *  - estado='cancelado' → enviado=false (sino una cancelación de un pedido
+ *                         marcado previamente como enviado deja el flag pegado
+ *                         y el bot lo trata como "pedido despachado reciente"
+ *                         para respuestas contextuales).
+ *  - otros estados      → no tocamos el flag (lo gestiona el dashboard a mano).
+ */
+function patchConEnviadoCoherente(estado: string): Record<string, unknown> {
+    const patch: Record<string, unknown> = { estado }
+    if (estado === 'enviado') patch.enviado = true
+    if (estado === 'cancelado') patch.enviado = false
+    return patch
+}
+
+/**
  * Actualiza el estado de un pedido individual
  */
 export async function actualizarEstadoPedido(
@@ -14,7 +30,7 @@ export async function actualizarEstadoPedido(
 
     const { error } = await supabase
         .from("pedidos")
-        .update({ estado: nuevoEstado })
+        .update(patchConEnviadoCoherente(nuevoEstado))
         .eq("id", id)
 
     if (error) throw new Error(`Error al actualizar estado: ${error.message}`)
@@ -87,7 +103,7 @@ export async function actualizarPedidoCompleto(
 
     const { error } = await supabase
         .from("pedidos")
-        .update(datos)
+        .update({ ...datos, ...patchConEnviadoCoherente(datos.estado) })
         .eq("id", id)
 
     if (error) throw new Error(`Error al actualizar pedido: ${error.message}`)
@@ -109,7 +125,7 @@ export async function actualizarEstadoMasivo(
 
     const { error } = await supabase
         .from("pedidos")
-        .update({ estado: nuevoEstado })
+        .update(patchConEnviadoCoherente(nuevoEstado))
         .in("id", ids)
 
     if (error) throw new Error(`Error al actualizar estados masivamente: ${error.message}`)

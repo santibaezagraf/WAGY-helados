@@ -294,7 +294,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .select('id, estado, created_at')
       .eq('telefono', numeroCliente)
       .gte('created_at', hace12Horas)
-      .or('estado.eq.enviado,enviado.eq.true')
+      .eq('estado', 'enviado')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
