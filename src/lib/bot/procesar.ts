@@ -1,5 +1,6 @@
-import { generateText } from 'ai';
+import { generateObject } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
+import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion } from '@/lib/whatsapp';
@@ -10,6 +11,30 @@ const supabaseAdmin = createClient<Database>(
 );
 
 const groq = createGroq();
+
+/**
+ * Schema de la respuesta del modelo. Validado por Zod, retry automático del SDK
+ * si el modelo no respeta el shape. Reemplaza al parsing manual con indexOf+JSON.parse.
+ *
+ * `datos_completos` NO está acá porque lo calculamos nosotros después
+ * (no es algo que el modelo deba decidir).
+ */
+export const PedidoIASchema = z.object({
+  direccion: z.string().nullable().describe('Calle y número únicamente (ej: "Mitre 951"). null si no se mencionó o si solo dieron aclaración. La palabra "retira" si pasan a retirar.'),
+  aclaracion: z.string().nullable().describe('Detalles extra de la ubicación (depto, piso, color de casa, etc.). null si no aplica.'),
+  cantidad_agua: z.number().describe('Cantidad de helados de agua. 0 si no se mencionó.'),
+  cantidad_crema: z.number().describe('Cantidad de helados de crema. 0 si no se mencionó.'),
+  observaciones: z.string().nullable().describe('Sabores o detalles de preparación textuales. null si no se mencionó.'),
+  metodo_pago: z.string().nullable().describe('"efectivo", "transferencia" o null.'),
+  es_cancelacion: z.boolean().describe('El cliente pide cancelar/anular el pedido.'),
+  es_confirmacion: z.boolean().describe('El cliente confirma los datos del resumen.'),
+  es_confirmacion_cancelacion: z.boolean().describe('El cliente confirma que SÍ quiere cancelar (cuando estado=esperando_cancelacion).'),
+  es_rechazo_cancelacion: z.boolean().describe('El cliente se arrepiente y NO quiere cancelar (cuando estado=esperando_cancelacion).'),
+  es_modificacion_sin_datos: z.boolean().describe('El cliente quiere modificar pero no aporta NINGÚN dato nuevo.'),
+  es_saludo: z.boolean().describe('El mensaje es únicamente un saludo, sin datos.'),
+});
+
+type PedidoIA = z.infer<typeof PedidoIASchema> & { datos_completos: boolean };
 
 /**
  * Procesa todos los mensajes pendientes de un cliente.
@@ -209,28 +234,35 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     `;
   }
 
-  // 5. LLAMADA A GROQ
-  const { text } = await generateText({
-    model: groq('llama-3.1-8b-instant'),
-    system: SYSTEM_PROMPT,
-    prompt: `Mensaje(s) del cliente: "${historialParaIA}"`,
-    temperature: 0,
-  });
+  // 5. LLAMADA A GROQ con structured output validado por Zod.
+  //    Si el modelo devuelve algo que no matchea el schema, el SDK reintenta
+  //    automáticamente. Si falla N veces, tira un error que cae en el catch.
+  let pedido: PedidoIA;
+  try {
+    const { object } = await generateObject({
+      model: groq('openai/gpt-oss-20b'),
+      system: SYSTEM_PROMPT,
+      prompt: `Mensaje(s) del cliente: "${historialParaIA}"`,
+      schema: PedidoIASchema,
+      temperature: 0,
+    });
+
+    // datos_completos lo calculamos nosotros (no lo decide el modelo)
+    pedido = {
+      ...object,
+      datos_completos: Boolean(
+        object.direccion && object.metodo_pago && (object.cantidad_agua > 0 || object.cantidad_crema > 0)
+      ),
+    };
+
+    console.log("✅ Objeto IA extraído:", pedido);
+  } catch (iaError) {
+    console.error("❌ Falló la extracción structured del modelo:", iaError);
+    await enviarMensajeWhatsApp(numeroCliente, "Disculpá, tuve un problema entendiendo tu mensaje. ¿Podés repetirlo? 🙏");
+    return;
+  }
 
   try {
-    const inicioJson = text.indexOf('{');
-    const finJson = text.lastIndexOf('}');
-
-    if (inicioJson === -1 || finJson === -1) {
-      throw new Error("No se encontraron las llaves del JSON en la respuesta.");
-    }
-
-    const jsonLimpio = text.substring(inicioJson, finJson + 1);
-    const pedido = JSON.parse(jsonLimpio);
-
-    pedido.datos_completos = Boolean(pedido.direccion && pedido.metodo_pago && (pedido.cantidad_agua > 0 || pedido.cantidad_crema > 0));
-
-    console.log("✅ JSON Extraído:", pedido);
 
     // OVERRIDE DE DIRECCIÓN HISTÓRICA
     if (!pedido.direccion && direccionGuardada) {
@@ -280,17 +312,46 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     }
 
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
+    //
+    // Todos los UPDATE de estos flujos van con guard atómico:
+    //   .neq('estado', 'enviado').neq('enviado', true)
+    // Esto evita una race condition: entre que leímos pedidoActivo y ahora,
+    // el repartidor pudo haber tocado "Marcar como enviado". Si el UPDATE
+    // afecta 0 filas, sabemos que se envió en la ventana y le avisamos al cliente.
     if (pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion') {
       if (pedido.es_confirmacion_cancelacion) {
-        if (pedidoEnviado) {
-          await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya fue despachado por el repartidor y está en camino, por lo que no se pudo cancelar. 🛵");
-        } else {
-          await supabaseAdmin.from('pedidos').update({ estado: 'cancelado' }).eq('id', pedidoActivo.id);
+        const { data: cancelados } = await supabaseAdmin
+          .from('pedidos')
+          .update({ estado: 'cancelado' })
+          .eq('id', pedidoActivo.id)
+          .neq('estado', 'enviado')
+          .neq('enviado', true)
+          .select('id');
+
+        if (cancelados && cancelados.length > 0) {
           await enviarMensajeWhatsApp(numeroCliente, "Listo, pedido cancelado definitivamente. Si volvés a tener ganas de helado, acá voy a estar. 👋");
+          console.log(`✅ Pedido ${pedidoActivo.id} cancelado.`);
+        } else {
+          console.log(`⚠️ Race detectada: el pedido ${pedidoActivo.id} fue enviado entre el read y el UPDATE.`);
+          await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya fue despachado por el repartidor y está en camino, por lo que no se pudo cancelar. 🛵");
         }
       } else if (pedido.es_rechazo_cancelacion) {
-        await supabaseAdmin.from('pedidos').update({ estado: "borrador" }).eq('id', pedidoActivo.id);
-        await enviarResumenYPedirConfirmacion(numeroCliente, pedidoActivo, false);
+        // Volvemos el pedido a borrador. Si mientras tanto se envió o canceló
+        // por otro lado, no lo tocamos.
+        const { data: rechazados } = await supabaseAdmin
+          .from('pedidos')
+          .update({ estado: 'borrador' })
+          .eq('id', pedidoActivo.id)
+          .eq('estado', 'esperando_cancelacion') // Solo si sigue en este estado
+          .select('*')
+          .maybeSingle();
+
+        if (rechazados) {
+          await enviarResumenYPedirConfirmacion(numeroCliente, rechazados, false);
+        } else {
+          console.log(`⚠️ El pedido ${pedidoActivo.id} ya no está en 'esperando_cancelacion'. Algo cambió en paralelo.`);
+          await enviarMensajeWhatsApp(numeroCliente, "Mmm, algo cambió con tu pedido mientras tanto. Volveme a escribir y vemos cómo seguimos. 🙏");
+        }
       } else {
         await enviarMensajeWhatsApp(numeroCliente, "Por favor, confirmame: ¿Querés cancelar el pedido? Respondé *SÍ* para cancelarlo o *NO* para mantenerlo activo.");
       }
@@ -298,13 +359,20 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     }
 
     if (pedido.es_cancelacion && pedidoActivo) {
-      if (pedidoEnviado) {
-        await enviarMensajeWhatsApp(numeroCliente, "Uy, te pido mil disculpas pero tu pedido ya fue despachado y está en camino, por lo que no podemos cancelarlo a esta altura. 🛵");
-        console.log("❌ El cliente quiso cancelar pero el pedido ya fue enviado.");
-      } else {
-        await supabaseAdmin.from('pedidos').update({ estado: 'esperando_cancelacion' }).eq('id', pedidoActivo.id);
+      const { data: marcados } = await supabaseAdmin
+        .from('pedidos')
+        .update({ estado: 'esperando_cancelacion' })
+        .eq('id', pedidoActivo.id)
+        .neq('estado', 'enviado')
+        .neq('enviado', true)
+        .select('id');
+
+      if (marcados && marcados.length > 0) {
         await enviarMensajeWhatsApp(numeroCliente, "⚠️ ¿Estás seguro de que querés cancelar tu pedido? Respondé *SÍ* para confirmar la cancelación o *NO* si querés conservarlo.");
-        console.log(`⚠️ Pedido puesto en estado 'esperando_cancelacion'.`);
+        console.log(`⚠️ Pedido ${pedidoActivo.id} puesto en estado 'esperando_cancelacion'.`);
+      } else {
+        console.log(`❌ El cliente quiso cancelar pero el pedido ${pedidoActivo.id} ya fue enviado (race o estado previo).`);
+        await enviarMensajeWhatsApp(numeroCliente, "Uy, te pido mil disculpas pero tu pedido ya fue despachado y está en camino, por lo que no podemos cancelarlo a esta altura. 🛵");
       }
       return;
     }
@@ -382,6 +450,11 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         await enviarMensajeWhatsApp(numeroCliente, mensajeRespuesta);
       }
       else if (pedido.datos_completos === true) {
+        // `datos_completos === true` ya garantiza direccion y metodo_pago no nulos,
+        // pero TS no lo infiere del Boolean(...). Asertamos no-null acá.
+        const direccion = pedido.direccion!;
+        const metodoPago = pedido.metodo_pago!;
+
         let borradorDB = null;
 
         if (yaExisteEnCocina) {
@@ -391,10 +464,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             .update({
               cantidad_agua: pedido.cantidad_agua,
               cantidad_crema: pedido.cantidad_crema,
-              direccion: pedido.direccion,
+              direccion: direccion,
               aclaracion: pedido.aclaracion,
               observaciones: pedido.observaciones,
-              metodo_pago: pedido.metodo_pago,
+              metodo_pago: metodoPago,
               estado: 'borrador'
             })
             .eq('id', pedidoActivo.id)
@@ -412,12 +485,12 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             .from('pedidos')
             .insert([{
               telefono: numeroCliente,
-              direccion: pedido.direccion,
+              direccion: direccion,
               aclaracion: pedido.aclaracion,
               cantidad_agua: pedido.cantidad_agua,
               cantidad_crema: pedido.cantidad_crema,
               observaciones: pedido.observaciones,
-              metodo_pago: pedido.metodo_pago,
+              metodo_pago: metodoPago,
               estado: 'borrador'
             }])
             .select('*')
@@ -436,7 +509,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         }
       }
     }
-  } catch (parseError) {
-    console.error("❌ Falló la extracción del JSON. Texto original:", text, parseError);
+  } catch (flowError) {
+    // Cualquier error inesperado en la lógica de flow post-IA cae acá.
+    // El error del structured output ya se maneja arriba con su propio try/catch.
+    console.error("❌ Error en el flow post-IA:", flowError);
   }
 }
