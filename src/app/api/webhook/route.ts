@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
 import { ejecutarBoton, parsearBotonId } from '@/lib/bot/botones';
+import { enviarMensajeWhatsApp } from '@/lib/whatsapp';
 
 // 1. GET: Meta usa esto una sola vez para verificar que la URL es tuya
 export async function GET(request: Request) {
@@ -36,6 +37,20 @@ const DEBOUNCE_SECONDS = 8;
 function normalizarNumero(numero: string): string {
   if (numero.startsWith("549")) return "54" + numero.slice(3);
   return numero;
+}
+
+// Texto humano para informar el tipo de mensaje no soportado.
+function nombreLegibleTipo(tipo: string): string {
+  const mapa: Record<string, string> = {
+    audio: "audios",
+    image: "imágenes",
+    video: "videos",
+    sticker: "stickers",
+    document: "documentos",
+    location: "ubicaciones",
+    contacts: "contactos",
+  };
+  return mapa[tipo] ?? `mensajes de tipo "${tipo}"`;
 }
 
 /**
@@ -76,7 +91,15 @@ export async function POST(request: Request) {
       return await manejarTexto(message, numeroCliente, waMessageId);
     }
 
-    console.log(`📎 Mensaje no soportado (tipo: ${message.type}). Ignorando.`);
+    // Cualquier otro tipo (audio, image, sticker, video, location, document, etc.):
+    // le avisamos al cliente que solo entendemos texto, pero NO insertamos en
+    // mensajes_chat ni publicamos QStash — los mensajes de texto del mismo batch
+    // ya están agendando sus propios wake-ups y el debounce los junta.
+    console.log(`📎 Mensaje no soportado (tipo: ${message.type}) de ${numeroCliente}. Avisando al cliente.`);
+    await enviarMensajeWhatsApp(
+      numeroCliente,
+      `Por ahora solo puedo leer mensajes de texto, no entiendo ${nombreLegibleTipo(message.type)}. Escribime así te ayudo con tu pedido. 🙏`,
+    );
     return NextResponse.json({ status: 'unsupported_type' }, { status: 200 });
 
   } catch (error) {
