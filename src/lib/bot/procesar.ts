@@ -13,6 +13,27 @@ const supabaseAdmin = createClient<Database>(
 const groq = createGroq();
 
 /**
+ * Marca todos los mensajes del cliente como "descartados" (descartado=true).
+ * Se llama cuando una conversación se cierra (cancelación confirmada,
+ * confirmación de borrador a pendiente), para que la próxima vez que el
+ * cliente escriba, el historial de últimos 15 minutos no incluya mensajes
+ * de la conversación anterior y el modelo no los combine con los nuevos.
+ */
+async function marcarHistorialDescartado(numeroCliente: string) {
+  const { error } = await supabaseAdmin
+    .from('mensajes_chat')
+    .update({ descartado: true })
+    .eq('telefono', numeroCliente)
+    .eq('descartado', false);
+
+  if (error) {
+    console.error(`❌ Error marcando historial descartado para ${numeroCliente}:`, error);
+  } else {
+    console.log(`🗑️ Historial marcado como descartado para ${numeroCliente}.`);
+  }
+}
+
+/**
  * Schema de la respuesta del modelo. Validado por Zod, retry automático del SDK
  * si el modelo no respeta el shape. Reemplaza al parsing manual con indexOf+JSON.parse.
  *
@@ -250,6 +271,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .from('mensajes_chat')
       .select('id, texto, created_at')
       .eq('telefono', numeroCliente)
+      .eq('descartado', false) // ignoramos mensajes de conversaciones ya cerradas
       .gte('created_at', hace15Minutos)
       .order('created_at', { ascending: true })
       .limit(15);
@@ -448,6 +470,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         if (cancelados && cancelados.length > 0) {
           await enviarMensajeWhatsApp(numeroCliente, "Listo, pedido cancelado definitivamente. Si volvés a tener ganas de helado, acá voy a estar. 👋");
           console.log(`✅ Pedido ${pedidoActivo.id} cancelado.`);
+          // La conversación cerró: marcamos los mensajes como descartados
+          // para que no contaminen el historial de la próxima conversación.
+          await marcarHistorialDescartado(numeroCliente);
         } else {
           console.log(`⚠️ Race detectada: el pedido ${pedidoActivo.id} fue enviado entre el read y el UPDATE.`);
           await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya fue despachado por el repartidor y está en camino, por lo que no se pudo cancelar. 🛵");
@@ -523,6 +548,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         if (finalData) {
           await enviarMensajeWhatsApp(numeroCliente, `¡Espectacular! Pedido confirmado y enviado a la cocina. ¡Muchas gracias! 🍦`);
           console.log("✅ Pedido borrador confirmado por el cliente. Enviado a cocina.");
+          // Cierre de la fase de armado: descartamos los mensajes del historial
+          // para que futuras modificaciones no vean "quiero 10 de crema" etc.
+          await marcarHistorialDescartado(numeroCliente);
         }
       } else if (hayCambiosReales) {
         const { data: updatedData } = await supabaseAdmin.from('pedidos').update({
