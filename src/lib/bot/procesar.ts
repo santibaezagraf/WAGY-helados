@@ -3,7 +3,7 @@ import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
-import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion } from '@/lib/whatsapp';
+import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion } from '@/lib/whatsapp';
 
 const supabaseAdmin = createClient<Database>(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -19,7 +19,7 @@ const groq = createGroq();
  * cliente escriba, el historial de últimos 15 minutos no incluya mensajes
  * de la conversación anterior y el modelo no los combine con los nuevos.
  */
-async function marcarHistorialDescartado(numeroCliente: string) {
+export async function marcarHistorialDescartado(numeroCliente: string) {
   const { error } = await supabaseAdmin
     .from('mensajes_chat')
     .update({ descartado: true })
@@ -551,7 +551,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           await enviarMensajeWhatsApp(numeroCliente, "Mmm, algo cambió con tu pedido mientras tanto. Volveme a escribir y vemos cómo seguimos. 🙏");
         }
       } else {
-        await enviarMensajeWhatsApp(numeroCliente, "Por favor, confirmame: ¿Querés cancelar el pedido? Respondé *SÍ* para cancelarlo o *NO* para mantenerlo activo.");
+        await enviarConfirmacionCancelacion(numeroCliente, pedidoActivo.id, "Por favor, confirmame: ¿Querés cancelar el pedido?");
       }
       return;
     }
@@ -566,7 +566,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         .select('id');
 
       if (marcados && marcados.length > 0) {
-        await enviarMensajeWhatsApp(numeroCliente, "⚠️ ¿Estás seguro de que querés cancelar tu pedido? Respondé *SÍ* para confirmar la cancelación o *NO* si querés conservarlo.");
+        await enviarConfirmacionCancelacion(numeroCliente, pedidoActivo.id);
         console.log(`⚠️ Pedido ${pedidoActivo.id} puesto en estado 'esperando_cancelacion'.`);
       } else {
         console.log(`❌ El cliente quiso cancelar pero el pedido ${pedidoActivo.id} ya fue enviado (race o estado previo).`);
