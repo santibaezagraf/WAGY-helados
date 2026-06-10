@@ -122,7 +122,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
         * Si el cliente CONTRADICE un detalle puntual del actual (ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde"), REEMPLAZA solo la parte contradicha y conservá el resto → "casa verde, de 2 pisos".
         * Si el cliente no menciona aclaración alguna en este mensaje, mantén lo actual: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}.
       - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
-      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si.
+      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si. NUNCA INVENTES sabores u observaciones que el cliente no haya dicho textualmente.
         * MERGE INTELIGENTE: Si el cliente AGREGA sabores/detalles que NO contradicen los actuales, CONCATENA con coma. Ej: actual "los de crema de chocolate" + mensaje "y los de agua de frutilla" → "los de crema de chocolate, los de agua de frutilla".
         * Si el cliente CONTRADICE (ej: actual "de chocolate" + mensaje "no, mejor de vainilla"), REEMPLAZA solo la parte contradicha y conservá el resto.
         * Si no menciona ningún sabor en este mensaje, mantén el valor actual de forma obligatoria: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}.
@@ -168,7 +168,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
     - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0.
     - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
-    - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. Si no menciona nada por el estilo, null.
+    - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. NUNCA INVENTES observaciones: si el cliente NO mencionó textualmente ningún sabor, gusto o detalle de preparación, devolvé null sin excepción.
     - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
 
     IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
@@ -206,17 +206,22 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   console.log(`📦 Claimed ${mensajesClaim.length} mensaje(s) nuevo(s) para ${numeroCliente}.`);
 
-  // 2. Buscar pedido activo de hoy — necesitamos saber si existe ANTES de
+  // 2. Buscar pedido activo reciente — necesitamos saber si existe ANTES de
   //    armar el historial, porque el contexto que le damos al modelo depende
   //    de eso.
-  const hoy = new Date();
-  hoy.setHours(0, 0, 0, 0);
+  //
+  //    Usamos una ventana móvil de 12 horas en lugar de "desde la medianoche":
+  //    así un cliente que armó un borrador a las 23:50 puede confirmarlo a las
+  //    00:10, y uno con pedido enviado a las 22:00 sigue siendo "su pedido
+  //    activo" si pregunta a las 00:30. Borradores zombies de hace varios
+  //    días igual quedan excluidos.
+  const hace12Horas = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
 
   const { data: pedidoActivo } = await supabaseAdmin
     .from('pedidos')
     .select('*')
     .eq('telefono', numeroCliente)
-    .gte('created_at', hoy.toISOString())
+    .gte('created_at', hace12Horas)
     .neq('estado', 'cancelado')
     .order('created_at', { ascending: false })
     .limit(1)
@@ -407,12 +412,15 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     if (pedidoActivo && !pedidoEnviado) {
       trajoDatosUtiles = hayCambiosReales || pedido.es_cancelacion || pedido.es_confirmacion;
     } else {
+      // Para anular el flag de saludo solo consideramos señales CONCRETAS
+      // (numéricas o con formato esperado). Excluimos `observaciones` a
+      // propósito: es texto libre y el modelo a veces lo inventa cuando el
+      // cliente solo saluda, lo que llevaba a anular saludos legítimos.
       trajoDatosUtiles =
         pedido.cantidad_agua > 0 ||
         pedido.cantidad_crema > 0 ||
         pedido.direccion !== null ||
-        pedido.metodo_pago !== null ||
-        pedido.observaciones !== null;
+        pedido.metodo_pago !== null;
     }
 
     if (pedido.es_saludo && trajoDatosUtiles) {
