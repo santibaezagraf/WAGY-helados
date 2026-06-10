@@ -1,70 +1,121 @@
 import { NextResponse } from 'next/server';
 import { generateObject } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
-import { PedidoIASchema } from '@/lib/bot/procesar';
+import {
+  PedidoIASchema,
+  buildSystemPrompt,
+  aplicarOperacionCantidad,
+  type PedidoActivoContext,
+} from '@/lib/bot/procesar';
 
 /**
- * Endpoint de DESARROLLO. Solo sirve para verificar que generateObject + Zod
- * funcionan con el modelo de Groq.
+ * Endpoint de DESARROLLO. Sirve para verificar end-to-end (sin Meta ni QStash)
+ * que el modelo extrae bien las intenciones y los datos del pedido.
  *
  * SE BLOQUEA en producción (process.env.NODE_ENV === 'production').
  *
- * Uso (PowerShell):
+ * Body:
+ *   {
+ *     "mensaje": "sumale 5 de agua",         // requerido
+ *     "pedidoActivo": {                      // opcional. Si está, usa el prompt
+ *       "estado": "borrador",                // de modificación. Si no, el de pedido nuevo.
+ *       "cantidad_agua": 70,
+ *       "cantidad_crema": 10,
+ *       "direccion": "Mitre 951",
+ *       "aclaracion": "casa verde",
+ *       "observaciones": null,
+ *       "metodo_pago": "efectivo"
+ *     }
+ *   }
+ *
+ * Ejemplo PowerShell (pedido nuevo):
  *   Invoke-RestMethod -Method Post `
- *     -Body '{"mensaje":"hola, quiero 10 helados de crema y 5 de agua, mi direccion es Mitre 951, pago en efectivo"}' `
+ *     -Body '{"mensaje":"hola, quiero 10 de crema en Mitre 951 efectivo"}' `
  *     -ContentType 'application/json' `
- *     http://localhost:3000/api/dev/test-ia
+ *     http://localhost:3000/api/dev/test-ia | ConvertTo-Json -Depth 5
+ *
+ * Ejemplo PowerShell (modificación con pedido en borrador):
+ *   $body = @{
+ *     mensaje = "que sean 25 más de agua"
+ *     pedidoActivo = @{
+ *       estado = "borrador"
+ *       cantidad_agua = 70
+ *       cantidad_crema = 10
+ *       direccion = "Mitre 951"
+ *       aclaracion = "casa verde"
+ *       observaciones = $null
+ *       metodo_pago = "efectivo"
+ *     }
+ *   } | ConvertTo-Json
+ *   Invoke-RestMethod -Method Post -Body $body -ContentType 'application/json' `
+ *     http://localhost:3000/api/dev/test-ia | ConvertTo-Json -Depth 5
  */
 const groq = createGroq();
-
-const SYSTEM_PROMPT_SIMPLE = `
-ACTÚA COMO UNA API DE EXTRACCIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
-
-CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
-
-REGLAS:
-- "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). null si no se menciona.
-- "aclaracion": Detalles extra de la dirección. null si no aplica.
-- "cantidad_agua" y "cantidad_crema": Números. 0 por defecto.
-- "observaciones": Sabores o detalles textuales. null si no aplica.
-- "metodo_pago": "efectivo", "transferencia" o null.
-- "es_saludo": true si solo saluda sin aportar datos.
-- Todos los otros campos (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos): false.
-`;
 
 export async function POST(request: Request) {
   if (process.env.NODE_ENV === 'production') {
     return NextResponse.json({ error: 'dev only' }, { status: 403 });
   }
 
-  const { mensaje, system } = await request.json();
+  const body = await request.json();
+  const { mensaje, pedidoActivo } = body as {
+    mensaje?: string;
+    pedidoActivo?: PedidoActivoContext;
+  };
 
   if (!mensaje || typeof mensaje !== 'string') {
     return NextResponse.json({ error: 'falta "mensaje" en el body' }, { status: 400 });
   }
 
+  const systemPrompt = buildSystemPrompt(pedidoActivo ?? null);
+
   const start = Date.now();
   try {
     const { object, usage } = await generateObject({
       model: groq('openai/gpt-oss-20b'),
-      system: system || SYSTEM_PROMPT_SIMPLE,
+      system: systemPrompt,
       prompt: `Mensaje(s) del cliente: "${mensaje}"`,
       schema: PedidoIASchema,
       temperature: 0,
     });
 
+    // Aplicamos las operaciones de cantidad como lo hace el flujo real,
+    // para que el resultado refleje lo que la DB terminaría guardando.
+    const cantidadAguaActual = pedidoActivo?.cantidad_agua ?? 0;
+    const cantidadCremaActual = pedidoActivo?.cantidad_crema ?? 0;
+
+    const cantidadAguaFinal = aplicarOperacionCantidad(
+      object.cantidad_agua_operacion,
+      object.cantidad_agua,
+      cantidadAguaActual,
+    );
+    const cantidadCremaFinal = aplicarOperacionCantidad(
+      object.cantidad_crema_operacion,
+      object.cantidad_crema,
+      cantidadCremaActual,
+    );
+
     return NextResponse.json({
       ok: true,
       latencyMs: Date.now() - start,
+      contexto: pedidoActivo
+        ? { modo: 'modificacion', estado: pedidoActivo.estado, cantidades_actuales: { agua: cantidadAguaActual, crema: cantidadCremaActual } }
+        : { modo: 'pedido_nuevo' },
       usage,
-      object,
+      raw_ia: object,
+      computado: {
+        cantidad_agua: cantidadAguaFinal,
+        cantidad_crema: cantidadCremaFinal,
+        operacion_agua: `${cantidadAguaActual} ${object.cantidad_agua_operacion} ${object.cantidad_agua} = ${cantidadAguaFinal}`,
+        operacion_crema: `${cantidadCremaActual} ${object.cantidad_crema_operacion} ${object.cantidad_crema} = ${cantidadCremaFinal}`,
+      },
     });
   } catch (error) {
     return NextResponse.json({
       ok: false,
       latencyMs: Date.now() - start,
       error: String(error),
-      hint: 'Si dice "tools not supported" o similar, llama-3.1-8b-instant no banca generateObject. Probá con llama-3.3-70b-versatile o pasale `mode: "json"` a generateObject.',
+      hint: 'Si dice "tools not supported" o el modelo no banca structured outputs, probá cambiar a openai/gpt-oss-120b o moonshotai/kimi-k2-instruct.',
     }, { status: 200 });
   }
 }

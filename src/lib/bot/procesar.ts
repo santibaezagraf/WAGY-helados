@@ -22,8 +22,10 @@ const groq = createGroq();
 export const PedidoIASchema = z.object({
   direccion: z.string().nullable().describe('Calle y número únicamente (ej: "Mitre 951"). null si no se mencionó o si solo dieron aclaración. La palabra "retira" si pasan a retirar.'),
   aclaracion: z.string().nullable().describe('Detalles extra de la ubicación (depto, piso, color de casa, etc.). null si no aplica.'),
-  cantidad_agua: z.number().describe('Cantidad de helados de agua. 0 si no se mencionó.'),
-  cantidad_crema: z.number().describe('Cantidad de helados de crema. 0 si no se mencionó.'),
+  cantidad_agua: z.number().describe('Valor literal mencionado en el mensaje para agua (no calcules sumas/restas, solo extrae el numero literal). 0 si no se mencionó.'),
+  cantidad_agua_operacion: z.enum(['sumar', 'restar', 'reemplazar', 'mantener']).describe('Que hacer con cantidad_agua: "sumar" si el cliente pide agregar al actual ("sumale 5", "agrega 10"), "restar" si pide quitar ("quitale 3", "sacale 2"), "reemplazar" si pide un valor fijo ("que sean 20", "cambialo a 50") o si es un pedido nuevo desde cero, "mantener" si no se menciona agua en el mensaje.'),
+  cantidad_crema: z.number().describe('Valor literal mencionado en el mensaje para crema (no calcules sumas/restas). 0 si no se mencionó.'),
+  cantidad_crema_operacion: z.enum(['sumar', 'restar', 'reemplazar', 'mantener']).describe('Que hacer con cantidad_crema. Mismas reglas que cantidad_agua_operacion.'),
   observaciones: z.string().nullable().describe('Sabores o detalles de preparación textuales. null si no se mencionó.'),
   metodo_pago: z.string().nullable().describe('"efectivo", "transferencia" o null.'),
   es_cancelacion: z.boolean().describe('El cliente pide cancelar/anular el pedido.'),
@@ -35,6 +37,143 @@ export const PedidoIASchema = z.object({
 });
 
 type PedidoIA = z.infer<typeof PedidoIASchema> & { datos_completos: boolean };
+
+/**
+ * Aplica la operación de cantidad de forma determinista (no se la dejamos al modelo).
+ * El modelo solo identifica la intención + valor; nosotros hacemos la matemática.
+ * Nunca devuelve negativos.
+ */
+export function aplicarOperacionCantidad(
+  operacion: 'sumar' | 'restar' | 'reemplazar' | 'mantener',
+  valor: number,
+  actual: number
+): number {
+  switch (operacion) {
+    case 'sumar':       return Math.max(0, actual + valor);
+    case 'restar':      return Math.max(0, actual - valor);
+    case 'reemplazar':  return Math.max(0, valor);
+    case 'mantener':    return actual;
+  }
+}
+
+/**
+ * Campos mínimos de un pedidoActivo que necesita el prompt builder.
+ * Usado tanto por el flujo real (donde pasa una row completa de pedidos)
+ * como por el endpoint de dev (donde se construye una row sintética).
+ */
+export type PedidoActivoContext = {
+  estado: string;
+  cantidad_agua: number;
+  cantidad_crema: number;
+  direccion: string;
+  aclaracion: string | null;
+  observaciones: string | null;
+  metodo_pago: string;
+  enviado?: boolean | null;
+};
+
+/**
+ * Construye el SYSTEM_PROMPT que se le pasa a Groq, dependiendo de si hay
+ * un pedido activo y en qué estado está. Exportado para que el endpoint de
+ * dev pueda reproducir el mismo contexto que el flujo real.
+ */
+export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): string {
+  const pedidoEnviado = Boolean(
+    pedidoActivo && (pedidoActivo.estado === 'enviado' || pedidoActivo.enviado === true)
+  );
+  const tieneBorrador = pedidoActivo && pedidoActivo.estado === 'borrador';
+  const yaExisteEnCocina = pedidoActivo && pedidoActivo.estado === 'pendiente' && !pedidoEnviado;
+  const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
+
+  if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
+    return `
+      ACTÚA COMO UNA API DE EXTRACCIÓN Y MODIFICACIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
+
+      CONTEXTO: El cliente tiene un pedido activo en el sistema con el estado "${pedidoActivo.estado}". Tu objetivo es devolver el objeto JSON final con los datos combinados y actualizados.
+
+      DATOS ACTUALES DEL PEDIDO EN LA BASE DE DATOS:
+      - cantidad_crema: ${pedidoActivo.cantidad_crema}
+      - cantidad_agua: ${pedidoActivo.cantidad_agua}
+      - direccion: "${pedidoActivo.direccion}"
+      - aclaracion: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}
+      - observaciones: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}
+      - metodo_pago: "${pedidoActivo.metodo_pago}"
+
+      1. DETECCIÓN DE INTENCIONES (Obligatorio):
+      ${esperandoCancelacion ? `
+      * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si estaba seguro de cancelar. Analiza su respuesta:
+      - "es_confirmacion_cancelacion": true SI Y SOLO SI el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "por favor", "exacto", "sí, cancelar").
+      - "es_rechazo_cancelacion": true SI Y SOLO SI el cliente se arrepiente y dice que NO quiere cancelar (ej: "no", "no, pará", "me equivoqué", "dejalo así", "no lo canceles").
+      - "es_cancelacion": false
+      - "es_confirmacion": false
+      ` : `
+      - "es_cancelacion": true SI Y SOLO SI el cliente pide explícitamente cancelar, anular, dar de baja o dice que "ya no quiere el pedido" o "fue mentira".
+      - "es_confirmacion": true SI Y SOLO SI el contexto actual es "borrador" y el cliente acepta los datos expuestos (ej: "sí", "dale", "está bien").
+      - "es_confirmacion_cancelacion": false
+      - "es_rechazo_cancelacion": false
+      `}
+      - "es_saludo": true si el mensaje es únicamente un saludo (ej: "hola") sin datos.
+      - "es_modificacion_sin_datos": true si el cliente quiere cambiar algo PERO NO aporta NINGÚN dato. ¡IMPORTANTE!: Si el cliente menciona sabores, gustos (ej: "que sean de chocolate", "sin dulce de leche"), cantidades o direcciones, esto DEBE SER FALSE porque SÍ está aportando datos válidos para modificar.
+
+      2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
+      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}".
+      - "aclaracion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde".
+        * MERGE INTELIGENTE: Si el cliente AGREGA un detalle nuevo que NO contradice el actual, CONCATENA ambos separados por coma. Ej: actual "la casa es verde" + mensaje "con marco naranja" → "la casa es verde, con marco naranja". Otro ej: actual "depto 6" + mensaje "piso 3" → "depto 6, piso 3".
+        * Si el cliente CONTRADICE un detalle puntual del actual (ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde"), REEMPLAZA solo la parte contradicha y conservá el resto → "casa verde, de 2 pisos".
+        * Si el cliente no menciona aclaración alguna en este mensaje, mantén lo actual: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}.
+      - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
+      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si.
+        * MERGE INTELIGENTE: Si el cliente AGREGA sabores/detalles que NO contradicen los actuales, CONCATENA con coma. Ej: actual "los de crema de chocolate" + mensaje "y los de agua de frutilla" → "los de crema de chocolate, los de agua de frutilla".
+        * Si el cliente CONTRADICE (ej: actual "de chocolate" + mensaje "no, mejor de vainilla"), REEMPLAZA solo la parte contradicha y conservá el resto.
+        * Si no menciona ningún sabor en este mensaje, mantén el valor actual de forma obligatoria: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}.
+      - "cantidad_agua" / "cantidad_crema" y sus "_operacion": ¡NO HAGAS LA MATEMÁTICA! Solo identificá la intención y el valor literal del mensaje. Yo (el código) hago la cuenta sobre el valor actual.
+        * "sumar": cliente pide AGREGAR al actual. Pistas: presencia de "más", "sumar", "agregar", "extra", "otro/s". Ej:
+          - "sumale 50", "agregá 20", "y 5 más de agua", "5 más", "otros 10"
+          - "que sean 25 más" (la palabra "más" indica delta, NO total) → operacion="sumar", valor=25
+          El valor devuelto es el delta literal.
+        * "restar": cliente pide QUITAR. Pistas: "menos", "quitar", "sacar", "restar". Ej:
+          - "quitale 3", "sacale 2 de agua", "5 menos de crema", "menos 5"
+          Valor = literal a restar.
+        * "reemplazar": cliente pide un VALOR FIJO (SIN palabras como "más" o "menos"). Ej:
+          - "que sean 50" (sin "más" ni "menos") → operacion="reemplazar", valor=50
+          - "cambialo a 20", "ahora 30 de crema", "que sea 100"
+          Valor = nuevo total literal.
+        * "mantener": el cliente NO menciona ese tipo de helado en este mensaje. Valor = 0 (será ignorado).
+        Ejemplos contrastivos importantes:
+        - "que sean 25 más de agua" → cantidad_agua: 25, cantidad_agua_operacion: "sumar" (porque dijo "más")
+        - "que sean 25 de agua" → cantidad_agua: 25, cantidad_agua_operacion: "reemplazar" (sin "más" ni "menos")
+        - "que sean 5 menos de crema" → cantidad_crema: 5, cantidad_crema_operacion: "restar"
+        - "quitale 2 de crema y sumale 10 de agua" → cantidad_crema: 2, cantidad_crema_operacion: "restar", cantidad_agua: 10, cantidad_agua_operacion: "sumar"
+        - "sumale 5 de agua" → cantidad_agua: 5, cantidad_agua_operacion: "sumar", cantidad_crema: 0, cantidad_crema_operacion: "mantener"
+
+      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings.
+    `;
+  }
+
+  return `
+    ACTÚA COMO UNA API DE EXTRACCIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
+
+    CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
+
+    1. DETECCIÓN DE INTENCIONES:
+    - "es_cancelacion": false
+    - "es_confirmacion": false
+    - "es_confirmacion_cancelacion": false
+    - "es_rechazo_cancelacion": false
+    - "es_modificacion_sin_datos": false
+    - "es_saludo": true si es 'UNICAMENTE un saludo, no aporta mas datos.
+
+    2. REGLAS DE EXTRACCIÓN:
+    - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si NO menciona direccion ni retiro, pon null.
+    - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
+    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0.
+    - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
+    - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. Si no menciona nada por el estilo, null.
+    - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
+
+    IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
+  `;
+}
 
 /**
  * Procesa todos los mensajes pendientes de un cliente.
@@ -158,9 +297,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     aclaracionGuardada = pedidoActivo.aclaracion;
   }
 
-  // 4. PROMPT DINÁMICO
-  let SYSTEM_PROMPT = "";
-
+  // 4. PROMPT DINÁMICO. La lógica del prompt vive en buildSystemPrompt para
+  //    poder reusarla desde el endpoint de dev.
   const tieneBorrador = pedidoActivo && pedidoActivo.estado === 'borrador';
   const yaExisteEnCocina = pedidoActivo && pedidoActivo.estado === 'pendiente' && !pedidoEnviado;
   const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
@@ -170,79 +308,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   console.log(`- Ya existe en cocina? ${yaExisteEnCocina}`);
   console.log(`- Está esperando confirmación de cancelación? ${esperandoCancelacion}`);
 
-  if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
-    SYSTEM_PROMPT = `
-      ACTÚA COMO UNA API DE EXTRACCIÓN Y MODIFICACIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
-
-      CONTEXTO: El cliente tiene un pedido activo en el sistema con el estado "${pedidoActivo.estado}". Tu objetivo es devolver el objeto JSON final con los datos combinados y actualizados.
-
-      DATOS ACTUALES DEL PEDIDO EN LA BASE DE DATOS:
-      - cantidad_crema: ${pedidoActivo.cantidad_crema}
-      - cantidad_agua: ${pedidoActivo.cantidad_agua}
-      - direccion: "${pedidoActivo.direccion}"
-      - aclaracion: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}
-      - observaciones: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}
-      - metodo_pago: "${pedidoActivo.metodo_pago}"
-
-      1. DETECCIÓN DE INTENCIONES (Obligatorio):
-      ${esperandoCancelacion ? `
-      * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si estaba seguro de cancelar. Analiza su respuesta:
-      - "es_confirmacion_cancelacion": true SI Y SOLO SI el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "por favor", "exacto", "sí, cancelar").
-      - "es_rechazo_cancelacion": true SI Y SOLO SI el cliente se arrepiente y dice que NO quiere cancelar (ej: "no", "no, pará", "me equivoqué", "dejalo así", "no lo canceles").
-      - "es_cancelacion": false
-      - "es_confirmacion": false
-      ` : `
-      - "es_cancelacion": true SI Y SOLO SI el cliente pide explícitamente cancelar, anular, dar de baja o dice que "ya no quiere el pedido" o "fue mentira".
-      - "es_confirmacion": true SI Y SOLO SI el contexto actual es "borrador" y el cliente acepta los datos expuestos (ej: "sí", "dale", "está bien").
-      - "es_confirmacion_cancelacion": false
-      - "es_rechazo_cancelacion": false
-      `}
-      - "es_saludo": true si el mensaje es únicamente un saludo (ej: "hola") sin datos.
-      - "es_modificacion_sin_datos": true si el cliente quiere cambiar algo PERO NO aporta NINGÚN dato. ¡IMPORTANTE!: Si el cliente menciona sabores, gustos (ej: "que sean de chocolate", "sin dulce de leche"), cantidades o direcciones, esto DEBE SER FALSE porque SÍ está aportando datos válidos para modificar.
-
-      2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
-      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}".
-      - "aclaracion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde".
-        * MERGE INTELIGENTE: Si el cliente AGREGA un detalle nuevo que NO contradice el actual, CONCATENA ambos separados por coma. Ej: actual "la casa es verde" + mensaje "con marco naranja" → "la casa es verde, con marco naranja". Otro ej: actual "depto 6" + mensaje "piso 3" → "depto 6, piso 3".
-        * Si el cliente CONTRADICE un detalle puntual del actual (ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde"), REEMPLAZA solo la parte contradicha y conservá el resto → "casa verde, de 2 pisos".
-        * Si el cliente no menciona aclaración alguna en este mensaje, mantén lo actual: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}.
-      - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
-      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si.
-        * MERGE INTELIGENTE: Si el cliente AGREGA sabores/detalles que NO contradicen los actuales, CONCATENA con coma. Ej: actual "los de crema de chocolate" + mensaje "y los de agua de frutilla" → "los de crema de chocolate, los de agua de frutilla".
-        * Si el cliente CONTRADICE (ej: actual "de chocolate" + mensaje "no, mejor de vainilla"), REEMPLAZA solo la parte contradicha y conservá el resto.
-        * Si no menciona ningún sabor en este mensaje, mantén el valor actual de forma obligatoria: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}.
-      - "cantidad_agua" y "cantidad_crema": Analiza con extrema precisión la semántica del mensaje:
-        * Si pide SUMAR o AGREGAR (ej: "sumale 50", "agregá 20"): realiza la suma matemática del valor nuevo sobre el valor actual que te pasé en el contexto (Ej: si crema actual es 0 y pide sumar 50, el resultado es 50. Si agua actual es 70 y no se menciona, el resultado final DEBE seguir siendo 70).
-        * Si pide CAMBIAR o REEMPLAZAR (ej: "que sean 50", "cambialo a 20"): coloca el nuevo valor ignorando el anterior.
-        * Si no se menciona ese tipo de helado en el mensaje, MANTÉN el valor actual del contexto de forma obligatoria. NUNCA lo bajes a 0.
-
-      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings.
-    `;
-  } else {
-    SYSTEM_PROMPT = `
-      ACTÚA COMO UNA API DE EXTRACCIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
-
-      CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
-
-      1. DETECCIÓN DE INTENCIONES:
-      - "es_cancelacion": false
-      - "es_confirmacion": false
-      - "es_confirmacion_cancelacion": false
-      - "es_rechazo_cancelacion": false
-      - "es_modificacion_sin_datos": false
-      - "es_saludo": true si es 'UNICAMENTE un saludo, no aporta mas datos.
-
-      2. REGLAS DE EXTRACCIÓN:
-      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si NO menciona direccion ni retiro, pon null.
-      - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
-      - "cantidad_agua": Cantidad de helados en números, por defecto 0.
-      - "cantidad_crema": Cantidad de helados en números, por defecto 0.
-      - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. Si no menciona nada por el estilo, null.
-      - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
-
-      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
-    `;
-  }
+  const SYSTEM_PROMPT = buildSystemPrompt(pedidoActivo);
 
   // 5. LLAMADA A GROQ con structured output validado por Zod.
   //    El AI SDK marca `json_validate_failed` como no-retryable (es un 400),
@@ -262,11 +328,32 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         temperature: 0,
       });
 
-      // datos_completos lo calculamos nosotros (no lo decide el modelo)
+      // Aplicamos las operaciones de cantidad de forma determinista en TS.
+      // El modelo solo identificó la intención (sumar/restar/reemplazar/mantener)
+      // y el valor literal del mensaje; nosotros hacemos la cuenta sobre el
+      // estado actual del pedido (o sobre 0 si no hay pedidoActivo).
+      const cantidadAguaActual = pedidoActivo?.cantidad_agua ?? 0;
+      const cantidadCremaActual = pedidoActivo?.cantidad_crema ?? 0;
+
+      const cantidadAguaFinal = aplicarOperacionCantidad(
+        object.cantidad_agua_operacion,
+        object.cantidad_agua,
+        cantidadAguaActual,
+      );
+      const cantidadCremaFinal = aplicarOperacionCantidad(
+        object.cantidad_crema_operacion,
+        object.cantidad_crema,
+        cantidadCremaActual,
+      );
+
+      console.log(`🧮 Cantidades: agua ${cantidadAguaActual} -> ${cantidadAguaFinal} (op: ${object.cantidad_agua_operacion}, valor: ${object.cantidad_agua}), crema ${cantidadCremaActual} -> ${cantidadCremaFinal} (op: ${object.cantidad_crema_operacion}, valor: ${object.cantidad_crema})`);
+
       pedido = {
         ...object,
+        cantidad_agua: cantidadAguaFinal,
+        cantidad_crema: cantidadCremaFinal,
         datos_completos: Boolean(
-          object.direccion && object.metodo_pago && (object.cantidad_agua > 0 || object.cantidad_crema > 0)
+          object.direccion && object.metodo_pago && (cantidadAguaFinal > 0 || cantidadCremaFinal > 0)
         ),
       };
 
