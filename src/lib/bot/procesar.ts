@@ -456,14 +456,12 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   try {
 
-    // OVERRIDE DE DIRECCIÓN HISTÓRICA
-    if (!pedido.direccion && direccionGuardada) {
-      console.log(`🛠️ OVERRIDE: El cliente no pasó dirección. Inyectando histórica: ${direccionGuardada}`);
-      pedido.direccion = direccionGuardada;
-      pedido.aclaracion = pedido.aclaracion ?? aclaracionGuardada;
-    }
-
-    pedido.datos_completos = Boolean(pedido.direccion && pedido.metodo_pago && (pedido.cantidad_agua > 0 || pedido.cantidad_crema > 0));
+    // IMPORTANTE: el override de saludo y el cálculo de cambios reales corren
+    // ANTES de la inyección de dirección histórica. Si los corriéramos después,
+    // un "hola" suelto terminaría con `pedido.direccion` seteado (inyectado de
+    // historia) y `trajoDatosUtiles` daría true, anulando todo saludo legítimo.
+    // Trabajamos con el output crudo del modelo y recién después rellenamos
+    // con la histórica para que el flow downstream pueda armar el pedido.
 
     let hayCambiosReales = false;
 
@@ -494,6 +492,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // (numéricas o con formato esperado). Excluimos `observaciones` a
       // propósito: es texto libre y el modelo a veces lo inventa cuando el
       // cliente solo saluda, lo que llevaba a anular saludos legítimos.
+      // `pedido.direccion` acá es el output crudo del modelo: si el cliente
+      // NO la mencionó en este mensaje, viene en null aunque haya histórica.
       trajoDatosUtiles =
         pedido.cantidad_agua > 0 ||
         pedido.cantidad_crema > 0 ||
@@ -505,6 +505,18 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       console.log("🛠️ OVERRIDE: El cliente saludó pero incluyó datos del pedido. Anulando flag de saludo.");
       pedido.es_saludo = false;
     }
+
+    // OVERRIDE DE DIRECCIÓN HISTÓRICA: solo después de haber decidido el saludo.
+    // Si el cliente solo saludó, no llega acá (return en la rama de saludo),
+    // así que la histórica no contamina ese path. Para mensajes con datos
+    // reales, rellenamos lo que falte.
+    if (!pedido.direccion && direccionGuardada) {
+      console.log(`🛠️ OVERRIDE: El cliente no pasó dirección. Inyectando histórica: ${direccionGuardada}`);
+      pedido.direccion = direccionGuardada;
+      pedido.aclaracion = pedido.aclaracion ?? aclaracionGuardada;
+    }
+
+    pedido.datos_completos = Boolean(pedido.direccion && pedido.metodo_pago && (pedido.cantidad_agua > 0 || pedido.cantidad_crema > 0));
 
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
     //
