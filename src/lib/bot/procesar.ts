@@ -202,9 +202,15 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
       2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
       - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}".
-      - "aclaracion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde". Si menciona esto, extraelo aquí. Si no, mantén lo actual: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}.
+      - "aclaracion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde".
+        * MERGE INTELIGENTE: Si el cliente AGREGA un detalle nuevo que NO contradice el actual, CONCATENA ambos separados por coma. Ej: actual "la casa es verde" + mensaje "con marco naranja" → "la casa es verde, con marco naranja". Otro ej: actual "depto 6" + mensaje "piso 3" → "depto 6, piso 3".
+        * Si el cliente CONTRADICE un detalle puntual del actual (ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde"), REEMPLAZA solo la parte contradicha y conservá el resto → "casa verde, de 2 pisos".
+        * Si el cliente no menciona aclaración alguna en este mensaje, mantén lo actual: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}.
       - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
-      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si. Si se refiere a "los de crema/agua que sean de X sabor", guardar info textual, es util. Si no menciona ningún sabor en este mensaje, mantén el valor actual de forma obligatoria: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}.
+      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si.
+        * MERGE INTELIGENTE: Si el cliente AGREGA sabores/detalles que NO contradicen los actuales, CONCATENA con coma. Ej: actual "los de crema de chocolate" + mensaje "y los de agua de frutilla" → "los de crema de chocolate, los de agua de frutilla".
+        * Si el cliente CONTRADICE (ej: actual "de chocolate" + mensaje "no, mejor de vainilla"), REEMPLAZA solo la parte contradicha y conservá el resto.
+        * Si no menciona ningún sabor en este mensaje, mantén el valor actual de forma obligatoria: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}.
       - "cantidad_agua" y "cantidad_crema": Analiza con extrema precisión la semántica del mensaje:
         * Si pide SUMAR o AGREGAR (ej: "sumale 50", "agregá 20"): realiza la suma matemática del valor nuevo sobre el valor actual que te pasé en el contexto (Ej: si crema actual es 0 y pide sumar 50, el resultado es 50. Si agua actual es 70 y no se menciona, el resultado final DEBE seguir siendo 70).
         * Si pide CAMBIAR o REEMPLAZAR (ej: "que sean 50", "cambialo a 20"): coloca el nuevo valor ignorando el anterior.
@@ -470,6 +476,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         // pero TS no lo infiere del Boolean(...). Asertamos no-null acá.
         const direccion = pedido.direccion!;
         const metodoPago = pedido.metodo_pago!;
+
+        // Si el cliente tiene pedido en cocina pero no hay cambios reales,
+        // probablemente está saludando o iniciando una conversación nueva
+        // (ej: "hola, quiero hacer un pedido"). El modelo "extrajo" datos
+        // completos solo porque el prompt le dice que mantenga los valores
+        // actuales; no hay intención real de modificar nada.
+        if (yaExisteEnCocina && !hayCambiosReales) {
+          console.log("ℹ️ Cliente con pedido en cocina sin cambios reales. Avisando que ya hay uno en preparación.");
+          await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Ya tenemos tu pedido en preparación. ¿Querés agregar o modificar algo, o te puedo ayudar con otra cosa?");
+          return;
+        }
 
         let borradorDB = null;
 
