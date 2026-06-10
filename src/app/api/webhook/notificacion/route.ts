@@ -1,64 +1,57 @@
 import { NextResponse } from 'next/server';
 
-// Un token simple para asegurarte de que solo Supabase pueda pegarle a esta API
-const SUPABASE_WEBHOOK_SECRET = process.env.SUPABASE_WEBHOOK_SECRET || "mi_secreto_supabase_123";
-
 export async function POST(request: Request) {
+  // 1. Extraemos el token de la URL para seguridad
+  const url = new URL(request.url);
+  const token = url.searchParams.get('token');
+
+  // Asegurate de que este string coincida exactamente con el que pusiste en el panel de Supabase
+  if (token !== 'mi_secreto_supabase_123') {
+    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+  }
+
   try {
-    // 1. Verificación de seguridad básica mediante un Query Parameter o Header
-    const { searchParams } = new URL(request.url);
-    const token = searchParams.get('token');
-    
-    if (token !== SUPABASE_WEBHOOK_SECRET) {
-      return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+    const payload = await request.json();
+
+    // 2. Extraer los datos del Webhook de Supabase
+    // Supabase envía 'type' (UPDATE, INSERT, DELETE), 'table', 'record' (datos nuevos) y 'old_record' (datos viejos)
+    const { type, table, record, old_record } = payload;
+
+    // 3. Evaluar la condición estricta
+    // Solo enviamos el mensaje si pasó de borrador a pendiente Y fue accionado por el Cron (auto_confirmado = true)
+    if (
+      type === 'UPDATE' &&
+      table === 'pedidos' &&
+      old_record?.estado === 'borrador' &&
+      record?.estado === 'pendiente' &&
+      record?.auto_confirmado === true 
+    ) {
+      
+      const numeroCliente = record.telefono; // Ajustalo a 'telefono_cliente' si tu columna se llama así
+      
+      const mensaje = "⏳ ¡Hola! Como pasaron unos minutos y no recibimos modificaciones, confirmamos tu pedido automáticamente para que no se demore. Ya lo estamos preparando en la cocina. 🍦🛵";
+
+      await enviarMensajeWhatsApp(numeroCliente, mensaje);
+      console.log(`✅ Auto-confirmación notificada a ${numeroCliente} por el pedido #${record.id}`);
     }
 
-    const body = await request.json();
-    console.log("🔔 Webhook de Supabase recibido:", body);
-
-    // Estructura nativa de Supabase Webhooks:
-    // body.type puede ser 'INSERT', 'UPDATE', 'DELETE'
-    const { type, table, record, old_record } = body;
-
-    if (table === 'pedidos' && type === 'UPDATE') {
-      // 2. Detectamos si pasó estrictamente de 'borrador' a 'pendiente'
-      const fueAutoConfirmado = old_record?.estado === 'borrador' && record?.estado === 'pendiente';
-
-      if (fueAutoConfirmado) {
-        const numeroCliente = record.telefono;
-        const pedidoId = record.id;
-
-        console.log(`🤖 Auto-confirmación detectada para el pedido #${pedidoId}. Notificando a ${numeroCliente}...`);
-
-        // 3. Armamos el mensaje avisando que expiró el tiempo pero se procesó igual
-        const mensajeAutoConfirmacion = 
-          `¡Hola! Como no recibimos confirmación en los últimos 10 minutos, *procesamos tu pedido automáticamente* para que no se demore ni un segundo más. ⏰\n\n` +
-          `Tu pedido *#${pedidoId}* ya ingresó a la cocina y lo estamos preparando. ¡Muchas gracias! 🍦`;
-
-        await enviarMensajeWhatsApp(numeroCliente, mensajeAutoConfirmacion);
-      }
-    }
-
-    // Supabase necesita recibir un 200 para saber que el webhook se procesó bien
-    return NextResponse.json({ status: 'notificado' }, { status: 200 });
+    // Siempre devolvemos 200 rápido para que Supabase sepa que recibimos el webhook
+    return NextResponse.json({ status: 'ok' }, { status: 200 });
 
   } catch (error) {
-    console.error("❌ Error en webhook de notificación:", error);
+    console.error('❌ Error procesando el webhook de Supabase:', error);
     return NextResponse.json({ error: 'Error interno' }, { status: 500 });
   }
 }
 
-// Función auxiliar para enviar el WhatsApp (la misma de tu otra ruta)
+// Función auxiliar para enviar el mensaje (idéntica a la que tenés en el otro webhook)
 async function enviarMensajeWhatsApp(numeroDestino: string, texto: string) {
-  const token = process.env.WHATSAPP_TOKEN;
-  const phoneId = process.env.WHATSAPP_PHONE_ID;
-
   try {
-    const response = await fetch(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
+    await fetch(`https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_ID}/messages`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
@@ -67,8 +60,7 @@ async function enviarMensajeWhatsApp(numeroDestino: string, texto: string) {
         text: { body: texto }
       })
     });
-    if (!response.ok) console.error("Error enviando WhatsApp desde notificación:", await response.text());
   } catch (e) {
-    console.error("Fallo la conexión con Meta en notificación:", e);
+    console.error("Error enviando WhatsApp desde notificación:", e);
   }
 }

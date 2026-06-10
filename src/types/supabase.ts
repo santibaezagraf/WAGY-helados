@@ -60,26 +60,33 @@ export type Database = {
         Row: {
           created_at: string
           id: string
+          procesado: boolean
           telefono: string | null
           texto: string | null
+          wa_message_id: string | null
         }
         Insert: {
           created_at?: string
           id?: string
+          procesado?: boolean
           telefono?: string | null
           texto?: string | null
+          wa_message_id?: string | null
         }
         Update: {
           created_at?: string
           id?: string
+          procesado?: boolean
           telefono?: string | null
           texto?: string | null
+          wa_message_id?: string | null
         }
         Relationships: []
       }
       pedidos: {
         Row: {
           aclaracion: string | null
+          auto_confirmado: boolean | null
           cantidad_agua: number
           cantidad_crema: number
           costo_envio: number
@@ -102,6 +109,7 @@ export type Database = {
         }
         Insert: {
           aclaracion?: string | null
+          auto_confirmado?: boolean | null
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
@@ -124,6 +132,7 @@ export type Database = {
         }
         Update: {
           aclaracion?: string | null
+          auto_confirmado?: boolean | null
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
@@ -183,6 +192,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      auto_confirmar_pedidos_expirados: { Args: never; Returns: undefined }
       obtener_balance: {
         Args: { fecha_fin: string; fecha_inicio: string }
         Returns: {
