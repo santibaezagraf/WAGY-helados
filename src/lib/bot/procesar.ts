@@ -45,15 +45,15 @@ type PedidoIA = z.infer<typeof PedidoIASchema> & { datos_completos: boolean };
  * procesa; el otro recibe 0 filas y sale sin hacer nada.
  */
 export async function procesarMensajesDeCliente(numeroCliente: string) {
-  // 1. CLAIM ATÓMICO: marcamos los mensajes nuevos como procesados.
-  //    Esto es lo que nos da la dedupliación entre wake-ups concurrentes:
-  //    si otro worker ya los reclamó, este recibe 0 filas y sale silenciosamente.
+  // 1. CLAIM ATÓMICO: marcamos los mensajes nuevos como procesados y traemos
+  //    su contenido. Esto es lo que nos da la dedupliación entre wake-ups
+  //    concurrentes: si otro worker ya los reclamó, este recibe 0 filas y sale.
   const { data: mensajesClaim, error: claimError } = await supabaseAdmin
     .from('mensajes_chat')
     .update({ procesado: true })
     .eq('telefono', numeroCliente)
     .eq('procesado', false)
-    .select('id');
+    .select('id, texto, created_at');
 
   if (claimError) {
     console.error(`❌ Error al hacer claim de mensajes para ${numeroCliente}:`, claimError);
@@ -67,37 +67,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   console.log(`📦 Claimed ${mensajesClaim.length} mensaje(s) nuevo(s) para ${numeroCliente}.`);
 
-  // 2. HISTORIAL: traemos TODOS los mensajes recientes del cliente (procesados
-  //    o no), de los últimos 15 minutos. Esto le da contexto al modelo de
-  //    mensajes anteriores en caso de que esta sea la continuación de una
-  //    conversación incompleta (ej: antes mandó "10 de crema" y ahora "pago
-  //    en transferencia" — el modelo necesita ver los dos para armar el pedido).
-  //
-  //    El claim atómico de arriba es lo que evita doble procesamiento; este
-  //    fetch es solo para construir el contexto que ve la IA.
-  const hace15Minutos = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-  const { data: historial } = await supabaseAdmin
-    .from('mensajes_chat')
-    .select('id, texto, created_at')
-    .eq('telefono', numeroCliente)
-    .gte('created_at', hace15Minutos)
-    .order('created_at', { ascending: true })
-    .limit(15);
-
-  const mensajesParaIA = historial ?? [];
-
-  if (mensajesParaIA.length === 0) {
-    console.log(`⚠️ Sin historial reciente para ${numeroCliente}. Algo raro pasó (claim devolvió ${mensajesClaim.length} pero historial está vacío).`);
-    return;
-  }
-
-  const historialParaIA = mensajesParaIA
-    .map((m, index) => `Mensaje ${index + 1}: "${m.texto}"`)
-    .join("\n");
-
-  console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}, ${mensajesParaIA.length} mensajes):\n${historialParaIA}`);
-
-  // 2. Buscar pedido activo de hoy
+  // 2. Buscar pedido activo de hoy — necesitamos saber si existe ANTES de
+  //    armar el historial, porque el contexto que le damos al modelo depende
+  //    de eso.
   const hoy = new Date();
   hoy.setHours(0, 0, 0, 0);
 
@@ -110,6 +82,48 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  // 3. HISTORIAL: la lógica depende de si ya existe un pedido activo.
+  //
+  //   - SIN pedidoActivo: el cliente está armando el pedido en partes y todavía
+  //     no se persistió nada. Necesitamos ver los últimos 15 min para juntar
+  //     fragmentos (ej: "10 de crema" en un batch, "transferencia" en otro).
+  //
+  //   - CON pedidoActivo: el estado consolidado YA vive en pedidoActivo. Los
+  //     mensajes viejos pueden confundir al modelo (caso real: "sumale 50 de
+  //     agua" del batch anterior se reaplicaba al confirmar). Pasamos solo lo
+  //     nuevo que el cliente acaba de mandar.
+  let mensajesParaIA: { id: string; texto: string | null; created_at: string }[];
+
+  if (pedidoActivo) {
+    mensajesParaIA = [...mensajesClaim].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+    console.log(`📚 Hay pedidoActivo (${pedidoActivo.estado}): pasamos solo los ${mensajesParaIA.length} mensajes nuevos del batch.`);
+  } else {
+    const hace15Minutos = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { data: historial } = await supabaseAdmin
+      .from('mensajes_chat')
+      .select('id, texto, created_at')
+      .eq('telefono', numeroCliente)
+      .gte('created_at', hace15Minutos)
+      .order('created_at', { ascending: true })
+      .limit(15);
+
+    mensajesParaIA = historial ?? [];
+    console.log(`📚 Sin pedidoActivo: traemos ${mensajesParaIA.length} mensajes recientes (últimos 15 min) para captar el pedido en armado.`);
+  }
+
+  if (mensajesParaIA.length === 0) {
+    console.log(`⚠️ Sin mensajes para procesar para ${numeroCliente}. Algo raro pasó.`);
+    return;
+  }
+
+  const historialParaIA = mensajesParaIA
+    .map((m, index) => `Mensaje ${index + 1}: "${m.texto}"`)
+    .join("\n");
+
+  console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}):\n${historialParaIA}`);
 
   const pedidoEnviado = Boolean(
     pedidoActivo && (pedidoActivo.estado === 'enviado' || pedidoActivo.enviado === true)
