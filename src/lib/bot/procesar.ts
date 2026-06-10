@@ -45,15 +45,15 @@ type PedidoIA = z.infer<typeof PedidoIASchema> & { datos_completos: boolean };
  * procesa; el otro recibe 0 filas y sale sin hacer nada.
  */
 export async function procesarMensajesDeCliente(numeroCliente: string) {
-  // 1. CLAIM ATÓMICO: marcamos los mensajes pendientes como procesados y nos
-  //    los traemos. Esto es atómico a nivel Postgres — si otro wake-up
-  //    paralelo intenta lo mismo, solo uno gana las filas.
+  // 1. CLAIM ATÓMICO: marcamos los mensajes nuevos como procesados.
+  //    Esto es lo que nos da la dedupliación entre wake-ups concurrentes:
+  //    si otro worker ya los reclamó, este recibe 0 filas y sale silenciosamente.
   const { data: mensajesClaim, error: claimError } = await supabaseAdmin
     .from('mensajes_chat')
     .update({ procesado: true })
     .eq('telefono', numeroCliente)
     .eq('procesado', false)
-    .select('id, texto, created_at');
+    .select('id');
 
   if (claimError) {
     console.error(`❌ Error al hacer claim de mensajes para ${numeroCliente}:`, claimError);
@@ -65,19 +65,37 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     return;
   }
 
-  // Ordenamos del más viejo al más nuevo (el claim no garantiza orden)
-  const ultimosMensajes = [...mensajesClaim].sort((a, b) =>
-    new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-  );
+  console.log(`📦 Claimed ${mensajesClaim.length} mensaje(s) nuevo(s) para ${numeroCliente}.`);
 
-  // Tomamos los últimos 10 por las dudas (no saturar la IA)
-  const mensajesParaIA = ultimosMensajes.slice(-10);
+  // 2. HISTORIAL: traemos TODOS los mensajes recientes del cliente (procesados
+  //    o no), de los últimos 15 minutos. Esto le da contexto al modelo de
+  //    mensajes anteriores en caso de que esta sea la continuación de una
+  //    conversación incompleta (ej: antes mandó "10 de crema" y ahora "pago
+  //    en transferencia" — el modelo necesita ver los dos para armar el pedido).
+  //
+  //    El claim atómico de arriba es lo que evita doble procesamiento; este
+  //    fetch es solo para construir el contexto que ve la IA.
+  const hace15Minutos = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const { data: historial } = await supabaseAdmin
+    .from('mensajes_chat')
+    .select('id, texto, created_at')
+    .eq('telefono', numeroCliente)
+    .gte('created_at', hace15Minutos)
+    .order('created_at', { ascending: true })
+    .limit(15);
+
+  const mensajesParaIA = historial ?? [];
+
+  if (mensajesParaIA.length === 0) {
+    console.log(`⚠️ Sin historial reciente para ${numeroCliente}. Algo raro pasó (claim devolvió ${mensajesClaim.length} pero historial está vacío).`);
+    return;
+  }
 
   const historialParaIA = mensajesParaIA
     .map((m, index) => `Mensaje ${index + 1}: "${m.texto}"`)
     .join("\n");
 
-  console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}):`, historialParaIA);
+  console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}, ${mensajesParaIA.length} mensajes):\n${historialParaIA}`);
 
   // 2. Buscar pedido activo de hoy
   const hoy = new Date();
