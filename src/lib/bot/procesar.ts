@@ -178,22 +178,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         * Si pide CAMBIAR o REEMPLAZAR (ej: "que sean 50", "cambialo a 20"): coloca el nuevo valor ignorando el anterior.
         * Si no se menciona ese tipo de helado en el mensaje, MANTÉN el valor actual del contexto de forma obligatoria. NUNCA lo bajes a 0.
 
-      OUTPUT EXPECTED (JSON crudo y válido):
-      {
-        "direccion": "string",
-        "aclaracion": "string o null",
-        "cantidad_agua": numero,
-        "cantidad_crema": numero,
-        "observaciones": "string o null",
-        "metodo_pago": "string",
-        "datos_completos": boolean,
-        "es_cancelacion": boolean,
-        "es_confirmacion": boolean,
-        "es_confirmacion_cancelacion": boolean,
-        "es_rechazo_cancelacion": boolean,
-        "es_modificacion_sin_datos": boolean,
-        "es_saludo": boolean
-      }
+      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno.
     `;
   } else {
     SYSTEM_PROMPT = `
@@ -217,20 +202,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. Si no menciona nada por el estilo, null.
       - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
 
-      OUTPUT EXPECTED (JSON crudo y válido):
-      {
-        "direccion": "string o null",
-        "aclaracion": "string o null",
-        "cantidad_agua": numero,
-        "cantidad_crema": numero,
-        "observaciones": "string o null",
-        "metodo_pago": "string o null",
-        "datos_completos": boolean,
-        "es_cancelacion": false,
-        "es_confirmacion": false,
-        "es_modificacion_sin_datos": false,
-        "es_saludo": boolean
-      }
+      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
     `;
   }
 
