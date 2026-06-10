@@ -59,6 +59,7 @@ export type Database = {
       mensajes_chat: {
         Row: {
           created_at: string
+          descartado: boolean
           id: string
           procesado: boolean
           telefono: string | null
@@ -67,6 +68,7 @@ export type Database = {
         }
         Insert: {
           created_at?: string
+          descartado?: boolean
           id?: string
           procesado?: boolean
           telefono?: string | null
@@ -75,6 +77,7 @@ export type Database = {
         }
         Update: {
           created_at?: string
+          descartado?: boolean
           id?: string
           procesado?: boolean
           telefono?: string | null
