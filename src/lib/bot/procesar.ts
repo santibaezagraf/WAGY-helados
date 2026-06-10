@@ -106,11 +106,11 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
   const yaExisteEnCocina = pedidoActivo && pedidoActivo.estado === 'pendiente' && !pedidoEnviado;
   const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
 
-  if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion || pedidoEnviado)) {
+  if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
     return `
       ACTÚA COMO UNA API DE EXTRACCIÓN Y MODIFICACIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
 
-      CONTEXTO: El cliente tiene un pedido activo en el sistema con el estado "${pedidoActivo.estado}"${pedidoEnviado ? ' (YA FUE DESPACHADO, no se puede modificar)' : ''}. Tu objetivo es devolver el objeto JSON final con los datos combinados y actualizados.
+      CONTEXTO: El cliente tiene un pedido activo en el sistema con el estado "${pedidoActivo.estado}". Tu objetivo es devolver el objeto JSON final con los datos combinados y actualizados.
 
       DATOS ACTUALES DEL PEDIDO EN LA BASE DE DATOS:
       - cantidad_crema: ${pedidoActivo.cantidad_crema}
@@ -177,7 +177,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
 
     1. DETECCIÓN DE INTENCIONES:
-    - "es_cancelacion": false
+    - "es_cancelacion": true SI Y SOLO SI el cliente pide explícitamente cancelar/anular un pedido (aunque no haya pedido activo, el cliente podría estar refiriéndose a uno ya despachado). Default false.
     - "es_confirmacion": false
     - "es_confirmacion_cancelacion": false
     - "es_rechazo_cancelacion": false
@@ -192,7 +192,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. NUNCA INVENTES observaciones: si el cliente NO mencionó textualmente ningún sabor, gusto o detalle de preparación, devolvé null sin excepción.
     - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
 
-    IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
+    IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo en estado de modificación).
   `;
 }
 
@@ -243,10 +243,31 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .select('*')
     .eq('telefono', numeroCliente)
     .gte('created_at', hace12Horas)
-    .neq('estado', 'cancelado')
+    .in('estado', ['borrador', 'pendiente', 'esperando_cancelacion'])
+    .eq('enviado', false) // defensivo por si quedó un pendiente con enviado=true
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  // Lookup separado de pedidos ya cerrados (enviado) recientes. Lo usamos para
+  // dar respuestas contextuales: si el cliente pide "cancelalo" después de un
+  // despacho reciente, le decimos "ya está en camino" en vez de "no tenés pedido".
+  let ultimoPedidoEnviado: { id: number; estado: string; created_at: string } | null = null;
+  if (!pedidoActivo) {
+    const { data } = await supabaseAdmin
+      .from('pedidos')
+      .select('id, estado, created_at')
+      .eq('telefono', numeroCliente)
+      .gte('created_at', hace12Horas)
+      .or('estado.eq.enviado,enviado.eq.true')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    ultimoPedidoEnviado = data;
+    if (ultimoPedidoEnviado) {
+      console.log(`📦 Encontré un pedido enviado reciente del cliente (id ${ultimoPedidoEnviado.id}). Lo uso para respuestas contextuales.`);
+    }
+  }
 
   // 3. HISTORIAL: la lógica depende de si ya existe un pedido activo.
   //
@@ -519,16 +540,31 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       return;
     }
 
+    // Cancelación sin pedidoActivo: ¿se refiere a un pedido ya despachado?
+    if (pedido.es_cancelacion && !pedidoActivo) {
+      if (ultimoPedidoEnviado) {
+        await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya fue despachado y está en camino, por lo que no podemos cancelarlo a esta altura. 🛵");
+        console.log(`ℹ️ Cliente intentó cancelar pero el pedido ${ultimoPedidoEnviado.id} ya está enviado.`);
+        // La conversación sobre ese pedido se cerró. Descartamos el historial
+        // para que próximos mensajes no se mezclen con este intento.
+        await marcarHistorialDescartado(numeroCliente);
+      } else {
+        await enviarMensajeWhatsApp(numeroCliente, "No tenés ningún pedido activo para cancelar. Si querés hacer un pedido, escribime los datos 🍦");
+        console.log(`ℹ️ Cliente pidió cancelar pero no tiene pedidos recientes.`);
+      }
+      return;
+    }
+
     // 2. SALUDO
     if (pedido.es_saludo) {
-      if (pedidoEnviado) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya fue despachado y está en camino. 🛵 ¡Gracias por elegirnos!");
-      } else if (yaExisteEnCocina) {
+      if (yaExisteEnCocina) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Recordá que ya tenemos tu pedido en preparación. ¿Querés agregar o modificar algo, o te puedo ayudar con otra cosa?");
       } else if (tieneBorrador) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tengo el resumen de tu pedido en pausa. ¿Me confirmás si los datos están bien con un *SÍ* o un *NO*?");
       } else if (esperandoCancelacion) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Veo que tu pedido está a punto de ser cancelado. ¿Querés confirmar la cancelación con un *SÍ* o mantenerlo con un *NO*?");
+      } else if (ultimoPedidoEnviado) {
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya fue despachado y está en camino 🛵. ¿Querés hacer otro pedido?");
       } else {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! Qué gusto que nos escribas. 👋 ¿Qué te gustaría pedir hoy?");
       }
@@ -540,18 +576,6 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     if (pedido.es_modificacion_sin_datos && (tieneBorrador || yaExisteEnCocina)) {
       await enviarMensajeWhatsApp(numeroCliente, "Entendido. ¿Qué te gustaría modificar o agregar? Escribime los detalles así actualizo el pedido. 📝");
       console.log("⚠️ El cliente quiere modificar pero no dio datos nuevos.");
-      return;
-    }
-
-    // 3b. PEDIDO YA ENVIADO. Si llegamos acá con un pedido enviado, no era ni
-    // cancelación (esa se maneja arriba con UPDATE condicional) ni saludo ni
-    // modificación sin datos. Probablemente el cliente está tratando de
-    // modificar (cantidades, dirección, etc.) un pedido que ya está en moto.
-    // No se puede: avisamos y cortamos antes de que el código intente INSERT
-    // de un pedido nuevo por error.
-    if (pedidoEnviado) {
-      await enviarMensajeWhatsApp(numeroCliente, "Tu pedido ya fue despachado y está en camino, no puedo modificarlo a esta altura. 🛵 Si querés hacer otro pedido, escribime más tarde y armamos uno nuevo.");
-      console.log(`ℹ️ Cliente intentó interactuar con pedido ${pedidoActivo?.id} ya enviado. Aviso enviado.`);
       return;
     }
 
