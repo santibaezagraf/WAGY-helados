@@ -68,8 +68,24 @@ export async function POST(request: Request) {
     if (numeroCliente.startsWith("549")) {
       numeroCliente = "54" + numeroCliente.slice(3);
     }
-    const textoMensaje: string = message.text.body;
     const waMessageId: string | undefined = message.id;
+
+    // Validación de largo: ignoramos vacíos y truncamos textos muy largos.
+    // El máximo de WhatsApp es 4096 chars; para un bot de heladería, mensajes
+    // por encima de 1000 son casi seguro spam/copy-paste y queman tokens al pedo.
+    const MAX_LARGO_MENSAJE = 1000;
+    const rawTexto = (message.text?.body ?? '').trim();
+
+    if (!rawTexto) {
+      console.log(`⚠️ Mensaje vacío de ${numeroCliente}. Ignorando.`);
+      return NextResponse.json({ status: 'empty_message' }, { status: 200 });
+    }
+
+    let textoMensaje = rawTexto;
+    if (textoMensaje.length > MAX_LARGO_MENSAJE) {
+      console.warn(`✂️ Mensaje de ${numeroCliente} excede ${MAX_LARGO_MENSAJE} chars (${textoMensaje.length}). Truncando.`);
+      textoMensaje = textoMensaje.slice(0, MAX_LARGO_MENSAJE);
+    }
 
     console.log(`📩 Recibido de ${numeroCliente}: "${textoMensaje}" (wa_id: ${waMessageId})`);
 
