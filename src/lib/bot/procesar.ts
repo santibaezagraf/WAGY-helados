@@ -196,7 +196,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         * Si pide CAMBIAR o REEMPLAZAR (ej: "que sean 50", "cambialo a 20"): coloca el nuevo valor ignorando el anterior.
         * Si no se menciona ese tipo de helado en el mensaje, MANTÉN el valor actual del contexto de forma obligatoria. NUNCA lo bajes a 0.
 
-      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno.
+      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings.
     `;
   } else {
     SYSTEM_PROMPT = `
@@ -220,34 +220,46 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. Si no menciona nada por el estilo, null.
       - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
 
-      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
+      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo).
     `;
   }
 
   // 5. LLAMADA A GROQ con structured output validado por Zod.
-  //    Si el modelo devuelve algo que no matchea el schema, el SDK reintenta
-  //    automáticamente. Si falla N veces, tira un error que cae en el catch.
-  let pedido: PedidoIA;
-  try {
-    const { object } = await generateObject({
-      model: groq('openai/gpt-oss-20b'),
-      system: SYSTEM_PROMPT,
-      prompt: `Mensaje(s) del cliente: "${historialParaIA}"`,
-      schema: PedidoIASchema,
-      temperature: 0,
-    });
+  //    El AI SDK marca `json_validate_failed` como no-retryable (es un 400),
+  //    pero en la práctica son errores por non-determinismo del modelo (ej:
+  //    devuelve "false" string en vez de false boolean). Reintentamos a mano.
+  const MAX_ATTEMPTS = 3;
+  let pedido: PedidoIA | null = null;
+  let lastError: unknown = null;
 
-    // datos_completos lo calculamos nosotros (no lo decide el modelo)
-    pedido = {
-      ...object,
-      datos_completos: Boolean(
-        object.direccion && object.metodo_pago && (object.cantidad_agua > 0 || object.cantidad_crema > 0)
-      ),
-    };
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const { object } = await generateObject({
+        model: groq('openai/gpt-oss-20b'),
+        system: SYSTEM_PROMPT,
+        prompt: `Mensaje(s) del cliente: "${historialParaIA}"`,
+        schema: PedidoIASchema,
+        temperature: 0,
+      });
 
-    console.log("✅ Objeto IA extraído:", pedido);
-  } catch (iaError) {
-    console.error("❌ Falló la extracción structured del modelo:", iaError);
+      // datos_completos lo calculamos nosotros (no lo decide el modelo)
+      pedido = {
+        ...object,
+        datos_completos: Boolean(
+          object.direccion && object.metodo_pago && (object.cantidad_agua > 0 || object.cantidad_crema > 0)
+        ),
+      };
+
+      console.log(`✅ Objeto IA extraído (intento ${attempt}/${MAX_ATTEMPTS}):`, pedido);
+      break;
+    } catch (iaError) {
+      lastError = iaError;
+      console.warn(`⚠️ Intento ${attempt}/${MAX_ATTEMPTS} falló:`, iaError instanceof Error ? iaError.message : iaError);
+    }
+  }
+
+  if (!pedido) {
+    console.error("❌ Falló la extracción structured tras todos los reintentos:", lastError);
     await enviarMensajeWhatsApp(numeroCliente, "Disculpá, tuve un problema entendiendo tu mensaje. ¿Podés repetirlo? 🙏");
     return;
   }
