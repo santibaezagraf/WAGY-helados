@@ -284,23 +284,27 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .limit(1)
     .maybeSingle();
 
-  // Lookup separado de pedidos ya cerrados (enviado) recientes. Lo usamos para
-  // dar respuestas contextuales: si el cliente pide "cancelalo" después de un
-  // despacho reciente, le decimos "ya está en camino" en vez de "no tenés pedido".
+  // Lookup del pedido MÁS RECIENTE del cliente en la ventana (sin filtrar por
+  // estado), para respuestas contextuales tipo "tu pedido ya está en camino"
+  // o "ya canceleste hace un rato". Lo usamos solo si la última acción del
+  // cliente fue un despacho — si después de eso canceló (u otro evento), su
+  // "estado actual" ya no es el del despacho y caemos al saludo genérico.
   let ultimoPedidoEnviado: { id: number; estado: string; created_at: string } | null = null;
   if (!pedidoActivo) {
-    const { data } = await supabaseAdmin
+    const { data: ultimoPedido } = await supabaseAdmin
       .from('pedidos')
       .select('id, estado, created_at')
       .eq('telefono', numeroCliente)
       .gte('created_at', hace12Horas)
-      .eq('estado', 'enviado')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
-    ultimoPedidoEnviado = data;
-    if (ultimoPedidoEnviado) {
-      console.log(`📦 Encontré un pedido enviado reciente del cliente (id ${ultimoPedidoEnviado.id}). Lo uso para respuestas contextuales.`);
+
+    if (ultimoPedido?.estado === 'enviado') {
+      ultimoPedidoEnviado = ultimoPedido;
+      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado enviado. Lo uso para respuestas contextuales.`);
+    } else if (ultimoPedido) {
+      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado ${ultimoPedido.estado}; no aplica respuesta contextual de despacho.`);
     }
   }
 
