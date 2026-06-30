@@ -1,7 +1,8 @@
 'use server'
 
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, updateTag } from 'next/cache'
 import { createClient } from '@/lib/supabase-server'
+import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
 
 /**
  * Mantiene el flag booleano `enviado` consistente con el `estado`:
@@ -36,6 +37,7 @@ export async function actualizarEstadoPedido(
     if (error) throw new Error(`Error al actualizar estado: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -56,6 +58,7 @@ export async function actualizarPagadoPedido(
     if (error) throw new Error(`Error al actualizar pago: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -76,6 +79,7 @@ export async function actualizarEnviadoPedido(
     if (error) throw new Error(`Error al actualizar envío: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -113,6 +117,7 @@ export async function actualizarPedidoCompleto(
     if (error) throw new Error(`Error al actualizar pedido: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -135,6 +140,7 @@ export async function actualizarEstadoMasivo(
     if (error) throw new Error(`Error al actualizar estados masivamente: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -157,6 +163,7 @@ export async function actualizarPagadoMasivo(
     if (error) throw new Error(`Error al actualizar pagos masivamente: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -179,6 +186,7 @@ export async function actualizarEnviadoMasivo(
     if (error) throw new Error(`Error al actualizar envíos masivamente: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -209,6 +217,7 @@ export async function crearPedido(datos: {
     if (error) throw new Error(`Error al crear pedido: ${error.message}`)
 
     revalidatePath('/')
+    updateTag(PEDIDOS_TAG)
     return { success: true }
 }
 
@@ -227,6 +236,7 @@ export async function actualizarCostoEnvioPedido(
         if (error) throw new Error(`Error al actualizar costo de envío: ${error.message}`)
 
         revalidatePath('/')
+        updateTag(PEDIDOS_TAG)
         return { success: true }
     } catch (error) {
         console.error("Error al actualizar costo de envío:", error)

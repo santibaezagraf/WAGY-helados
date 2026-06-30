@@ -2,6 +2,9 @@ import { createClient } from '@/lib/supabase-server'
 import { redirect } from 'next/navigation'
 import { DataTable } from '@/components/pedidos/data-table'
 import { Header } from '@/components/ui/header'
+import { getPedidosListado } from '@/lib/data/pedidos-listado'
+import { getConversacionesRecientes, type Conversacion } from '@/lib/actions/mensajes'
+import { parseAncla, inicioPeriodo, finPeriodo, type Periodo } from '@/lib/periodo-utils'
 
 
 export default async function Home({
@@ -14,6 +17,7 @@ export default async function Home({
         pagado?: string, 
         enviado? :string, 
         periodo?: string,
+        ancla?: string,
         direccion?: string,
         telefono?: string,
     }>
@@ -37,76 +41,70 @@ export default async function Home({
     const estado = params.estado ? params.estado.split(',') : ["pendiente", "enviado"]
     const pagado = params.pagado ? params.pagado.split(',').map(p => p === 'true') : [true, false]
     const enviado = params.enviado ? params.enviado.split(',').map(e => e === 'true') : [true, false]
-    const periodo = (params.periodo as 'dia' | 'semana' | 'mes' | 'todos') || 'semana'
+    const periodo = (params.periodo as Periodo) || 'semana'
     const direccion = params.direccion || null
     const telefono = params.telefono || null
 
-    let query = supabase
-        .from('pedidos')
-        .select('*', { count: 'exact' })
-        .order('created_at', { ascending: false })
-        
-    // Aplicar filtros a la query
-    if (estado.length > 0) {
-        query = query.in('estado', estado)
-    }
-    if (pagado.length === 1) {
-        query = query.eq('pagado', pagado[0])
-    }
-    if (enviado.length === 1) {
-        query = query.eq('enviado', enviado[0])
-    }
-    if (direccion) {
-        query = query.ilike('direccion', `%${direccion}%`)
-    }
-    if (telefono) {
-        query = query.ilike('telefono', `%${telefono}%`)
-    }
-
-    // Filtro temporal
+    // Resolvemos el borde temporal acá (fuera del cache) para que la función
+    // cacheada sea pura: estos ISO son estables dentro del período anclado, así
+    // que la clave de cache solo cambia al navegar a otro día/semana/mes (o al
+    // cruzar el borde del período actual).
+    let fechaDesdeISO: string | null = null
+    let fechaHastaISO: string | null = null
     if (periodo !== 'todos') {
-        const ahora = new Date()
-        let fecha: Date
-
-        if (periodo === 'dia') {
-            fecha = new Date(ahora)
-            fecha.setHours(0, 0, 0, 0)
-        } else if (periodo === 'semana') {
-            const dayOfWeek = ahora.getDay()
-            fecha = new Date(ahora)
-            fecha.setDate(ahora.getDate() - dayOfWeek)
-            fecha.setHours(0, 0, 0, 0)
-        } else { // 'mes'
-            fecha = new Date(ahora.getFullYear(), ahora.getMonth(), 1)
-            fecha.setHours(0, 0, 0, 0)
-        }
-
-        query = query.gte('created_at', fecha.toISOString())
+        const ancla = parseAncla(params.ancla)
+        fechaDesdeISO = inicioPeriodo(periodo, ancla).toISOString()
+        fechaHastaISO = finPeriodo(periodo, ancla).toISOString()
     }
 
-    const { data: pedidos, error, count } = await query.range(from, to)
-
-    if (error) {
-        return ( 
-            <div>Error al cargar los pedidos: {error.message}</div>
+    let pedidos
+    let count
+    try {
+        ({ pedidos, count } = await getPedidosListado({
+            estado,
+            pagado: pagado.length === 1 ? pagado[0] : null,
+            enviado: enviado.length === 1 ? enviado[0] : null,
+            direccion,
+            telefono,
+            fechaDesdeISO,
+            fechaHastaISO,
+            from,
+            to,
+        }))
+    } catch (error) {
+        return (
+            <div>Error al cargar los pedidos: {error instanceof Error ? error.message : 'error desconocido'}</div>
         );
     }
 
     const pageCount = count ? Math.ceil(count / pageSize) : 0;
 
+    // Conversaciones recientes (para el menú de chats del header) + de ahí
+    // derivamos qué teléfonos esperan intervención (badge en la tabla). Se trae
+    // acá (fuera del cache de getPedidosListado) porque cambia más seguido y no
+    // debe quedar pegado a la entrada cacheada de los pedidos.
+    let conversaciones: Conversacion[] = []
+    try {
+        conversaciones = await getConversacionesRecientes()
+    } catch {
+        // Si falla, simplemente no mostramos avisos; no rompemos el listado.
+    }
+    const telefonosRequierenAtencion = conversaciones
+        .filter((c) => c.requiereAtencion)
+        .map((c) => c.telefono)
+
     return (
-        <div className="flex min-h-screen flex-col">
-            <Header />
-            <main className="flex-1 p-6 sm:p-8 lg:p-12 bg-slate-50">
-                <div className="max-w-7xl mx-auto">
-                    <DataTable 
-                        data={pedidos || []} 
-                        pageIndex={page - 1} 
-                        pageSize={pageSize} 
-                        pageCount={pageCount}
-                        rowCount={pedidos ? pedidos.length : 0}
-                    />
-                </div>
+        <div className="flex h-screen flex-col overflow-hidden">
+            <Header conversacionesIniciales={conversaciones} />
+            <main className="flex flex-1 min-h-0 flex-col px-3 py-3 sm:px-5 lg:px-6 bg-slate-50">
+                <DataTable
+                    data={pedidos || []}
+                    pageIndex={page - 1}
+                    pageSize={pageSize}
+                    pageCount={pageCount}
+                    rowCount={pedidos ? pedidos.length : 0}
+                    telefonosRequierenAtencion={telefonosRequierenAtencion}
+                />
             </main>
         </div>
     )

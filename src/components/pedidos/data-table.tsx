@@ -25,7 +25,6 @@ import {
 } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { AddOrderModal } from "@/components/pedidos/add-order-modal"
-import { AddGastoModal } from "@/components/gastos/add-gasto-modal"
 import { Pedido } from "@/types/pedidos"
 import { crearMensajeWpp } from "@/lib/mensaje-utils"
 import { SelectionBar } from "./selection-bar"
@@ -35,11 +34,14 @@ import { createColumns } from "@/components/pedidos/columns"
 import { useRouter, useSearchParams, usePathname } from "next/navigation"
 import { EditOrderModal } from "./edit-order-modal"
 import { EditCostoEnvioModal } from "./edit-costo-envio-modal"
+import { ChatModal } from "./chat-modal"
 
 type FilterPeriodo = 'dia' | 'semana' | 'mes' | 'todos'
 
 export interface Filters {
   periodo: FilterPeriodo,
+  /** ancla del navegador temporal en formato `YYYY-MM-DD`; '' = hoy */
+  ancla: string,
   estados: string[]
   pagado: (boolean | null)[]
   enviado: (boolean | null)[]
@@ -49,6 +51,7 @@ export interface Filters {
 
 const defaultFilters: Filters = {
   periodo: 'semana',
+  ancla: '',
   estados: ["pendiente", "enviado"],
   pagado: [true, false],
   enviado: [true, false],
@@ -59,6 +62,7 @@ const defaultFilters: Filters = {
 const areFiltersEqual = (f1: Filters, f2: Filters) => {
   return (
     f1.periodo === f2.periodo &&
+    f1.ancla === f2.ancla &&
     f1.estados.join() === f2.estados.join() &&
     f1.pagado.join() === f2.pagado.join() &&
     f1.enviado.join() === f2.enviado.join() &&
@@ -70,6 +74,7 @@ const areFiltersEqual = (f1: Filters, f2: Filters) => {
 const parseFiltersFromUrl = (searchParams: URLSearchParams): Filters => {
   return {
     periodo: (searchParams.get('periodo') || defaultFilters.periodo) as FilterPeriodo,
+    ancla: searchParams.get('ancla') || defaultFilters.ancla,
     estados: searchParams.get('estado')?.split(',') || defaultFilters.estados,
     pagado: searchParams.get('pagado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.pagado,
     enviado: searchParams.get('enviado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.enviado,
@@ -84,6 +89,8 @@ interface DataTableProps {
   pageSize: number,
   pageCount: number,
   rowCount: number,
+  /** Teléfonos que recibieron algo no procesable por el bot y esperan a una persona. */
+  telefonosRequierenAtencion?: string[],
 }
 
 export function DataTable({
@@ -91,18 +98,19 @@ export function DataTable({
   pageIndex,
   pageSize,
   pageCount,
-  rowCount
+  rowCount,
+  telefonosRequierenAtencion = [],
 }: DataTableProps) {
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
   const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
   const [rowSelection, setRowSelection] = React.useState({})
   const [isAddModalOpen, setIsAddModalOpen] = React.useState(false)
-  const [isAddGastoModalOpen, setIsAddGastoModalOpen] = React.useState(false)
-  
+
   // Estados para modales
   const [editingOrderId, setEditingOrderId] = React.useState<number | null>(null)
   const [editingCostoId, setEditingCostoId] = React.useState<number | null>(null)
+  const [chattingOrderId, setChattingOrderId] = React.useState<number | null>(null)
   
   // Estados para mensajes de WhatsApp
   const [mostrarEditorWpp, setMostrarEditorWpp] = React.useState(false)
@@ -152,13 +160,21 @@ export function DataTable({
     lastSelectedRowIdRef.current = row.id
   }, [])
 
+  const telefonosAtencionSet = React.useMemo(
+    () => new Set(telefonosRequierenAtencion),
+    [telefonosRequierenAtencion],
+  )
+
   const columns = React.useMemo(() => createColumns({
     editingOrderId,
     setEditingOrderId,
     editingCostoId,
     setEditingCostoId,
+    chattingOrderId,
+    setChattingOrderId,
     onRowSelect: handleRowSelect,
-  }), [editingOrderId, editingCostoId, handleRowSelect])
+    telefonosAtencion: telefonosAtencionSet,
+  }), [editingOrderId, editingCostoId, chattingOrderId, handleRowSelect, telefonosAtencionSet])
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -204,6 +220,13 @@ export function DataTable({
     params.set('pagado', newFilters.pagado.join(','))
     params.set('enviado', newFilters.enviado.join(','))
     params.set('periodo', newFilters.periodo)
+
+    // ancla vacía = hoy → no ensuciamos la URL
+    if (newFilters.ancla) {
+        params.set('ancla', newFilters.ancla)
+    } else {
+        params.delete('ancla')
+    }
 
     // Manejo de Dirección
     if (newFilters.direccion) {
@@ -287,35 +310,39 @@ export function DataTable({
   }, [table])
 
   return (
-    <div className="space-y-4"> 
+    <div className="flex flex-col flex-1 min-h-0 gap-2">
       {selectedRowsCount > 0 && (
-        
-        <SelectionBar
-          selectedRowsCount={selectedRowsCount}
-          table={table}
-          generarMensajesWpp={generarMensajesWpp}
-          setRowSelection={setRowSelection}
-        />
-
+        <div className="shrink-0">
+          <SelectionBar
+            selectedRowsCount={selectedRowsCount}
+            table={table}
+            generarMensajesWpp={generarMensajesWpp}
+            setRowSelection={setRowSelection}
+          />
+        </div>
       )}
-      
-      <FilterBar
-        table={table}
-        onFiltersChange={onFiltersChange}
-        onAddOrder={() => setIsAddModalOpen(true)}
-        onAddGasto={() => setIsAddGastoModalOpen(true)}
-        currentFilters={filters}
-      />
-      
-      {/* ---- TABLA ---- */}
-      <div className="rounded-md border">
+
+      <div className="shrink-0">
+        <FilterBar
+          table={table}
+          onFiltersChange={onFiltersChange}
+          onAddOrder={() => setIsAddModalOpen(true)}
+          currentFilters={filters}
+        />
+      </div>
+
+      {/* ---- TABLA (cuerpo scrolleable, encabezado sticky) ----
+          El contenedor interno de <Table> (data-slot=table-container) ya trae
+          overflow-x-auto, así que lo convertimos en el área scrolleable (alto
+          completo) para que el thead sticky se ancle a él. */}
+      <div className="rounded-md border flex-1 min-h-0 flex flex-col [&>[data-slot=table-container]]:flex-1 [&>[data-slot=table-container]]:min-h-0 [&>[data-slot=table-container]]:overflow-auto">
         <Table>
-          <TableHeader className="bg-cyan-700 ">
+          <TableHeader className="bg-cyan-700 sticky top-0 z-10">
             {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
+              <TableRow key={headerGroup.id} className="hover:bg-cyan-700">
                 {headerGroup.headers.map((header) => {
                   return (
-                    <TableHead className="text-white" key={header.id}>
+                    <TableHead className="text-white bg-cyan-700" key={header.id}>
                       {header.isPlaceholder
                         ? null
                         : flexRender(
@@ -353,7 +380,7 @@ export function DataTable({
         </Table>
       </div>
       
-      <div className="flex items-center justify-between space-x-2 py-4">
+      <div className="shrink-0 flex items-center justify-between space-x-2 py-1">
         <div className="text-sm text-muted-foreground">
           {'Mostrando '}
           
@@ -426,22 +453,19 @@ export function DataTable({
         </div>
       </div>
 
-      {/* Editor de mensajes de WhatsApp */}
+      {/* Editor de mensajes de WhatsApp — acotado para no romper el layout fijo */}
       {mostrarEditorWpp && mensajesWpp.length > 0 && (
-        <MessageEditor
-          mensajes={mensajesWpp}
-          onClose={() => setMostrarEditorWpp(false)}
-        />
+        <div className="shrink-0 max-h-[40vh] overflow-auto">
+          <MessageEditor
+            mensajes={mensajesWpp}
+            onClose={() => setMostrarEditorWpp(false)}
+          />
+        </div>
       )}
 
       <AddOrderModal
         open={isAddModalOpen}
         onOpenChange={setIsAddModalOpen}
-      />
-
-      <AddGastoModal
-        open={isAddGastoModalOpen}
-        onOpenChange={setIsAddGastoModalOpen}
       />
 
       {editingOrderId !== null && (
@@ -462,6 +486,17 @@ export function DataTable({
           onOpenChange={(isOpen) => {
             if (!isOpen) setEditingCostoId(null)
           }}
+        />
+      )}
+
+      {chattingOrderId !== null && (
+        <ChatModal
+          open={true}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) setChattingOrderId(null)
+          }}
+          telefono={data.find(p => p.id === chattingOrderId)!.telefono}
+          pedidoId={chattingOrderId}
         />
       )}
     </div>

@@ -4,29 +4,27 @@ import { Button } from "../ui/button"
 import { Checkbox } from "../ui/checkbox"
 import { Input } from "../ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu"
-import { Filter, Calendar, Clock, Check, X, Van, WalletMinimal, MessageCircle, BarChart3, DollarSign } from "lucide-react"
+import { Filter, Clock, Check, X, Van, WalletMinimal, MessageCircle } from "lucide-react"
 import * as React from "react"
 import { Table } from "@tanstack/react-table"
 import { type Filters } from "./data-table"
-import { useRouter } from "next/navigation"
+import { TemporalNavigator } from "./temporal-navigator"
+import { type Periodo } from "@/lib/periodo-utils"
 
 
 interface FilterBarProps {
     table: Table<any>
     onFiltersChange?: (filters: Filters) => void
     onAddOrder?: () => void
-    onAddGasto?: () => void
     currentFilters: Filters
 }
 
-export const FilterBar = React.memo(function FilterBar({ 
+export const FilterBar = React.memo(function FilterBar({
     table,
     onFiltersChange,
     onAddOrder,
-    onAddGasto,
     currentFilters,
 }: FilterBarProps) {
-    const router = useRouter()
     // busqueda por texto
     const [searchDireccion, setSearchDireccion] = React.useState(currentFilters.direccion)
     const [searchTelefono, setSearchTelefono] = React.useState(currentFilters.telefono)
@@ -60,10 +58,11 @@ export const FilterBar = React.memo(function FilterBar({
         return () => clearTimeout(timer)
     }, [searchTelefono, currentFilters, onFiltersChange])
 
-    const handlePeriodoChange = React.useCallback((periodo: 'dia' | 'semana' | 'mes' | 'todos') => {
+    const handleTemporalChange = React.useCallback((periodo: Periodo, ancla: string) => {
         onFiltersChange?.({
             ...currentFilters,
             periodo,
+            ancla,
         })
     }, [currentFilters, onFiltersChange])
 
@@ -110,44 +109,12 @@ export const FilterBar = React.memo(function FilterBar({
 
     return (
         <div className="flex flex-wrap items-center gap-2 md:gap-3">
-            <div className="flex flex-wrap gap-1 mr-0 md:mr-2 w-full md:w-auto">
-                <Button
-                    size="sm"
-                    variant={currentFilters.periodo === 'dia' ? 'default' : 'outline'}
-                    onClick={() => handlePeriodoChange('dia')}
-                    className="gap-1 text-xs md:text-sm"
-                >
-                    <Calendar className="h-3 w-3" />
-                    <span className="hidden sm:inline">Hoy</span>
-                </Button>
-                <Button
-                    size="sm"
-                    variant={currentFilters.periodo === 'semana' ? 'default' : 'outline'}
-                    onClick={() => handlePeriodoChange('semana')}
-                    className="gap-1 text-xs md:text-sm"
-                >
-                    <span className="hidden sm:inline">Semana</span>
-                    <span className="sm:hidden">Sem</span>
-                </Button>
-                <Button
-                    size="sm"
-                    variant={currentFilters.periodo === 'mes' ? 'default' : 'outline'}
-                    onClick={() => handlePeriodoChange('mes')}
-                    className="gap-1 text-xs md:text-sm"
-                >
-                    Mes
-                </Button>
-                <Button
-                    size="sm"
-                    variant={currentFilters.periodo === 'todos' ? 'default' : 'outline'}
-                    onClick={() => handlePeriodoChange('todos')}
-                    className="gap-1 text-xs md:text-sm"
-                >
-                    <span className="hidden sm:inline">Todos</span>
-                    <span className="sm:hidden">Todo</span>
-                </Button>
-            </div>
-        
+            <TemporalNavigator
+                periodo={currentFilters.periodo}
+                ancla={currentFilters.ancla}
+                onChange={handleTemporalChange}
+            />
+
             <div className="hidden md:block h-8 w-px bg-gray-300" />
         
             <div className="relative flex-1 min-w-[150px] md:max-w-sm">
@@ -329,24 +296,6 @@ export const FilterBar = React.memo(function FilterBar({
                 </DropdownMenuContent>
             </DropdownMenu>
         
-            <Button
-                onClick={() => router.push('/balances')}
-                className="w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm gap-2"
-            >
-                <BarChart3 className="h-4 w-4" />
-                <span className="hidden sm:inline">Ver Balances</span>
-                <span className="sm:hidden">Balances</span>
-            </Button>
-
-            <Button
-                onClick={onAddGasto}
-                className="w-full md:w-auto bg-rose-600 hover:bg-rose-700 text-white font-semibold text-sm gap-2"
-            >
-                <DollarSign className="h-4 w-4" />
-                <span className="hidden sm:inline">+ Agregar Gasto</span>
-                <span className="sm:hidden">+ Gasto</span>
-            </Button>
-
             <Button
                 onClick={onAddOrder}
                 className="w-full md:w-auto md:ml-auto bg-cyan-600 hover:bg-cyan-700 text-white font-semibold text-sm"
