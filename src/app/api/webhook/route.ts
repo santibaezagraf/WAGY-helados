@@ -28,6 +28,8 @@ const supabaseAdmin = createClient<Database>(
 
 const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN! });
 
+console.log(`🔧 Webhook arrancado con WHATSAPP_PHONE_ID=${process.env.WHATSAPP_PHONE_ID}`);
+
 // Cuántos segundos esperamos antes de procesar (debounce: el cliente puede
 // seguir escribiendo). Cada mensaje agenda su propio wake-up.
 const DEBOUNCE_SECONDS = 8;

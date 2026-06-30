@@ -2,7 +2,7 @@ import { generateObject } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
-import { Database } from '@/types/supabase';
+import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion } from '@/lib/whatsapp';
 
 const supabaseAdmin = createClient<Database>(
@@ -40,24 +40,162 @@ export async function marcarHistorialDescartado(numeroCliente: string) {
  * `datos_completos` NO está acá porque lo calculamos nosotros después
  * (no es algo que el modelo deba decidir).
  */
+/**
+ * Intención del mensaje del cliente. Mutuamente excluyente — el modelo elige
+ * UNA sola. Reemplaza a 6 booleanos (es_cancelacion / es_confirmacion / ...)
+ * que el modelo a veces marcaba en combinaciones imposibles.
+ *
+ * "datos_pedido" es el catch-all cuando el mensaje aporta info concreta
+ * (cantidades, sabores, dirección, método de pago), incluso si es para
+ * modificar un pedido existente.
+ */
+export const IntencionEnum = z.enum([
+  'cancelar',
+  'confirmar',
+  'confirmar_cancelacion',
+  'rechazar_cancelacion',
+  'saludo',
+  'modificar_sin_datos',
+  'datos_pedido',
+]);
+export type Intencion = z.infer<typeof IntencionEnum>;
+
 export const PedidoIASchema = z.object({
+  intencion: IntencionEnum.describe('Intención principal del mensaje. Elegí UNA sola opción.'),
   direccion: z.string().nullable().describe('Calle y número únicamente (ej: "Mitre 951"). null si no se mencionó o si solo dieron aclaración. La palabra "retira" si pasan a retirar.'),
-  aclaracion: z.string().nullable().describe('Detalles extra de la ubicación (depto, piso, color de casa, etc.). null si no aplica.'),
+  aclaracion: z.string().nullable().describe('Detalle de ubicación mencionado en ESTE mensaje únicamente (depto, piso, color de casa, etc.). NO lo fusiones con lo que ya había: para "agregar" devolvé solo el detalle nuevo; para "reemplazar" devolvé el texto ya corregido completo; para "mantener" va null. null si no menciona aclaración.'),
+  aclaracion_operacion: z.enum(['agregar', 'reemplazar', 'mantener']).describe('Qué hacer con la aclaración: "agregar" si suma un detalle nuevo que NO contradice lo actual (el sistema lo concatena), "reemplazar" si corrige/contradice un detalle del actual (devolvé el texto corregido completo en el campo aclaracion), "mantener" si no menciona ninguna aclaración. En pedidos nuevos desde cero usá siempre "reemplazar".'),
   cantidad_agua: z.number().describe('Valor literal mencionado en el mensaje para agua (no calcules sumas/restas, solo extrae el numero literal). 0 si no se mencionó.'),
   cantidad_agua_operacion: z.enum(['sumar', 'restar', 'reemplazar', 'mantener']).describe('Que hacer con cantidad_agua: "sumar" si el cliente pide agregar al actual ("sumale 5", "agrega 10"), "restar" si pide quitar ("quitale 3", "sacale 2"), "reemplazar" si pide un valor fijo ("que sean 20", "cambialo a 50") o si es un pedido nuevo desde cero, "mantener" si no se menciona agua en el mensaje.'),
   cantidad_crema: z.number().describe('Valor literal mencionado en el mensaje para crema (no calcules sumas/restas). 0 si no se mencionó.'),
   cantidad_crema_operacion: z.enum(['sumar', 'restar', 'reemplazar', 'mantener']).describe('Que hacer con cantidad_crema. Mismas reglas que cantidad_agua_operacion.'),
-  observaciones: z.string().nullable().describe('Sabores o detalles de preparación textuales. null si no se mencionó.'),
+  // OBSERVACIONES POR SLOT. El modelo NO fusiona: extrae los sabores de ESTE
+  // mensaje por tipo de helado y elige una operación; TS combina con lo actual
+  // y reconstruye el texto plano. Esto elimina la clase de bug donde el modelo,
+  // al tener que devolver el string completo, pisaba el segmento del otro tipo.
+  obs_agua: z.string().nullable().describe('SABORES de los helados de AGUA mencionados en ESTE mensaje (ej: "frutilla y menta", "10 de frutilla y 5 de limón"). Sin el prefijo "los de agua". null si no menciona sabores de agua.'),
+  obs_agua_operacion: z.enum(['reemplazar', 'agregar', 'mantener', 'limpiar']).describe('"reemplazar" si el cliente define los sabores de agua ("los de agua que sean X"), "agregar" si suma un sabor a los de agua, "mantener" si no menciona sabores de agua, "limpiar" si pide sacarlos. En pedido nuevo: "reemplazar" si hay sabores de agua, "mantener" si no.'),
+  obs_crema: z.string().nullable().describe('SABORES de los helados de CREMA mencionados en ESTE mensaje. Sin el prefijo "los de crema". null si no menciona sabores de crema.'),
+  obs_crema_operacion: z.enum(['reemplazar', 'agregar', 'mantener', 'limpiar']).describe('Mismas reglas que obs_agua_operacion, para crema.'),
+  obs_general: z.string().nullable().describe('Detalles de preparación SIN tipo específico (ej: "sin coco", "todos sin azúcar", "bien fríos"). NO pongas acá sabores que ya son de agua o de crema. null si no aplica.'),
+  obs_general_operacion: z.enum(['reemplazar', 'agregar', 'mantener', 'limpiar']).describe('Mismas reglas que obs_agua_operacion, para los detalles generales.'),
   metodo_pago: z.string().nullable().describe('"efectivo", "transferencia" o null.'),
-  es_cancelacion: z.boolean().describe('El cliente pide cancelar/anular el pedido.'),
-  es_confirmacion: z.boolean().describe('El cliente confirma los datos del resumen.'),
-  es_confirmacion_cancelacion: z.boolean().describe('El cliente confirma que SÍ quiere cancelar (cuando estado=esperando_cancelacion).'),
-  es_rechazo_cancelacion: z.boolean().describe('El cliente se arrepiente y NO quiere cancelar (cuando estado=esperando_cancelacion).'),
-  es_modificacion_sin_datos: z.boolean().describe('El cliente quiere modificar pero no aporta NINGÚN dato nuevo.'),
-  es_saludo: z.boolean().describe('El mensaje es únicamente un saludo, sin datos.'),
 });
 
-type PedidoIA = z.infer<typeof PedidoIASchema> & { datos_completos: boolean };
+/**
+ * Observaciones estructuradas por tipo de helado. Es la fuente de verdad
+ * INTERNA del bot para el merge keyed (se guarda en la columna jsonb
+ * `observaciones_detalle`). El humano nunca la ve: el dashboard sigue
+ * mostrando/editando el texto plano `observaciones`, que es la proyección.
+ */
+export type ObsSlots = { agua: string | null; crema: string | null; general: string | null };
+
+// `observaciones` (proyección plana) y `observaciones_detalle` (slots) los
+// computamos en TS a partir de los 6 campos crudos del modelo, así que no
+// vienen del schema directo.
+type PedidoIA = z.infer<typeof PedidoIASchema> & {
+  datos_completos: boolean;
+  observaciones: string | null;
+  observaciones_detalle: ObsSlots;
+};
+
+/**
+ * Pre-clasificador heurístico para evitar llamar al LLM cuando el mensaje es
+ * inequívoco dado el estado del pedido (ej. "sí" en esperando_cancelacion,
+ * "hola" cuando hay un pedido conocido).
+ *
+ * Normaliza para tolerar formas reales: tildes, mayúsculas, puntuación,
+ * emojis y vocales estiradas ("Siiii!!" → "si", "holaaa 👋" → "hola"). Es
+ * conservador: si la forma normalizada NO matchea exacto con uno de los
+ * sets, devuelve null y el flujo cae al LLM normal.
+ */
+type IntencionShortCircuit = Extract<
+  Intencion,
+  'saludo' | 'confirmar' | 'confirmar_cancelacion' | 'rechazar_cancelacion'
+>;
+
+const CONFIRMACIONES = new Set([
+  'si', 'sip', 'sep', 'dale', 'ok', 'oka', 'oki', 'okey', 'okay',
+  'listo', 'perfecto', 'va', 'vale', 'confirmo', 'confirmar', 'confirmalo',
+  'claro', 'obvio', 'joya', 'bien', 'genial', 'bueno', 'buenisimo',
+  'esta bien', 'esta perfecto', 'todo bien', 'todo ok',
+  'asi esta', 'asi va', 'asi mismo', 'tal cual',
+  'si confirmo', 'si dale', 'si esta bien', 'dale confirmo', 'si confirmar',
+]);
+
+const NEGACIONES = new Set([
+  'no', 'nop', 'nope', 'nah', 'no gracias', 'nones', 'mejor no',
+]);
+
+const SALUDOS = new Set([
+  'hola', 'ola', 'holi', 'holis', 'hi', 'hello', 'ey', 'hey',
+  'buenas', 'buen dia', 'buenos dias', 'buenas tardes', 'buenas noches',
+  'que tal', 'que onda', 'como estas', 'como andas', 'como va',
+  'hola buenas', 'hola que tal',
+]);
+
+export function normalizarTextoShortCircuit(texto: string): string {
+  return texto
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')           // sin tildes
+    .replace(/[¿?¡!.,;:()"'*~_]/g, ' ')                          // puntuación a espacio
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ')   // emojis comunes
+    .replace(/([aeiou])\1+/g, '$1')                             // colapsa vocales estiradas
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function intentarShortCircuit(
+  texto: string,
+  estado: string | null,
+): IntencionShortCircuit | null {
+  const n = normalizarTextoShortCircuit(texto);
+  if (!n) return null;
+
+  if (estado === 'esperando_cancelacion') {
+    if (CONFIRMACIONES.has(n)) return 'confirmar_cancelacion';
+    if (NEGACIONES.has(n)) return 'rechazar_cancelacion';
+  }
+
+  if (estado === 'borrador' && CONFIRMACIONES.has(n)) {
+    return 'confirmar';
+  }
+
+  // Saludo solo cuando ya hay un estado conocido (pedido activo).
+  // Sin estado, podría haber un pedido a medio armar en el historial y un
+  // "hola" suelto sería el final del armado, no un saludo puro — lo dejamos
+  // pasar al LLM para que lo integre con el contexto.
+  if (estado && SALUDOS.has(n)) {
+    return 'saludo';
+  }
+
+  return null;
+}
+
+function pedidoDesdeShortCircuit(
+  tipo: IntencionShortCircuit,
+  pedidoActivo: PedidoActivoContext | null,
+): PedidoIA {
+  return {
+    intencion: tipo,
+    direccion: null,
+    aclaracion: null,
+    aclaracion_operacion: 'mantener',
+    cantidad_agua: pedidoActivo?.cantidad_agua ?? 0,
+    cantidad_agua_operacion: 'mantener',
+    cantidad_crema: pedidoActivo?.cantidad_crema ?? 0,
+    cantidad_crema_operacion: 'mantener',
+    // El short-circuit (saludo/confirmar/cancelar) nunca modifica sabores:
+    // todas las operaciones son "mantener" y arrastramos lo que ya había.
+    obs_agua: null, obs_agua_operacion: 'mantener',
+    obs_crema: null, obs_crema_operacion: 'mantener',
+    obs_general: null, obs_general_operacion: 'mantener',
+    observaciones: pedidoActivo?.observaciones ?? null,
+    observaciones_detalle: leerSlots(pedidoActivo),
+    metodo_pago: null,
+    datos_completos: false,
+  };
+}
 
 /**
  * Aplica la operación de cantidad de forma determinista (no se la dejamos al modelo).
@@ -78,6 +216,124 @@ export function aplicarOperacionCantidad(
 }
 
 /**
+ * Aplica la operación de aclaración de forma determinista. Misma filosofía que
+ * aplicarOperacionCantidad: el modelo solo extrae el texto literal de ESTE
+ * mensaje + la operación; TS es dueño de la fusión.
+ *
+ * - "agregar": el modelo manda solo el detalle nuevo; concatenamos con coma.
+ *   Esto evita la clase de bug donde el modelo, al tener que devolver la
+ *   concatenación completa, perdía o mangaba la parte vieja.
+ * - "reemplazar": corrección semántica (contradice lo actual). El modelo SÍ
+ *   manda el texto ya fusionado/corregido porque eso no se puede hacer en TS.
+ * - "mantener": no se mencionó aclaración; conservamos lo actual.
+ */
+export function aplicarOperacionAclaracion(
+  operacion: 'agregar' | 'reemplazar' | 'mantener',
+  texto: string | null,
+  actual: string | null,
+): string | null {
+  switch (operacion) {
+    case 'mantener':    return actual;
+    case 'reemplazar':  return texto ?? actual; // defensivo: reemplazar sin texto = no tocar
+    case 'agregar':
+      if (!texto) return actual;
+      if (!actual) return texto;
+      return `${actual}, ${texto}`;
+  }
+}
+
+/**
+ * Lee los slots de observaciones de un pedido. Si la columna jsonb está vacía
+ * (fila vieja pre-migración, o edición manual del dashboard que la setea null),
+ * siembra `general` con el texto plano para no perder nada — degrada limpio:
+ * el bot pierde granularidad por tipo hasta que el cliente vuelva a hablar por
+ * tipo, pero nunca borra datos.
+ */
+export function leerSlots(pedidoActivo: PedidoActivoContext | null): ObsSlots {
+  const detalle = pedidoActivo?.observaciones_detalle;
+  if (detalle && typeof detalle === 'object' && !Array.isArray(detalle)) {
+    const d = detalle as Record<string, unknown>;
+    return {
+      agua: typeof d.agua === 'string' ? d.agua : null,
+      crema: typeof d.crema === 'string' ? d.crema : null,
+      general: typeof d.general === 'string' ? d.general : null,
+    };
+  }
+  return { agua: null, crema: null, general: pedidoActivo?.observaciones ?? null };
+}
+
+/**
+ * Aplica una operación de slot. Igual que aplicarOperacionAclaracion + "limpiar".
+ */
+export function aplicarOperacionObs(
+  operacion: 'reemplazar' | 'agregar' | 'mantener' | 'limpiar',
+  texto: string | null,
+  actual: string | null,
+): string | null {
+  switch (operacion) {
+    case 'mantener':    return actual;
+    case 'limpiar':     return null;
+    case 'reemplazar':  return texto ?? actual; // defensivo: reemplazar sin texto = no tocar
+    case 'agregar':
+      if (!texto) return actual;
+      if (!actual) return texto;
+      return `${actual}, ${texto}`;
+  }
+}
+
+/**
+ * Reconstruye el texto plano de observaciones a partir de los slots. Es la
+ * proyección que ven la cocina, el dashboard y el resumen al cliente. Reproduce
+ * el formato histórico ("los de agua X, los de crema Y, <general>").
+ */
+export function reconstruirObservaciones(slots: ObsSlots): string | null {
+  const partes = [
+    slots.agua ? `los de agua ${slots.agua}` : '',
+    slots.crema ? `los de crema ${slots.crema}` : '',
+    slots.general ?? '',
+  ].filter(Boolean);
+  return partes.length ? partes.join(', ') : null;
+}
+
+// Palabras que indican una referencia de UNIDAD (aclaración), no el nombre de
+// una calle. Un texto cuyo único componente alfabético es uno de estos NO es
+// una dirección entregable.
+const PALABRAS_NO_CALLE = new Set([
+  'depto', 'dpto', 'depa', 'departamento', 'piso', 'torre', 'casa', 'lote',
+  'mz', 'manzana', 'block', 'bloque', 'timbre', 'interno', 'int', 'conjunto',
+  'barrio', 'edificio', 'monoblock', 'ph', 'unidad', 'sector', 'entre',
+  'esquina', 'esq', 'frente', 'fondo',
+]);
+
+/**
+ * Heurística de FORMATO (no semántica) para decidir si un texto parece una
+ * dirección de calle entregable: necesita un NÚMERO (altura) y un NOMBRE de
+ * calle (palabra de ≥3 letras que no sea una referencia de unidad como
+ * "depto"/"piso"). "retira" es un sentinela válido.
+ *
+ * Es la red determinista del #7: respalda —no reemplaza— el juicio del modelo.
+ * Descarta extracciones donde el modelo metió en `direccion` algo que era una
+ * aclaración ("depto 6") o una calle sin altura ("Mitre"). Acepta formas reales
+ * como "9 de Julio 23", "Av. San Martín 1234", "Calle 12 1450", "Ruta 8 km 5".
+ */
+export function pareceDireccion(texto: string | null): boolean {
+  if (!texto) return false;
+  const t = texto.trim();
+  if (t.toLowerCase() === 'retira') return true;
+
+  if (!/\b\d{1,5}\b/.test(t)) return false; // sin altura no es entregable
+
+  const palabras = t
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '') // sin tildes
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return palabras.some(p => /^[a-z]{3,}$/.test(p) && !PALABRAS_NO_CALLE.has(p));
+}
+
+/**
  * Campos mínimos de un pedidoActivo que necesita el prompt builder.
  * Usado tanto por el flujo real (donde pasa una row completa de pedidos)
  * como por el endpoint de dev (donde se construye una row sintética).
@@ -89,6 +345,7 @@ export type PedidoActivoContext = {
   direccion: string;
   aclaracion: string | null;
   observaciones: string | null;
+  observaciones_detalle?: Json | null;
   metodo_pago: string;
   enviado?: boolean | null;
 };
@@ -107,6 +364,12 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
   const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
 
   if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
+    const intencionesValidas = esperandoCancelacion
+      ? `"confirmar_cancelacion", "rechazar_cancelacion", "saludo", "datos_pedido"`
+      : `"cancelar", "confirmar", "saludo", "modificar_sin_datos", "datos_pedido"`;
+
+    const slots = leerSlots(pedidoActivo);
+
     return `
       ACTÚA COMO UNA API DE EXTRACCIÓN Y MODIFICACIÓN DE DATOS. NO ERES UN ASISTENTE CONVERSACIONAL. NO SALUDES, NO EXPLIQUES NADA.
 
@@ -117,57 +380,47 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       - cantidad_agua: ${pedidoActivo.cantidad_agua}
       - direccion: "${pedidoActivo.direccion}"
       - aclaracion: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}
-      - observaciones: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}
+      - sabores de los de agua: ${slots.agua ? `"${slots.agua}"` : 'null'}
+      - sabores de los de crema: ${slots.crema ? `"${slots.crema}"` : 'null'}
+      - detalles generales: ${slots.general ? `"${slots.general}"` : 'null'}
       - metodo_pago: "${pedidoActivo.metodo_pago}"
 
-      1. DETECCIÓN DE INTENCIONES (Obligatorio):
+      1. INTENCIÓN DEL MENSAJE (campo "intencion", elegí UNA opción):
+      Valores válidos en este contexto: ${intencionesValidas}.
       ${esperandoCancelacion ? `
-      * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si estaba seguro de cancelar. Analiza su respuesta:
-      - "es_confirmacion_cancelacion": true SI Y SOLO SI el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "por favor", "exacto", "sí, cancelar").
-      - "es_rechazo_cancelacion": true SI Y SOLO SI el cliente se arrepiente y dice que NO quiere cancelar (ej: "no", "no, pará", "me equivoqué", "dejalo así", "no lo canceles").
-      - "es_cancelacion": false
-      - "es_confirmacion": false
+      * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si está seguro de cancelar.
+      - "confirmar_cancelacion": el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "exacto", "sí, cancelar").
+      - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar (ej: "no", "no, pará", "me equivoqué", "dejalo así").
+      - "saludo": el mensaje es ÚNICAMENTE un saludo, sin pista sobre la cancelación.
+      - "datos_pedido": cualquier otra cosa.
       ` : `
-      - "es_cancelacion": true SI Y SOLO SI el cliente pide explícitamente cancelar, anular, dar de baja o dice que "ya no quiere el pedido" o "fue mentira".
-      - "es_confirmacion": true SI Y SOLO SI el contexto actual es "borrador" y el cliente acepta los datos expuestos (ej: "sí", "dale", "está bien").
-      - "es_confirmacion_cancelacion": false
-      - "es_rechazo_cancelacion": false
+      - "cancelar": el cliente pide explícitamente cancelar, anular, dar de baja, o dice "ya no quiero el pedido" / "fue mentira".
+      - "confirmar": ${tieneBorrador ? `el cliente acepta el resumen (ej: "sí", "dale", "está bien", "confirmo").` : `NO APLICA en este estado (el pedido no está en borrador).`}
+      - "saludo": el mensaje es ÚNICAMENTE un saludo, sin datos del pedido.
+      - "modificar_sin_datos": el cliente quiere cambiar el pedido pero NO aporta NINGÚN dato concreto (ej: "quiero cambiar algo", "modificar"). Si menciona sabores, cantidades, dirección o pago, NO uses esta opción — usá "datos_pedido".
+      - "datos_pedido": el cliente trae info concreta del pedido (cantidades, sabores, dirección, pago), incluso para modificar uno existente. Default cuando no aplique ninguna otra.
       `}
-      - "es_saludo": true si el mensaje es únicamente un saludo (ej: "hola") sin datos.
-      - "es_modificacion_sin_datos": true si el cliente quiere cambiar algo PERO NO aporta NINGÚN dato. ¡IMPORTANTE!: Si el cliente menciona sabores, gustos (ej: "que sean de chocolate", "sin dulce de leche"), cantidades o direcciones, esto DEBE SER FALSE porque SÍ está aportando datos válidos para modificar.
 
       2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
       - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}".
-      - "aclaracion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde".
-        * MERGE INTELIGENTE: Si el cliente AGREGA un detalle nuevo que NO contradice el actual, CONCATENA ambos separados por coma. Ej: actual "la casa es verde" + mensaje "con marco naranja" → "la casa es verde, con marco naranja". Otro ej: actual "depto 6" + mensaje "piso 3" → "depto 6, piso 3".
-        * Si el cliente CONTRADICE un detalle puntual del actual (ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde"), REEMPLAZA solo la parte contradicha y conservá el resto → "casa verde, de 2 pisos".
-        * Si el cliente no menciona aclaración alguna en este mensaje, mantén lo actual: ${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}.
+      - "aclaracion" + "aclaracion_operacion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde". NO fusiones vos el texto: solo extraé el dato de ESTE mensaje y elegí la operación; el sistema combina con lo actual (${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}).
+        * "agregar": el cliente suma un detalle NUEVO que no contradice lo actual. Devolvé SOLO el detalle nuevo en "aclaracion" (el sistema lo concatena con coma). Ej: actual "la casa es verde" + mensaje "con marco naranja" → aclaracion="con marco naranja", aclaracion_operacion="agregar". Otro: actual "depto 6" + mensaje "piso 3" → aclaracion="piso 3", aclaracion_operacion="agregar".
+        * "reemplazar": el cliente CONTRADICE un detalle puntual del actual. Acá SÍ devolvé el texto ya corregido COMPLETO en "aclaracion". Ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde" → aclaracion="casa verde, de 2 pisos", aclaracion_operacion="reemplazar".
+        * "mantener": el cliente no menciona ninguna aclaración en este mensaje. aclaracion=null, aclaracion_operacion="mantener".
       - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
-      - "observaciones": ¡ATENCIÓN AQUÍ! Este campo guarda GUSTOS, SABORES o DETALLES DE PREPARACIÓN. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente. Si simplemente menciona "de crema" o "de agua", o parecidos, no guardar aqui, ya que se refiere unicamente al tipo de helado, y no a sabores en si. NUNCA INVENTES sabores u observaciones que el cliente no haya dicho textualmente.
-        * MERGE INTELIGENTE: Si el cliente AGREGA sabores/detalles que NO contradicen los actuales, CONCATENA con coma. Ej: actual "los de crema de chocolate" + mensaje "y los de agua de frutilla" → "los de crema de chocolate, los de agua de frutilla".
-        * Si el cliente CONTRADICE (ej: actual "de chocolate" + mensaje "no, mejor de vainilla"), REEMPLAZA solo la parte contradicha y conservá el resto.
-        * Si no menciona ningún sabor en este mensaje, mantén el valor actual de forma obligatoria: ${pedidoActivo.observaciones ? `"${pedidoActivo.observaciones}"` : 'null'}.
-      - "cantidad_agua" / "cantidad_crema" y sus "_operacion": ¡NO HAGAS LA MATEMÁTICA! Solo identificá la intención y el valor literal del mensaje. Yo (el código) hago la cuenta sobre el valor actual.
-        * "sumar": cliente pide AGREGAR al actual. Pistas: presencia de "más", "sumar", "agregar", "extra", "otro/s". Ej:
-          - "sumale 50", "agregá 20", "y 5 más de agua", "5 más", "otros 10"
-          - "que sean 25 más" (la palabra "más" indica delta, NO total) → operacion="sumar", valor=25
-          El valor devuelto es el delta literal.
-        * "restar": cliente pide QUITAR. Pistas: "menos", "quitar", "sacar", "restar". Ej:
-          - "quitale 3", "sacale 2 de agua", "5 menos de crema", "menos 5"
-          Valor = literal a restar.
-        * "reemplazar": cliente pide un VALOR FIJO (SIN palabras como "más" o "menos"). Ej:
-          - "que sean 50" (sin "más" ni "menos") → operacion="reemplazar", valor=50
-          - "cambialo a 20", "ahora 30 de crema", "que sea 100"
-          Valor = nuevo total literal.
-        * "mantener": el cliente NO menciona ese tipo de helado en este mensaje. Valor = 0 (será ignorado).
-        Ejemplos contrastivos importantes:
-        - "que sean 25 más de agua" → cantidad_agua: 25, cantidad_agua_operacion: "sumar" (porque dijo "más")
-        - "que sean 25 de agua" → cantidad_agua: 25, cantidad_agua_operacion: "reemplazar" (sin "más" ni "menos")
-        - "que sean 5 menos de crema" → cantidad_crema: 5, cantidad_crema_operacion: "restar"
-        - "quitale 2 de crema y sumale 10 de agua" → cantidad_crema: 2, cantidad_crema_operacion: "restar", cantidad_agua: 10, cantidad_agua_operacion: "sumar"
-        - "sumale 5 de agua" → cantidad_agua: 5, cantidad_agua_operacion: "sumar", cantidad_crema: 0, cantidad_crema_operacion: "mantener"
+      - SABORES (campos "obs_agua" / "obs_crema" / "obs_general" + sus "_operacion"): NO armes el texto final ni pongas el prefijo "los de agua/crema"; extraé solo los sabores de ESTE mensaje en su slot y elegí la operación, TS combina y reconstruye. "de agua"/"de crema" es el TIPO, NO un sabor.
+        * Slot: "obs_agua"/"obs_crema" = sabores que el cliente atribuye a ese tipo, sin prefijo (ej. "10 de frutilla y 5 de menta"). "obs_general" = detalles sin tipo ("sin coco") o sabores sin tipo declarado ("de dulce de leche").
+        * Operación (igual que aclaracion, + "limpiar"): "reemplazar" si DEFINE los sabores de ese tipo ("los de agua que sean X"); "agregar" si suma un sabor (devolvé solo el nuevo); "mantener" si no menciona ese tipo (texto null); "limpiar" si pide sacarlos. Conservá desgloses numéricos tal cual; NUNCA inventes sabores.
+        * Si solo dice tipo+cantidad sin sabor ("10 de crema", "50 helados"), TODOS los slots = "mantener".
+        * Ej: actual agua="de vainilla", crema="de chocolate" + "los de agua que sean 10 de frutilla y 30 de chocolate" → obs_agua="10 de frutilla y 30 de chocolate"/reemplazar, obs_crema=null/mantener (crema intacto). "sin coco" → obs_general="sin coco"/agregar, resto mantener.
+      - "cantidad_agua" / "cantidad_crema" + sus "_operacion": NO hagas matemática, extraé el valor literal y la operación; TS calcula sobre el actual. ÚNICA suma permitida: si dan un desglose por sabores de UN tipo, sumalo ("los de agua 20 de X y 40 de Y" → 60).
+        * "sumar": agrega al actual. Pistas: "más", "sumá", "agregá", "otro/s". Ej: "sumale 50", "5 más de agua", "que sean 25 más" (con "más" = delta 25, NO total).
+        * "restar": quita. Pistas: "menos", "quitá", "sacá". Ej: "quitale 3", "5 menos de crema".
+        * "reemplazar": valor FIJO, SIN "más"/"menos". Ej: "que sean 50", "cambialo a 20", "ahora 30 de crema". También el desglose ya sumado ("que los de agua sean 20 de frutilla y 40 de menta" → 60).
+        * "mantener": no menciona ese tipo en el mensaje. Valor = 0.
+        Contraste clave (cada tipo es independiente): "25 más de agua" = sumar 25 | "25 de agua" = reemplazar 25 | "5 menos de crema" = restar 5.
 
-      IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings.
+      IMPORTANTE: Devolvé TODOS los campos del schema. "intencion" es una sola opción del enum, no un booleano.
     `;
   }
 
@@ -176,23 +429,27 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
 
     CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
 
-    1. DETECCIÓN DE INTENCIONES:
-    - "es_cancelacion": true SI Y SOLO SI el cliente pide explícitamente cancelar/anular un pedido (aunque no haya pedido activo, el cliente podría estar refiriéndose a uno ya despachado). Default false.
-    - "es_confirmacion": false
-    - "es_confirmacion_cancelacion": false
-    - "es_rechazo_cancelacion": false
-    - "es_modificacion_sin_datos": false
-    - "es_saludo": true si es 'UNICAMENTE un saludo, no aporta mas datos.
+    1. INTENCIÓN DEL MENSAJE (campo "intencion", elegí UNA opción):
+    Valores válidos en este contexto: "cancelar", "saludo", "datos_pedido".
+    - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).
+    - "saludo": el mensaje es ÚNICAMENTE un saludo (ej: "hola", "buenas"), sin datos del pedido.
+    - "datos_pedido": el cliente trae info del pedido (cantidades, sabores, dirección, pago). Default cuando no aplique otra.
 
     2. REGLAS DE EXTRACCIÓN:
     - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si NO menciona direccion ni retiro, pon null.
     - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
-    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0.
+    - "aclaracion_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay aclaración previa que combinar).
+    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10).
     - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
-    - "observaciones": Preferencias de sabores, gustos, o detalles de preparacion. Si el cliente menciona qué sabores quiere o no quiere (ej: "los de crema de chocolate y los de agua sin frutilla"), extrae esa instrucción textualmente y guárdala aquí. NUNCA INVENTES observaciones: si el cliente NO mencionó textualmente ningún sabor, gusto o detalle de preparación, devolvé null sin excepción.
+    - SABORES (campos "obs_agua" / "obs_crema" / "obs_general"): poné los sabores en el slot del tipo, SIN el prefijo "los de agua/crema". NO confundas el tipo de helado con un sabor.
+      * "obs_agua": sabores de los de agua (ej. "frutilla y menta", "5 de frutilla y 5 de menta"). "obs_crema": ídem crema. "obs_general": sabores/detalles sin tipo ("sin coco", "de dulce de leche").
+      * Conservá desgloses numéricos tal cual ("6 de chocolate y 4 de granizado"); la cocina los necesita.
+      * Si el cliente solo dice tipo + cantidad sin sabor ("10 de crema", "50 helados de agua"), el slot va en null.
+      * NUNCA INVENTES sabores.
+    - "obs_agua_operacion" / "obs_crema_operacion" / "obs_general_operacion": "reemplazar" si el slot tiene sabores, "mantener" si va null. (Pedido nuevo: no hay nada previo que combinar.)
     - "metodo_pago": "efectivo", "transferencia" o null. Puede referirse a cualquiera de los 2 metodos de formas distintas ("en billete", "cash", "mercado pago", "mp", etc.), de ellas obten alguna de estas 2 opciones validas.
 
-    IMPORTANTE: Devolvé TODOS los campos del schema, incluso los que sean false o null. No omitas ninguno. Los campos que empiezan con "es_" (es_cancelacion, es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion, es_modificacion_sin_datos, es_saludo) deben ser BOOLEANOS REALES (true o false sin comillas), NUNCA strings. Los flags es_confirmacion, es_confirmacion_cancelacion, es_rechazo_cancelacion y es_modificacion_sin_datos van siempre en false en este contexto (no hay pedido activo en estado de modificación).
+    IMPORTANTE: Devolvé TODOS los campos del schema. "intencion" es una sola opción del enum, no un booleano.
   `;
 }
 
@@ -224,6 +481,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .from('mensajes_chat')
     .select('created_at')
     .eq('telefono', numeroCliente)
+    .eq('rol', 'cliente') // defensivo: mensajes del bot van con procesado=true, no aparecen acá igual
     .eq('procesado', false)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -247,6 +505,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .from('mensajes_chat')
     .update({ procesado: true })
     .eq('telefono', numeroCliente)
+    .eq('rol', 'cliente') // refuerzo: nunca reclamamos un row del bot como input
     .eq('procesado', false)
     .select('id, texto, created_at');
 
@@ -318,18 +577,37 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   //     mensajes viejos pueden confundir al modelo (caso real: "sumale 50 de
   //     agua" del batch anterior se reaplicaba al confirmar). Pasamos solo lo
   //     nuevo que el cliente acaba de mandar.
-  let mensajesParaIA: { id: string; texto: string | null; created_at: string }[];
+  type MensajeHistorial = { texto: string | null; created_at: string; rol: string };
+  let mensajesParaIA: MensajeHistorial[];
 
   if (pedidoActivo) {
-    mensajesParaIA = [...mensajesClaim].sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
-    console.log(`📚 Hay pedidoActivo (${pedidoActivo.estado}): pasamos solo los ${mensajesParaIA.length} mensajes nuevos del batch.`);
+    // Mensajes nuevos del cliente del batch...
+    const nuevosCliente: MensajeHistorial[] = [...mensajesClaim]
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      .map(m => ({ texto: m.texto, created_at: m.created_at, rol: 'cliente' }));
+
+    // ...más el último turno del bot anterior al batch. Esto le da contexto al
+    // LLM para responder "dale" / "sí" / "Av. Mitre 1234" sueltos, sin tener
+    // que adivinar a qué pregunta del bot se refiere el cliente.
+    const primerNuevo = nuevosCliente[0]?.created_at ?? new Date().toISOString();
+    const { data: ultimoBot } = await supabaseAdmin
+      .from('mensajes_chat')
+      .select('texto, created_at, rol')
+      .eq('telefono', numeroCliente)
+      .eq('rol', 'bot')
+      .eq('descartado', false)
+      .lt('created_at', primerNuevo)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    mensajesParaIA = ultimoBot ? [ultimoBot, ...nuevosCliente] : nuevosCliente;
+    console.log(`📚 Hay pedidoActivo (${pedidoActivo.estado}): pasamos ${nuevosCliente.length} mensaje(s) nuevo(s)${ultimoBot ? ' + último turno del bot' : ''}.`);
   } else {
     const hace15Minutos = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const { data: historial } = await supabaseAdmin
       .from('mensajes_chat')
-      .select('id, texto, created_at')
+      .select('texto, created_at, rol')
       .eq('telefono', numeroCliente)
       .eq('descartado', false) // ignoramos mensajes de conversaciones ya cerradas
       .gte('created_at', hace15Minutos)
@@ -337,7 +615,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .limit(15);
 
     mensajesParaIA = historial ?? [];
-    console.log(`📚 Sin pedidoActivo: traemos ${mensajesParaIA.length} mensajes recientes (últimos 15 min) para captar el pedido en armado.`);
+    console.log(`📚 Sin pedidoActivo: traemos ${mensajesParaIA.length} mensajes recientes (últimos 15 min, ambos roles) para captar el pedido en armado.`);
   }
 
   if (mensajesParaIA.length === 0) {
@@ -346,7 +624,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   }
 
   const historialParaIA = mensajesParaIA
-    .map((m, index) => `Mensaje ${index + 1}: "${m.texto}"`)
+    .map(m => `${m.rol === 'bot' ? 'Bot' : 'Cliente'}: "${m.texto}"`)
     .join("\n");
 
   console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}):\n${historialParaIA}`);
@@ -405,12 +683,27 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   let pedido: PedidoIA | null = null;
   let lastError: unknown = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  // 4b. SHORT-CIRCUIT: si el batch es un único mensaje inequívoco dado el
+  //     estado del pedido (ej. "sí" en esperando_cancelacion, "hola" con
+  //     pedido en cocina), salteamos el LLM. Reduce latencia, costo y
+  //     errores del modelo en los casos triviales.
+  if (mensajesClaim.length === 1) {
+    const intento = intentarShortCircuit(
+      mensajesClaim[0].texto ?? '',
+      pedidoActivo?.estado ?? null,
+    );
+    if (intento) {
+      pedido = pedidoDesdeShortCircuit(intento, pedidoActivo);
+      console.log(`⚡ Short-circuit (sin LLM): tipo=${intento}, mensaje="${mensajesClaim[0].texto}"`);
+    }
+  }
+
+  for (let attempt = 1; pedido === null && attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const { object } = await generateObject({
         model: groq('openai/gpt-oss-20b'),
         system: SYSTEM_PROMPT,
-        prompt: `Mensaje(s) del cliente: "${historialParaIA}"`,
+        prompt: `Conversación reciente (el último turno del bot da contexto al mensaje del cliente):\n${historialParaIA}`,
         schema: PedidoIASchema,
         temperature: 0,
       });
@@ -435,10 +728,35 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
       console.log(`🧮 Cantidades: agua ${cantidadAguaActual} -> ${cantidadAguaFinal} (op: ${object.cantidad_agua_operacion}, valor: ${object.cantidad_agua}), crema ${cantidadCremaActual} -> ${cantidadCremaFinal} (op: ${object.cantidad_crema_operacion}, valor: ${object.cantidad_crema})`);
 
+      // Misma filosofía que las cantidades: el modelo extrajo el texto literal
+      // + la operación; la fusión la hace TS de forma determinista.
+      const aclaracionActual = pedidoActivo?.aclaracion ?? null;
+      const aclaracionFinal = aplicarOperacionAclaracion(
+        object.aclaracion_operacion,
+        object.aclaracion,
+        aclaracionActual,
+      );
+      console.log(`📝 Aclaración: "${aclaracionActual ?? ''}" -> "${aclaracionFinal ?? ''}" (op: ${object.aclaracion_operacion}, texto: "${object.aclaracion ?? ''}")`);
+
+      // OBSERVACIONES: merge keyed por tipo, en TS. Leemos los slots actuales
+      // (sembrando general desde el texto plano si la fila no tiene jsonb),
+      // aplicamos la operación de cada slot y reconstruimos el texto plano.
+      const slotsActuales = leerSlots(pedidoActivo);
+      const slotsFinales: ObsSlots = {
+        agua: aplicarOperacionObs(object.obs_agua_operacion, object.obs_agua, slotsActuales.agua),
+        crema: aplicarOperacionObs(object.obs_crema_operacion, object.obs_crema, slotsActuales.crema),
+        general: aplicarOperacionObs(object.obs_general_operacion, object.obs_general, slotsActuales.general),
+      };
+      const observacionesFinal = reconstruirObservaciones(slotsFinales);
+      console.log(`🍨 Observaciones: ${JSON.stringify(slotsActuales)} -> ${JSON.stringify(slotsFinales)} => "${observacionesFinal ?? ''}"`);
+
       pedido = {
         ...object,
         cantidad_agua: cantidadAguaFinal,
         cantidad_crema: cantidadCremaFinal,
+        aclaracion: aclaracionFinal,
+        observaciones: observacionesFinal,
+        observaciones_detalle: slotsFinales,
         datos_completos: Boolean(
           object.direccion && object.metodo_pago && (cantidadAguaFinal > 0 || cantidadCremaFinal > 0)
         ),
@@ -454,11 +772,23 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   if (!pedido) {
     console.error("❌ Falló la extracción structured tras todos los reintentos:", lastError);
-    await enviarMensajeWhatsApp(numeroCliente, "Disculpá, tuve un problema entendiendo tu mensaje. ¿Podés repetirlo? 🙏");
+    await enviarMensajeWhatsApp(numeroCliente, "Disculpá, no te entendí. ¿Lo repetís? 🙏");
     return;
   }
 
   try {
+
+    // #7 — VALIDACIÓN DE DIRECCIÓN (determinista, antes de todo lo demás):
+    // si el modelo puso en `direccion` algo que no parece calle+altura (metió
+    // una aclaración como "depto 6", o una calle sin número), lo descartamos.
+    // Cae a null y abajo se inyecta la histórica si existe; si no, el flujo
+    // normal le pide la dirección al cliente. Corre antes del override de saludo
+    // (así una dirección inválida no cuenta como "dato útil") y antes de
+    // hayCambiosReales (así no se interpreta como un cambio real).
+    if (pedido.direccion && !pareceDireccion(pedido.direccion)) {
+      console.log(`📍 La dirección "${pedido.direccion}" no pasó la validación de formato (no parece calle+altura). La descarto.`);
+      pedido.direccion = null;
+    }
 
     // IMPORTANTE: el override de saludo y el cálculo de cambios reales corren
     // ANTES de la inyección de dirección histórica. Si los corriéramos después,
@@ -480,9 +810,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
       console.log(`🔍 Evaluación de cambios reales: ${hayCambiosReales}`);
 
-      if (pedido.es_modificacion_sin_datos && hayCambiosReales) {
-        console.log("🛠️ OVERRIDE: La IA se equivocó. Se detectaron cambios reales en los datos, anulando el flag.");
-        pedido.es_modificacion_sin_datos = false;
+      if (pedido.intencion === 'modificar_sin_datos' && hayCambiosReales) {
+        console.log("🛠️ OVERRIDE: La IA marcó modificar_sin_datos pero hay cambios reales. Reclasificando como datos_pedido.");
+        pedido.intencion = 'datos_pedido';
       }
     }
 
@@ -490,7 +820,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     let trajoDatosUtiles = false;
 
     if (pedidoActivo && !pedidoEnviado) {
-      trajoDatosUtiles = hayCambiosReales || pedido.es_cancelacion || pedido.es_confirmacion;
+      trajoDatosUtiles = hayCambiosReales || pedido.intencion === 'cancelar' || pedido.intencion === 'confirmar';
     } else {
       // Para anular el flag de saludo solo consideramos señales CONCRETAS
       // (numéricas o con formato esperado). Excluimos `observaciones` a
@@ -505,19 +835,25 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         pedido.metodo_pago !== null;
     }
 
-    if (pedido.es_saludo && trajoDatosUtiles) {
-      console.log("🛠️ OVERRIDE: El cliente saludó pero incluyó datos del pedido. Anulando flag de saludo.");
-      pedido.es_saludo = false;
+    if (pedido.intencion === 'saludo' && trajoDatosUtiles) {
+      console.log("🛠️ OVERRIDE: La IA marcó saludo pero el mensaje trae datos del pedido. Reclasificando como datos_pedido.");
+      pedido.intencion = 'datos_pedido';
     }
 
     // OVERRIDE DE DIRECCIÓN HISTÓRICA: solo después de haber decidido el saludo.
     // Si el cliente solo saludó, no llega acá (return en la rama de saludo),
     // así que la histórica no contamina ese path. Para mensajes con datos
     // reales, rellenamos lo que falte.
+    // #8: marcamos cuándo la dirección se rellenó desde un pedido ANTERIOR del
+    // cliente (solo en pedidos nuevos: con pedidoActivo la dirección es la del
+    // propio pedido en curso, que el cliente ya vio). Se lo avisamos en el
+    // resumen para que pueda corregirla si se mudó / quiere otra entrega.
+    let direccionInyectadaDeHistorial = false;
     if (!pedido.direccion && direccionGuardada) {
       console.log(`🛠️ OVERRIDE: El cliente no pasó dirección. Inyectando histórica: ${direccionGuardada}`);
       pedido.direccion = direccionGuardada;
       pedido.aclaracion = pedido.aclaracion ?? aclaracionGuardada;
+      direccionInyectadaDeHistorial = !pedidoActivo;
     }
 
     pedido.datos_completos = Boolean(pedido.direccion && pedido.metodo_pago && (pedido.cantidad_agua > 0 || pedido.cantidad_crema > 0));
@@ -530,7 +866,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // el repartidor pudo haber tocado "Marcar como enviado". Si el UPDATE
     // afecta 0 filas, sabemos que se envió en la ventana y le avisamos al cliente.
     if (pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion') {
-      if (pedido.es_confirmacion_cancelacion) {
+      if (pedido.intencion === 'confirmar_cancelacion') {
         const { data: cancelados } = await supabaseAdmin
           .from('pedidos')
           .update({ estado: 'cancelado' })
@@ -540,16 +876,16 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           .select('id');
 
         if (cancelados && cancelados.length > 0) {
-          await enviarMensajeWhatsApp(numeroCliente, "Listo, pedido cancelado definitivamente. Si volvés a tener ganas de helado, acá voy a estar. 👋");
+          await enviarMensajeWhatsApp(numeroCliente, "Pedido cancelado. Cuando quieras helado, acá estoy 👋");
           console.log(`✅ Pedido ${pedidoActivo.id} cancelado.`);
           // La conversación cerró: marcamos los mensajes como descartados
           // para que no contaminen el historial de la próxima conversación.
           await marcarHistorialDescartado(numeroCliente);
         } else {
           console.log(`⚠️ Race detectada: el pedido ${pedidoActivo.id} fue enviado entre el read y el UPDATE.`);
-          await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya fue despachado por el repartidor y está en camino, por lo que no se pudo cancelar. 🛵");
+          await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya está en camino y no se pudo cancelar 🛵");
         }
-      } else if (pedido.es_rechazo_cancelacion) {
+      } else if (pedido.intencion === 'rechazar_cancelacion') {
         // Volvemos el pedido a borrador. Si mientras tanto se envió o canceló
         // por otro lado, no lo tocamos.
         const { data: rechazados } = await supabaseAdmin
@@ -564,7 +900,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           await enviarResumenYPedirConfirmacion(numeroCliente, rechazados, false);
         } else {
           console.log(`⚠️ El pedido ${pedidoActivo.id} ya no está en 'esperando_cancelacion'. Algo cambió en paralelo.`);
-          await enviarMensajeWhatsApp(numeroCliente, "Mmm, algo cambió con tu pedido mientras tanto. Volveme a escribir y vemos cómo seguimos. 🙏");
+          await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
         }
       } else {
         await enviarConfirmacionCancelacion(numeroCliente, pedidoActivo.id, "Por favor, confirmame: ¿Querés cancelar el pedido?");
@@ -572,7 +908,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       return;
     }
 
-    if (pedido.es_cancelacion && pedidoActivo) {
+    if (pedido.intencion === 'cancelar' && pedidoActivo) {
       const { data: marcados } = await supabaseAdmin
         .from('pedidos')
         .update({ estado: 'esperando_cancelacion' })
@@ -586,56 +922,56 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         console.log(`⚠️ Pedido ${pedidoActivo.id} puesto en estado 'esperando_cancelacion'.`);
       } else {
         console.log(`❌ El cliente quiso cancelar pero el pedido ${pedidoActivo.id} ya fue enviado (race o estado previo).`);
-        await enviarMensajeWhatsApp(numeroCliente, "Uy, te pido mil disculpas pero tu pedido ya fue despachado y está en camino, por lo que no podemos cancelarlo a esta altura. 🛵");
+        await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya está en camino, no podemos cancelarlo 🛵");
       }
       return;
     }
 
     // Cancelación sin pedidoActivo: ¿se refiere a un pedido ya despachado?
-    if (pedido.es_cancelacion && !pedidoActivo) {
+    if (pedido.intencion === 'cancelar' && !pedidoActivo) {
       if (ultimoPedidoEnviado) {
-        await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya fue despachado y está en camino, por lo que no podemos cancelarlo a esta altura. 🛵");
+        await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya está en camino, no podemos cancelarlo 🛵");
         console.log(`ℹ️ Cliente intentó cancelar pero el pedido ${ultimoPedidoEnviado.id} ya está enviado.`);
         // La conversación sobre ese pedido se cerró. Descartamos el historial
         // para que próximos mensajes no se mezclen con este intento.
         await marcarHistorialDescartado(numeroCliente);
       } else {
-        await enviarMensajeWhatsApp(numeroCliente, "No tenés ningún pedido activo para cancelar. Si querés hacer un pedido, escribime los datos 🍦");
+        await enviarMensajeWhatsApp(numeroCliente, "No tenés pedido activo para cancelar. Si querés hacer uno, mandame los datos 🍦");
         console.log(`ℹ️ Cliente pidió cancelar pero no tiene pedidos recientes.`);
       }
       return;
     }
 
     // 2. SALUDO
-    if (pedido.es_saludo) {
+    if (pedido.intencion === 'saludo') {
       if (yaExisteEnCocina) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Recordá que ya tenemos tu pedido en preparación. ¿Querés agregar o modificar algo, o te puedo ayudar con otra cosa?");
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en preparación. ¿Querés modificar algo?");
       } else if (tieneBorrador) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tengo el resumen de tu pedido en pausa. ¿Me confirmás si los datos están bien con un *SÍ* o un *NO*?");
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tenés un pedido en pausa esperando confirmación. ¿Está bien? Respondé *SÍ* o *NO*");
       } else if (esperandoCancelacion) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Veo que tu pedido está a punto de ser cancelado. ¿Querés confirmar la cancelación con un *SÍ* o mantenerlo con un *NO*?");
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido está por cancelarse. ¿Confirmás? *SÍ* o *NO*");
       } else if (ultimoPedidoEnviado) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya fue despachado y está en camino 🛵. ¿Querés hacer otro pedido?");
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en camino 🛵 ¿Hacés otro?");
       } else {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! Qué gusto que nos escribas. 👋 ¿Qué te gustaría pedir hoy?");
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 ¿Qué te gustaría pedir?");
       }
       console.log("👋 El cliente saludó. Respondiendo según el contexto...");
       return;
     }
 
     // 3. MODIFICACIÓN SIN DATOS
-    if (pedido.es_modificacion_sin_datos && (tieneBorrador || yaExisteEnCocina)) {
-      await enviarMensajeWhatsApp(numeroCliente, "Entendido. ¿Qué te gustaría modificar o agregar? Escribime los detalles así actualizo el pedido. 📝");
+    if (pedido.intencion === 'modificar_sin_datos' && (tieneBorrador || yaExisteEnCocina)) {
+      await enviarMensajeWhatsApp(numeroCliente, "Dale, ¿qué querés cambiar? 📝");
       console.log("⚠️ El cliente quiere modificar pero no dio datos nuevos.");
       return;
     }
 
     // 4. CONFIRMACIÓN (Solo si está en borrador)
     if (tieneBorrador) {
-      if (pedido.es_confirmacion && !hayCambiosReales) {
+      if (pedido.intencion === 'confirmar' && !hayCambiosReales) {
         const { data: finalData } = await supabaseAdmin.from('pedidos').update({ estado: 'pendiente' }).eq('id', pedidoActivo.id).select('*').single();
         if (finalData) {
-          await enviarMensajeWhatsApp(numeroCliente, `¡Espectacular! Pedido confirmado y enviado a la cocina. ¡Muchas gracias! 🍦`);
+          await enviarMensajeWhatsApp(numeroCliente, `¡Confirmado! Va a la cocina 🍦 ¡Gracias!`);
           console.log("✅ Pedido borrador confirmado por el cliente. Enviado a cocina.");
           // Cierre de la fase de armado: descartamos los mensajes del historial
           // para que futuras modificaciones no vean "quiero 10 de crema" etc.
@@ -647,7 +983,11 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           cantidad_crema: pedido.cantidad_crema ?? pedidoActivo.cantidad_crema,
           direccion: pedido.direccion ?? pedidoActivo.direccion,
           aclaracion: pedido.aclaracion ?? pedidoActivo.aclaracion,
-          observaciones: pedido.observaciones ?? pedidoActivo.observaciones,
+          // pedido.observaciones ya es la proyección del merge (slots sembrados
+          // desde lo actual), así que NO usamos `?? pedidoActivo.observaciones`:
+          // eso rompería un "limpiar" que dejó las observaciones en null a propósito.
+          observaciones: pedido.observaciones,
+          observaciones_detalle: pedido.observaciones_detalle,
           metodo_pago: pedido.metodo_pago ?? pedidoActivo.metodo_pago,
           estado: 'borrador'
         }).eq('id', pedidoActivo.id).select('*').single();
@@ -663,23 +1003,21 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         const datosFaltantes: string[] = [];
 
         if ((pedido.cantidad_agua === 0 || !pedido.cantidad_agua) && (pedido.cantidad_crema === 0 || !pedido.cantidad_crema)) {
-          datosFaltantes.push("cuántos helados querés (y de qué tipo)");
+          datosFaltantes.push("Cantidad y sabores");
         }
         if (!pedido.direccion) {
-          datosFaltantes.push("a qué dirección te lo enviamos (o si pasás a retirar)");
+          datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
         }
         if (!pedido.metodo_pago) {
-          datosFaltantes.push("cómo preferís abonar (efectivo o transferencia)");
+          datosFaltantes.push("Forma de pago (efectivo o transferencia)");
         }
 
         console.log("⚠️ Datos faltantes detectados:", datosFaltantes);
 
-        let mensajeRespuesta = "";
-        if (datosFaltantes.length === 3) {
-          mensajeRespuesta = "¡Hola! Qué gusto que nos escribas. 👋 ¿Qué te gustaría pedir? (Recordá pasarnos cantidades, dirección de envío y método de pago).";
-        } else {
-          mensajeRespuesta = `¡Genial! Para terminar de armar tu pedido solo me faltaría saber: ${datosFaltantes.join(", ")}.`;
-        }
+        const encabezado = datosFaltantes.length === 3
+          ? "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:"
+          : "Para armar tu pedido me falta:";
+        const mensajeRespuesta = [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n');
 
         await enviarMensajeWhatsApp(numeroCliente, mensajeRespuesta);
       }
@@ -696,7 +1034,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         // actuales; no hay intención real de modificar nada.
         if (yaExisteEnCocina && !hayCambiosReales) {
           console.log("ℹ️ Cliente con pedido en cocina sin cambios reales. Avisando que ya hay uno en preparación.");
-          await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Ya tenemos tu pedido en preparación. ¿Querés agregar o modificar algo, o te puedo ayudar con otra cosa?");
+          await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en preparación. ¿Querés modificar algo?");
           return;
         }
 
@@ -712,6 +1050,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               direccion: direccion,
               aclaracion: pedido.aclaracion,
               observaciones: pedido.observaciones,
+              observaciones_detalle: pedido.observaciones_detalle,
               metodo_pago: metodoPago,
               estado: 'borrador'
             })
@@ -735,6 +1074,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               cantidad_agua: pedido.cantidad_agua,
               cantidad_crema: pedido.cantidad_crema,
               observaciones: pedido.observaciones,
+              observaciones_detalle: pedido.observaciones_detalle,
               metodo_pago: metodoPago,
               estado: 'borrador'
             }])
@@ -750,7 +1090,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         }
 
         if (borradorDB) {
-          await enviarResumenYPedirConfirmacion(numeroCliente, borradorDB, Boolean(yaExisteEnCocina));
+          await enviarResumenYPedirConfirmacion(numeroCliente, borradorDB, Boolean(yaExisteEnCocina), direccionInyectadaDeHistorial);
         }
       }
     }

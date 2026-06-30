@@ -103,7 +103,11 @@ export async function actualizarPedidoCompleto(
 
     const { error } = await supabase
         .from("pedidos")
-        .update({ ...datos, ...patchConEnviadoCoherente(datos.estado) })
+        // La edición manual es la fuente de verdad: colapsamos los slots por tipo
+        // (observaciones_detalle) a null. El bot, en su próximo turno, resiembra
+        // 'general' desde el texto plano (ver leerSlots). Sin esto, el bot
+        // mergearía contra slots viejos que ya no reflejan lo que escribió el staff.
+        .update({ ...datos, observaciones_detalle: null, ...patchConEnviadoCoherente(datos.estado) })
         .eq("id", id)
 
     if (error) throw new Error(`Error al actualizar pedido: ${error.message}`)

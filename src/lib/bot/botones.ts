@@ -82,13 +82,13 @@ async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
     .maybeSingle();
 
   if (data) {
-    await enviarMensajeWhatsApp(numeroCliente, "¡Espectacular! Pedido confirmado y enviado a la cocina. ¡Muchas gracias! 🍦");
+    await enviarMensajeWhatsApp(numeroCliente, "¡Confirmado! Va a la cocina 🍦 ¡Gracias!");
     await marcarHistorialDescartado(numeroCliente);
     console.log(`✅ Pedido ${pedidoId} confirmado por botón.`);
   } else {
     // El borrador ya no existe en ese estado: lo autoconfirmó el cron,
     // se cambió por texto, o el cliente está clickeando un botón viejo.
-    await enviarMensajeWhatsApp(numeroCliente, "Mmm, este pedido ya no está esperando confirmación. Si necesitás algo, escribime de nuevo. 🙏");
+    await enviarMensajeWhatsApp(numeroCliente, "Este pedido ya no está esperando confirmación. Si necesitás algo, escribime 🙏");
     console.log(`⚠️ Botón "confirmar_borrador" sobre pedido ${pedidoId} que ya no está en borrador.`);
   }
 }
@@ -105,9 +105,9 @@ async function modificarBorrador(numeroCliente: string, pedidoId: number) {
     .maybeSingle();
 
   if (pedido?.estado === 'borrador') {
-    await enviarMensajeWhatsApp(numeroCliente, "Entendido. ¿Qué te gustaría modificar o agregar? Escribime los detalles así actualizo el pedido. 📝");
+    await enviarMensajeWhatsApp(numeroCliente, "Dale, ¿qué querés cambiar? 📝");
   } else {
-    await enviarMensajeWhatsApp(numeroCliente, "Mmm, este pedido ya no está esperando confirmación. Si necesitás algo, escribime de nuevo. 🙏");
+    await enviarMensajeWhatsApp(numeroCliente, "Este pedido ya no está esperando confirmación. Si necesitás algo, escribime 🙏");
   }
 }
 
@@ -123,12 +123,12 @@ async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
     .maybeSingle();
 
   if (data) {
-    await enviarMensajeWhatsApp(numeroCliente, "Listo, pedido cancelado definitivamente. Si volvés a tener ganas de helado, acá voy a estar. 👋");
+    await enviarMensajeWhatsApp(numeroCliente, "Pedido cancelado. Cuando quieras helado, acá estoy 👋");
     await marcarHistorialDescartado(numeroCliente);
     console.log(`✅ Pedido ${pedidoId} cancelado por botón.`);
   } else {
     // Race: el pedido se envió mientras tanto, o ya se canceló por otro lado.
-    await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya fue despachado por el repartidor y está en camino, por lo que no se pudo cancelar. 🛵");
+    await enviarMensajeWhatsApp(numeroCliente, "Uy, llegamos tarde. Tu pedido ya está en camino y no se pudo cancelar 🛵");
     console.log(`⚠️ Botón "confirmar_cancelacion" sobre pedido ${pedidoId} que ya no está en esperando_cancelacion.`);
   }
 }
@@ -147,7 +147,7 @@ async function rechazarCancelacion(numeroCliente: string, pedidoId: number) {
     await enviarResumenYPedirConfirmacion(numeroCliente, data, false);
     console.log(`✅ Cancelación rechazada por botón. Pedido ${pedidoId} vuelve a borrador.`);
   } else {
-    await enviarMensajeWhatsApp(numeroCliente, "Mmm, algo cambió con tu pedido mientras tanto. Volveme a escribir y vemos cómo seguimos. 🙏");
+    await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
     console.log(`⚠️ Botón "rechazar_cancelacion" sobre pedido ${pedidoId} que ya no está en esperando_cancelacion.`);
   }
 }
