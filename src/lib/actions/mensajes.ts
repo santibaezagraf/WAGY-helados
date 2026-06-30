@@ -13,10 +13,6 @@ import {
 } from '@/lib/bot/atencion-humana'
 import { construirConversaciones, type Conversacion } from '@/lib/conversaciones-utils'
 
-// Re-exportamos el tipo desde el módulo puro para que los consumidores (header,
-// page) lo sigan importando desde acá sin cambios.
-export type { Conversacion }
-
 // Bucket privado de los archivos del chat. Se sirven solo vía URL firmada.
 const MEDIA_BUCKET = 'whatsapp-media'
 // Vigencia de la URL firmada (1h): alcanza para ver/escuchar/descargar en el

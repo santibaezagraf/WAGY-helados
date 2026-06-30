@@ -17,7 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { ChatModal } from "@/components/pedidos/chat-modal"
-import type { Conversacion } from "@/lib/actions/mensajes"
+import type { Conversacion } from "@/lib/conversaciones-utils"
 
 // Tipos de mensaje que el bot no resuelve y que disparan el aviso "requiere
 // intervención humana". Debe coincidir con la lógica del webhook.

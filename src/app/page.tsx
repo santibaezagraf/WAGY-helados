@@ -3,7 +3,8 @@ import { redirect } from 'next/navigation'
 import { DataTable } from '@/components/pedidos/data-table'
 import { Header } from '@/components/ui/header'
 import { getPedidosListado } from '@/lib/data/pedidos-listado'
-import { getConversacionesRecientes, type Conversacion } from '@/lib/actions/mensajes'
+import { getConversacionesRecientes } from '@/lib/actions/mensajes'
+import { type Conversacion } from '@/lib/conversaciones-utils'
 import { parseAncla, inicioPeriodo, finPeriodo, type Periodo } from '@/lib/periodo-utils'
 
 
