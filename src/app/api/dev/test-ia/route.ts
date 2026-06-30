@@ -5,6 +5,12 @@ import {
   PedidoIASchema,
   buildSystemPrompt,
   aplicarOperacionCantidad,
+  aplicarOperacionAclaracion,
+  aplicarOperacionObs,
+  leerSlots,
+  reconstruirObservaciones,
+  pareceDireccion,
+  type ObsSlots,
   type PedidoActivoContext,
 } from '@/lib/bot/procesar';
 
@@ -95,6 +101,25 @@ export async function POST(request: Request) {
       cantidadCremaActual,
     );
 
+    const aclaracionActual = pedidoActivo?.aclaracion ?? null;
+    const aclaracionFinal = aplicarOperacionAclaracion(
+      object.aclaracion_operacion,
+      object.aclaracion,
+      aclaracionActual,
+    );
+
+    const slotsActuales = leerSlots(pedidoActivo ?? null);
+    const slotsFinales: ObsSlots = {
+      agua: aplicarOperacionObs(object.obs_agua_operacion, object.obs_agua, slotsActuales.agua),
+      crema: aplicarOperacionObs(object.obs_crema_operacion, object.obs_crema, slotsActuales.crema),
+      general: aplicarOperacionObs(object.obs_general_operacion, object.obs_general, slotsActuales.general),
+    };
+    const observacionesFinal = reconstruirObservaciones(slotsFinales);
+
+    // #7: validación determinista de la dirección, igual que el flujo real.
+    const direccionValida = pareceDireccion(object.direccion);
+    const direccionFinal = direccionValida ? object.direccion : null;
+
     return NextResponse.json({
       ok: true,
       latencyMs: Date.now() - start,
@@ -104,10 +129,17 @@ export async function POST(request: Request) {
       usage,
       raw_ia: object,
       computado: {
+        direccion: direccionFinal,
+        direccion_descartada: object.direccion && !direccionValida ? object.direccion : null,
         cantidad_agua: cantidadAguaFinal,
         cantidad_crema: cantidadCremaFinal,
         operacion_agua: `${cantidadAguaActual} ${object.cantidad_agua_operacion} ${object.cantidad_agua} = ${cantidadAguaFinal}`,
         operacion_crema: `${cantidadCremaActual} ${object.cantidad_crema_operacion} ${object.cantidad_crema} = ${cantidadCremaFinal}`,
+        aclaracion: aclaracionFinal,
+        operacion_aclaracion: `"${aclaracionActual ?? ''}" ${object.aclaracion_operacion} "${object.aclaracion ?? ''}" = "${aclaracionFinal ?? ''}"`,
+        observaciones: observacionesFinal,
+        observaciones_detalle: slotsFinales,
+        slots_observaciones: `${JSON.stringify(slotsActuales)} -> ${JSON.stringify(slotsFinales)}`,
       },
     });
   } catch (error) {
