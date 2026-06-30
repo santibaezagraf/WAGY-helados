@@ -114,7 +114,9 @@ type IntencionShortCircuit = Extract<
   'saludo' | 'confirmar' | 'confirmar_cancelacion' | 'rechazar_cancelacion'
 >;
 
-const CONFIRMACIONES = new Set([
+// Exportados (además de para el short-circuit) para que el endpoint de minería
+// de expresiones pueda excluir lo que ya está cubierto. Ver scripts/minar-expresiones.mjs.
+export const CONFIRMACIONES = new Set([
   'si', 'sip', 'sep', 'dale', 'ok', 'oka', 'oki', 'okey', 'okay',
   'listo', 'perfecto', 'va', 'vale', 'confirmo', 'confirmar', 'confirmalo',
   'claro', 'obvio', 'joya', 'bien', 'genial', 'bueno', 'buenisimo',
@@ -123,11 +125,11 @@ const CONFIRMACIONES = new Set([
   'si confirmo', 'si dale', 'si esta bien', 'dale confirmo', 'si confirmar',
 ]);
 
-const NEGACIONES = new Set([
+export const NEGACIONES = new Set([
   'no', 'nop', 'nope', 'nah', 'no gracias', 'nones', 'mejor no',
 ]);
 
-const SALUDOS = new Set([
+export const SALUDOS = new Set([
   'hola', 'ola', 'holi', 'holis', 'hi', 'hello', 'ey', 'hey',
   'buenas', 'buen dia', 'buenos dias', 'buenas tardes', 'buenas noches',
   'que tal', 'que onda', 'como estas', 'como andas', 'como va',
