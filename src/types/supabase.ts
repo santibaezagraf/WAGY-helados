@@ -62,6 +62,7 @@ export type Database = {
           descartado: boolean
           id: string
           procesado: boolean
+          rol: string
           telefono: string | null
           texto: string | null
           wa_message_id: string | null
@@ -71,6 +72,7 @@ export type Database = {
           descartado?: boolean
           id?: string
           procesado?: boolean
+          rol?: string
           telefono?: string | null
           texto?: string | null
           wa_message_id?: string | null
@@ -80,6 +82,7 @@ export type Database = {
           descartado?: boolean
           id?: string
           procesado?: boolean
+          rol?: string
           telefono?: string | null
           texto?: string | null
           wa_message_id?: string | null
@@ -103,10 +106,12 @@ export type Database = {
           monto_total_agua: number | null
           monto_total_crema: number | null
           observaciones: string | null
+          observaciones_detalle: Json | null
           pagado: boolean | null
           precio_total: number | null
           precio_unitario_agua: number | null
           precio_unitario_crema: number | null
+          resumen_pendiente: boolean
           telefono: string
           updated_at: string | null
         }
@@ -126,10 +131,12 @@ export type Database = {
           monto_total_agua?: number | null
           monto_total_crema?: number | null
           observaciones?: string | null
+          observaciones_detalle?: Json | null
           pagado?: boolean | null
           precio_total?: number | null
           precio_unitario_agua?: number | null
           precio_unitario_crema?: number | null
+          resumen_pendiente?: boolean
           telefono: string
           updated_at?: string | null
         }
@@ -149,10 +156,12 @@ export type Database = {
           monto_total_agua?: number | null
           monto_total_crema?: number | null
           observaciones?: string | null
+          observaciones_detalle?: Json | null
           pagado?: boolean | null
           precio_total?: number | null
           precio_unitario_agua?: number | null
           precio_unitario_crema?: number | null
+          resumen_pendiente?: boolean
           telefono?: string
           updated_at?: string | null
         }
@@ -195,6 +204,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      auto_confirmar_borradores_silenciosos: { Args: never; Returns: undefined }
       auto_confirmar_pedidos_expirados: { Args: never; Returns: undefined }
       obtener_balance: {
         Args: { fecha_fin: string; fecha_inicio: string }
