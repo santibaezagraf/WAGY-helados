@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion } from '@/lib/whatsapp';
+import { atencionHumanaActiva } from '@/lib/bot/atencion-humana';
 
 const supabaseAdmin = createClient<Database>(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -472,6 +473,21 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
 const DEFER_THRESHOLD_MS = 5000;
 
 export async function procesarMensajesDeCliente(numeroCliente: string) {
+  // 0.bis TOMA HUMANA (defensa): el webhook ya no agenda wake-ups durante una
+  //    toma humana, pero pudo quedar uno agendado de antes de iniciarla. Si la
+  //    toma está activa, reclamamos los pendientes (procesado=true) para que no
+  //    queden colgados ni disparen wake-ups futuros, pero NO respondemos.
+  if (await atencionHumanaActiva(numeroCliente)) {
+    await supabaseAdmin
+      .from('mensajes_chat')
+      .update({ procesado: true })
+      .eq('telefono', numeroCliente)
+      .eq('rol', 'cliente')
+      .eq('procesado', false);
+    console.log(`🙋 Toma humana activa para ${numeroCliente}. El bot no responde.`);
+    return;
+  }
+
   // 0. DEBOUNCE: chequeamos si el último mensaje pendiente es muy reciente.
   //    El claim atómico solo evita doble-procesamiento del MISMO mensaje;
   //    no evita que dos wake-ups consecutivos procesen SUBSETS distintos
@@ -588,15 +604,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
       .map(m => ({ texto: m.texto, created_at: m.created_at, rol: 'cliente' }));
 
-    // ...más el último turno del bot anterior al batch. Esto le da contexto al
-    // LLM para responder "dale" / "sí" / "Av. Mitre 1234" sueltos, sin tener
-    // que adivinar a qué pregunta del bot se refiere el cliente.
+    // ...más el último turno SALIENTE (bot u operador) anterior al batch. Esto
+    // le da contexto al LLM para responder "dale" / "sí" / "Av. Mitre 1234"
+    // sueltos, sin tener que adivinar a qué pregunta se refiere el cliente.
+    // Incluimos 'operador' porque, al reactivarse el bot tras una toma humana,
+    // el cliente suele estar respondiendo al último mensaje del operador.
     const primerNuevo = nuevosCliente[0]?.created_at ?? new Date().toISOString();
     const { data: ultimoBot } = await supabaseAdmin
       .from('mensajes_chat')
       .select('texto, created_at, rol')
       .eq('telefono', numeroCliente)
-      .eq('rol', 'bot')
+      .in('rol', ['bot', 'operador'])
       .eq('descartado', false)
       .lt('created_at', primerNuevo)
       .order('created_at', { ascending: false })
@@ -626,7 +644,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   }
 
   const historialParaIA = mensajesParaIA
-    .map(m => `${m.rol === 'bot' ? 'Bot' : 'Cliente'}: "${m.texto}"`)
+    // Solo 'cliente' es el cliente; 'bot' y 'operador' son ambos lado-negocio
+    // (un mensaje del operador NO debe etiquetarse como "Cliente").
+    .map(m => `${m.rol === 'cliente' ? 'Cliente' : 'Bot'}: "${m.texto}"`)
     .join("\n");
 
   console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}):\n${historialParaIA}`);

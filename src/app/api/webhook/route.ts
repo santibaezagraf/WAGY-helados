@@ -3,7 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
 import { ejecutarBoton, parsearBotonId } from '@/lib/bot/botones';
-import { enviarMensajeWhatsApp } from '@/lib/whatsapp';
+import { enviarMensajeWhatsApp, descargarYGuardarMedia } from '@/lib/whatsapp';
+import { atencionHumanaActiva, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
 
 // 1. GET: Meta usa esto una sola vez para verificar que la URL es tuya
 export async function GET(request: Request) {
@@ -40,6 +41,14 @@ function normalizarNumero(numero: string): string {
   if (numero.startsWith("549")) return "54" + numero.slice(3);
   return numero;
 }
+
+// Tipos de media que descargamos y mostramos en el chat del dashboard.
+const TIPOS_MEDIA = ['image', 'audio', 'video', 'document', 'sticker'];
+
+// Lo que le respondemos al cliente cuando manda algo que el bot no entiende
+// (media/ubicación) y no hay un operador ya manejando la conversación.
+const MENSAJE_REQUIERE_HUMANO =
+  'Recibí tu mensaje, en un momento te atiende una persona 🙏';
 
 // Texto humano para informar el tipo de mensaje no soportado.
 function nombreLegibleTipo(tipo: string): string {
@@ -93,10 +102,16 @@ export async function POST(request: Request) {
       return await manejarTexto(message, numeroCliente, waMessageId);
     }
 
-    // Cualquier otro tipo (audio, image, sticker, video, location, document, etc.):
-    // le avisamos al cliente que solo entendemos texto, pero NO insertamos en
-    // mensajes_chat ni publicamos QStash — los mensajes de texto del mismo batch
-    // ya están agendando sus propios wake-ups y el debounce los junta.
+    if (TIPOS_MEDIA.includes(message.type)) {
+      return await manejarMedia(message, numeroCliente, waMessageId);
+    }
+
+    if (message.type === 'location') {
+      return await manejarUbicacion(message, numeroCliente, waMessageId);
+    }
+
+    // Tipos que todavía no manejamos (contacts, etc.): le avisamos al cliente
+    // que solo entendemos texto, sin persistir ni agendar nada.
     console.log(`📎 Mensaje no soportado (tipo: ${message.type}) de ${numeroCliente}. Avisando al cliente.`);
     await enviarMensajeWhatsApp(
       numeroCliente,
@@ -136,6 +151,12 @@ async function manejarTexto(
 
   console.log(`📩 Recibido de ${numeroCliente}: "${textoMensaje}" (wa_id: ${waMessageId})`);
 
+  // Toma humana: si un operador está manejando esta conversación a mano, el bot
+  // no debe auto-responder. Guardamos el mensaje como procesado=true (visible en
+  // el chat del dashboard y vía Realtime, pero invisible al claim atómico y al
+  // defer) y NO agendamos el wake-up de QStash. 0 tokens, el LLM ni se entera.
+  const enTomaHumana = await atencionHumanaActiva(numeroCliente);
+
   // 1. Insert con idempotencia: si Meta reintenta, el unique index en
   //    wa_message_id devuelve 23505 y cortamos sin volver a procesar.
   const { error: insertError } = await supabaseAdmin
@@ -144,6 +165,7 @@ async function manejarTexto(
       telefono: numeroCliente,
       texto: textoMensaje,
       wa_message_id: waMessageId,
+      procesado: enTomaHumana,
     }]);
 
   if (insertError) {
@@ -153,6 +175,11 @@ async function manejarTexto(
     }
     console.error("Error al guardar el mensaje:", insertError);
     return NextResponse.json({ status: 'error' }, { status: 200 });
+  }
+
+  if (enTomaHumana) {
+    console.log(`🙋 Toma humana activa para ${numeroCliente}. Mensaje guardado sin agendar al bot.`);
+    return NextResponse.json({ status: 'atencion_humana' }, { status: 200 });
   }
 
   // 2. Agendar el wake-up en QStash. Cada mensaje agenda el suyo. El primer
@@ -172,6 +199,118 @@ async function manejarTexto(
     // (o uno de un mensaje siguiente) lo va a barrer.
   }
 
+  return NextResponse.json({ status: 'ok' }, { status: 200 });
+}
+
+/**
+ * Media (imagen/audio/video/documento/sticker). El bot no lo entiende, pero lo
+ * descargamos y guardamos para que el operador lo vea en el modal de chat.
+ *
+ * Descargamos ANTES de insertar la fila para que ya traiga media_path cuando
+ * dispara el Realtime del modal (que escucha INSERT, no UPDATE). La fila va con
+ * procesado=true: nunca entra al claim/defer del bot.
+ */
+async function manejarMedia(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  message: any,
+  numeroCliente: string,
+  waMessageId: string | undefined,
+) {
+  const tipo: string = message.type;
+  const mediaObj = message[tipo] ?? {};
+  const mediaId: string | undefined = mediaObj.id;
+  const caption: string | null = mediaObj.caption ?? null;
+  const filename: string | null = mediaObj.filename ?? null;
+
+  console.log(`📎 Media (${tipo}) de ${numeroCliente} (wa_id: ${waMessageId}).`);
+
+  let mediaPath: string | null = null;
+  let mediaMime: string | null = mediaObj.mime_type ?? null;
+  if (mediaId) {
+    const res = await descargarYGuardarMedia(mediaId, numeroCliente, waMessageId);
+    if (res) {
+      mediaPath = res.media_path;
+      mediaMime = res.media_mime;
+    }
+  }
+
+  const { error: insertError } = await supabaseAdmin
+    .from('mensajes_chat')
+    .insert([{
+      telefono: numeroCliente,
+      texto: null,
+      tipo,
+      media_path: mediaPath,
+      media_mime: mediaMime,
+      media_caption: caption,
+      media_filename: filename,
+      wa_message_id: waMessageId,
+      procesado: true,
+    }]);
+
+  if (insertError) {
+    if (insertError.code === '23505') {
+      console.log(`⏭️ Media duplicado de Meta (wa_id: ${waMessageId}). Ignorando reintento.`);
+      return NextResponse.json({ status: 'duplicate_ignored' }, { status: 200 });
+    }
+    console.error('Error al guardar el media:', insertError);
+    return NextResponse.json({ status: 'error' }, { status: 200 });
+  }
+
+  return await avisarSiHaceFaltaHumano(numeroCliente);
+}
+
+/**
+ * Ubicación compartida. No es un archivo (no hay media_id): viene con lat/long
+ * y opcionalmente nombre/dirección. La guardamos como tipo='location'.
+ */
+async function manejarUbicacion(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  message: any,
+  numeroCliente: string,
+  waMessageId: string | undefined,
+) {
+  const loc = message.location ?? {};
+  const etiqueta = [loc.name, loc.address].filter(Boolean).join(' — ') || 'Ubicación compartida';
+
+  console.log(`📍 Ubicación de ${numeroCliente} (${loc.latitude}, ${loc.longitude}).`);
+
+  const { error: insertError } = await supabaseAdmin
+    .from('mensajes_chat')
+    .insert([{
+      telefono: numeroCliente,
+      texto: etiqueta,
+      tipo: 'location',
+      media_lat: loc.latitude ?? null,
+      media_lng: loc.longitude ?? null,
+      wa_message_id: waMessageId,
+      procesado: true,
+    }]);
+
+  if (insertError) {
+    if (insertError.code === '23505') {
+      console.log(`⏭️ Ubicación duplicada de Meta (wa_id: ${waMessageId}). Ignorando reintento.`);
+      return NextResponse.json({ status: 'duplicate_ignored' }, { status: 200 });
+    }
+    console.error('Error al guardar la ubicación:', insertError);
+    return NextResponse.json({ status: 'error' }, { status: 200 });
+  }
+
+  return await avisarSiHaceFaltaHumano(numeroCliente);
+}
+
+/**
+ * Tras registrar un mensaje que el bot no puede resolver: si NO hay un operador
+ * ya manejando la conversación, marcamos el teléfono como "requiere atención"
+ * (para el aviso del dashboard) y le avisamos al cliente que lo atiende alguien.
+ * Si ya hay toma humana, no hace falta avisar nada: el operador está ahí.
+ */
+async function avisarSiHaceFaltaHumano(numeroCliente: string) {
+  const enTomaHumana = await atencionHumanaActiva(numeroCliente);
+  if (!enTomaHumana) {
+    await marcarRequiereAtencion(numeroCliente);
+    await enviarMensajeWhatsApp(numeroCliente, MENSAJE_REQUIERE_HUMANO);
+  }
   return NextResponse.json({ status: 'ok' }, { status: 200 });
 }
 

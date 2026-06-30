@@ -3,31 +3,173 @@
 import { Logo } from "@/components/ui/logo"
 import { Button } from "@/components/ui/button"
 import { PriceListModal } from "@/components/pedidos/price-list-modal"
+import { AddGastoModal } from "@/components/gastos/add-gasto-modal"
 import * as React from "react"
-import { DollarSign } from "lucide-react"
+import { Tags, BarChart3, Receipt, MessageCircle } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { createClient } from "@/lib/supabase-client"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { ChatModal } from "@/components/pedidos/chat-modal"
+import type { Conversacion } from "@/lib/actions/mensajes"
 
-export function Header() {
+// Tipos de mensaje que el bot no resuelve y que disparan el aviso "requiere
+// intervención humana". Debe coincidir con la lógica del webhook.
+const TIPOS_REQUIEREN_HUMANO = new Set(["image", "audio", "video", "document", "sticker", "location"])
+
+interface HeaderProps {
+  /** Conversaciones recientes (cualquier teléfono con actividad), con flag de
+   *  requiere_atencion para resaltar las que esperan a una persona. */
+  conversacionesIniciales?: Conversacion[]
+}
+
+export function Header({ conversacionesIniciales = [] }: HeaderProps) {
   const [priceListModalOpen, setPriceListModalOpen] = React.useState(false)
+  const [addGastoModalOpen, setAddGastoModalOpen] = React.useState(false)
+  // Directorio de conversaciones recientes. El servidor es la fuente de verdad;
+  // Realtime mueve al frente la que recibe actividad. Abrir un chat NO lo saca:
+  // solo limpia su resaltado de "requiere atención".
+  const [conversaciones, setConversaciones] = React.useState<Conversacion[]>(conversacionesIniciales)
+  // Teléfono del chat abierto desde el menú (sin pedido asociado).
+  const [chatTelefono, setChatTelefono] = React.useState<string | null>(null)
+  const router = useRouter()
+
+  // Re-sincronizamos con el servidor cuando cambia (navegación/revalidación).
+  React.useEffect(() => {
+    setConversaciones(conversacionesIniciales)
+  }, [conversacionesIniciales])
+
+  // En vivo: cualquier mensaje nuevo mueve su conversación al frente; si es un
+  // media/ubicación de un cliente, además la marca como pendiente.
+  React.useEffect(() => {
+    const supabase = createClient()
+    const channel = supabase
+      .channel("conversaciones-header")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "mensajes_chat" },
+        (payload) => {
+          const fila = payload.new as { rol?: string; tipo?: string; telefono?: string | null }
+          if (!fila.telefono) return
+          const tel = fila.telefono
+          const esPendiente = fila.rol === "cliente" && !!fila.tipo && TIPOS_REQUIEREN_HUMANO.has(fila.tipo)
+          setConversaciones((prev) => {
+            const previa = prev.find((c) => c.telefono === tel)
+            const resto = prev.filter((c) => c.telefono !== tel)
+            return [
+              { telefono: tel, requiereAtencion: esPendiente || previa?.requiereAtencion || false },
+              ...resto,
+            ]
+          })
+        },
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
+
+  const pendientes = conversaciones.filter((c) => c.requiereAtencion).length
+
+  // Abrir un chat: limpia su resaltado de pendiente (al abrir, el modal ya marca
+  // atendido en la DB), pero la conversación queda en la lista para volver.
+  const abrirChat = React.useCallback((tel: string) => {
+    setConversaciones((prev) =>
+      prev.map((c) => (c.telefono === tel ? { ...c, requiereAtencion: false } : c)),
+    )
+    setChatTelefono(tel)
+  }, [])
 
   return (
     <>
-      <header className="bg-cyan-600 border-b-2 border-cyan-300 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between gap-3 py-4">
-            <div className="flex items-center gap-3">
+      <header className="shrink-0 bg-cyan-600 border-b-2 border-cyan-300 shadow-sm">
+        <div className="px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between gap-3 py-2">
+            <div className="flex items-center gap-2">
               <Logo size="sm" />
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
+              <h1 className="text-lg sm:text-xl font-bold text-slate-800">
                 WAGY Helados
               </h1>
             </div>
-            <Button
-              onClick={() => setPriceListModalOpen(true)}
-              className="gap-2 bg-white text-cyan-600 hover:bg-slate-100 font-medium"
-            >
-              <DollarSign className="h-4 w-4" />
-              <span className="hidden sm:inline">Listas de Precios</span>
-              <span className="sm:hidden">Precios</span>
-            </Button>
+
+            <div className="flex items-center gap-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="relative flex items-center p-1 rounded hover:bg-cyan-500/40"
+                    title={
+                      pendientes > 0
+                        ? `${pendientes} conversación(es) esperan intervención humana`
+                        : "Conversaciones recientes"
+                    }
+                  >
+                    <MessageCircle className="h-5 w-5 text-white" />
+                    {pendientes > 0 && (
+                      <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                        {pendientes > 9 ? "9+" : pendientes}
+                      </span>
+                    )}
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64 max-h-[70vh] overflow-y-auto">
+                  <DropdownMenuLabel>Conversaciones recientes</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {conversaciones.length === 0 ? (
+                    <div className="px-2 py-3 text-xs text-slate-500 text-center">
+                      Sin conversaciones recientes
+                    </div>
+                  ) : (
+                    conversaciones.map((c) => (
+                      <DropdownMenuItem
+                        key={c.telefono}
+                        onClick={() => abrirChat(c.telefono)}
+                        className="gap-2"
+                      >
+                        <span
+                          className={`h-2 w-2 rounded-full shrink-0 ${
+                            c.requiereAtencion ? "bg-amber-500" : "bg-transparent"
+                          }`}
+                        />
+                        <span className={c.requiereAtencion ? "font-medium" : ""}>{c.telefono}</span>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                size="sm"
+                onClick={() => setAddGastoModalOpen(true)}
+                className="gap-2 bg-white text-rose-600 hover:bg-slate-100 font-medium"
+              >
+                <Receipt className="h-4 w-4" />
+                <span className="hidden sm:inline">+ Gasto</span>
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => router.push('/balances')}
+                className="gap-2 bg-white text-emerald-600 hover:bg-slate-100 font-medium"
+              >
+                <BarChart3 className="h-4 w-4" />
+                <span className="hidden sm:inline">Balances</span>
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => setPriceListModalOpen(true)}
+                className="gap-2 bg-white text-cyan-600 hover:bg-slate-100 font-medium"
+              >
+                <Tags className="h-4 w-4" />
+                <span className="hidden sm:inline">Listas de Precios</span>
+                <span className="sm:hidden">Precios</span>
+              </Button>
+            </div>
           </div>
         </div>
       </header>
@@ -36,6 +178,22 @@ export function Header() {
         open={priceListModalOpen}
         onOpenChange={setPriceListModalOpen}
       />
+
+      <AddGastoModal
+        open={addGastoModalOpen}
+        onOpenChange={setAddGastoModalOpen}
+      />
+
+      {/* Chat abierto desde la campana (por teléfono, sin pedido asociado). */}
+      {chatTelefono !== null && (
+        <ChatModal
+          open={true}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) setChatTelefono(null)
+          }}
+          telefono={chatTelefono}
+        />
+      )}
     </>
   )
 }

@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { TruncatedText } from "@/components/ui/truncated-text"
-import { ArrowUpDown, MoreHorizontal, Check, X, Clock, Copy, Edit } from "lucide-react"
+import { ArrowUpDown, MoreHorizontal, Check, X, Clock, Copy, Edit, MessageCircle, Paperclip } from "lucide-react"
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -32,7 +32,11 @@ export const createColumns = (config: {
     setEditingOrderId: (id: number | null) => void
     editingCostoId: number | null
     setEditingCostoId: (id: number | null) => void
+    chattingOrderId: number | null
+    setChattingOrderId: (id: number | null) => void
     onRowSelect: (row: Row<Pedido>, event: React.MouseEvent<HTMLButtonElement>) => void
+    /** Teléfonos que esperan intervención humana (mandaron un media/ubicación). */
+    telefonosAtencion: Set<string>
 }): ColumnDef<Pedido>[] => [
     {
         id: "select",
@@ -67,6 +71,23 @@ export const createColumns = (config: {
     {
         accessorKey: "telefono",
         header: "Teléfono",
+        cell: ({ row }) => {
+            const telefono = row.getValue("telefono") as string
+            const requiereAtencion = config.telefonosAtencion.has(telefono)
+            return (
+                <div className="flex items-center gap-1.5">
+                    <span>{telefono}</span>
+                    {requiereAtencion && (
+                        <span
+                            title="Mandó un archivo o ubicación — requiere intervención humana"
+                            className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-700 px-1.5 py-0.5 text-[10px] font-medium"
+                        >
+                            <Paperclip className="h-3 w-3" />
+                        </span>
+                    )}
+                </div>
+            )
+        },
     },
     {
         id: "costo_envio_mobile",
@@ -271,6 +292,11 @@ export const createColumns = (config: {
                             <DropdownMenuItem onClick={() => config.setEditingOrderId(pedido.id)}>
                                 <Edit className="h-4 w-4 mr-2" />
                                 Editar
+                            </DropdownMenuItem>
+
+                            <DropdownMenuItem onClick={() => config.setChattingOrderId(pedido.id)}>
+                                <MessageCircle className="h-4 w-4 mr-2" />
+                                Abrir chat
                             </DropdownMenuItem>
 
                             <DropdownMenuItem 

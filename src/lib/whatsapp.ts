@@ -96,6 +96,113 @@ async function postAMeta(body: object, descripcion: string): Promise<boolean> {
   return false;
 }
 
+// Bucket privado donde guardamos los archivos que mandan los clientes. Se sirve
+// al modal solo vía URLs firmadas generadas server-side (nunca acceso directo).
+const MEDIA_BUCKET = 'whatsapp-media';
+
+// Extensión a partir del mime, para que el archivo guardado tenga un nombre
+// razonable (no es crítico: al subir seteamos contentType igual). Exportada
+// para tests (función pura).
+export function mimeAExtension(mime: string | null | undefined): string {
+  if (!mime) return 'bin';
+  const limpio = mime.split(';')[0].trim();
+  const mapa: Record<string, string> = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'audio/ogg': 'ogg',
+    'audio/mpeg': 'mp3',
+    'audio/mp4': 'm4a',
+    'audio/amr': 'amr',
+    'video/mp4': 'mp4',
+    'video/3gpp': '3gp',
+    'application/pdf': 'pdf',
+  };
+  if (mapa[limpio]) return mapa[limpio];
+  // Fallback: la parte después de la barra (p.ej. "application/zip" → "zip").
+  const sub = limpio.split('/')[1];
+  return sub ? sub.replace(/[^a-z0-9]/gi, '') || 'bin' : 'bin';
+}
+
+async function fetchConTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), META_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Descarga un media de WhatsApp y lo sube al bucket privado de Storage.
+ *
+ * La Cloud API NO manda el binario en el webhook: manda un `media_id`. Hay que
+ *  1) GET /{media-id} (con el token) → devuelve una URL temporal (~5 min) + mime,
+ *  2) descargar esa URL (también con el token),
+ *  3) subir los bytes a Storage (la URL de Meta caduca y no es accesible desde
+ *     el browser sin el token, así que guardarla no sirve).
+ *
+ * El path es determinístico (`telefono/wa_message_id.ext`) y subimos con
+ * upsert=true: si Meta reintenta el webhook, re-subir sobreescribe el mismo
+ * objeto en vez de duplicar.
+ *
+ * Devuelve { media_path, media_mime } o null si algo falló (el caller igual
+ * registra la fila, solo que sin archivo recuperable).
+ */
+export async function descargarYGuardarMedia(
+  mediaId: string,
+  telefono: string,
+  waMessageId: string | undefined,
+): Promise<{ media_path: string; media_mime: string | null } | null> {
+  const token = process.env.WHATSAPP_TOKEN;
+  try {
+    // 1. Metadata: URL temporal + mime.
+    const metaResp = await fetchConTimeout(`${WHATSAPP_API_URL}/${mediaId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!metaResp.ok) {
+      const detalle = await metaResp.text();
+      console.error(`❌ No se pudo obtener la URL del media ${mediaId} (${metaResp.status}):`, detalle);
+      return null;
+    }
+    const metaJson = await metaResp.json() as { url?: string; mime_type?: string };
+    if (!metaJson.url) {
+      console.error(`❌ Meta no devolvió URL para el media ${mediaId}.`);
+      return null;
+    }
+
+    // 2. Descarga del binario (la URL de Meta también requiere el token).
+    const fileResp = await fetchConTimeout(metaJson.url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!fileResp.ok) {
+      console.error(`❌ Falló la descarga del media ${mediaId} (${fileResp.status}).`);
+      return null;
+    }
+    const mime = metaJson.mime_type ?? fileResp.headers.get('content-type') ?? null;
+    const bytes = new Uint8Array(await fileResp.arrayBuffer());
+
+    // 3. Subida a Storage.
+    const ext = mimeAExtension(mime);
+    const nombre = (waMessageId ?? `m${bytes.byteLength}`).replace(/[^a-zA-Z0-9._-]/g, '');
+    const path = `${telefono}/${nombre}.${ext}`;
+    const { error } = await supabaseAdmin.storage
+      .from(MEDIA_BUCKET)
+      .upload(path, bytes, { contentType: mime ?? undefined, upsert: true });
+    if (error) {
+      console.error(`❌ No se pudo subir el media ${mediaId} a Storage:`, error.message);
+      return null;
+    }
+
+    return { media_path: path, media_mime: mime };
+  } catch (error) {
+    console.error(`❌ Error al procesar el media ${mediaId}:`, error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
 export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string) {
   const ok = await postAMeta({
     messaging_product: "whatsapp",
@@ -105,6 +212,60 @@ export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string
   }, "mensaje de texto");
 
   if (ok) await persistirMensajeBot(numeroDestino, texto);
+}
+
+export type MensajePersistido = {
+  id: string;
+  rol: string;
+  texto: string | null;
+  created_at: string;
+};
+
+/**
+ * Envío MANUAL de un operador desde el dashboard (toma humana).
+ *
+ * Igual que enviarMensajeWhatsApp pero persiste con rol='operador' para que el
+ * chat distinga las respuestas humanas de las del bot. El claim atómico del bot
+ * solo filtra rol='cliente', así que estas filas nunca se reclaman como input.
+ *
+ * Devuelve:
+ *  - ok: true si Meta aceptó el mensaje; false si se agotaron los intentos
+ *    (p.ej. fuera de la ventana de 24h de Meta → 4xx no reintentable).
+ *  - mensaje: la fila insertada en mensajes_chat (o null si el insert falló).
+ *    El modal la agrega al toque, sin depender de que Realtime devuelva el eco
+ *    del propio insert del operador.
+ */
+export async function enviarMensajeManual(
+  numeroDestino: string,
+  texto: string,
+): Promise<{ ok: boolean; mensaje: MensajePersistido | null }> {
+  const ok = await postAMeta({
+    messaging_product: "whatsapp",
+    to: numeroDestino,
+    type: "text",
+    text: { body: texto },
+  }, "mensaje manual del operador");
+
+  if (!ok) return { ok: false, mensaje: null };
+
+  const { data, error } = await supabaseAdmin
+    .from('mensajes_chat')
+    .insert({
+      telefono: numeroDestino,
+      texto,
+      rol: 'operador',
+      procesado: true,    // invisible al claim atómico y al defer
+      descartado: false,
+    })
+    .select('id, rol, texto, created_at')
+    .single();
+
+  if (error) {
+    console.error('⚠️ No se pudo persistir el mensaje del operador:', error);
+    return { ok: true, mensaje: null };
+  }
+
+  return { ok: true, mensaje: data };
 }
 
 export type BotonReply = {

@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      atencion_humana: {
+        Row: {
+          activa: boolean
+          requiere_atencion: boolean
+          requiere_atencion_at: string | null
+          telefono: string
+          updated_at: string
+        }
+        Insert: {
+          activa?: boolean
+          requiere_atencion?: boolean
+          requiere_atencion_at?: string | null
+          telefono: string
+          updated_at?: string
+        }
+        Update: {
+          activa?: boolean
+          requiere_atencion?: boolean
+          requiere_atencion_at?: string | null
+          telefono?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       gastos: {
         Row: {
           activo: boolean
@@ -61,30 +85,51 @@ export type Database = {
           created_at: string
           descartado: boolean
           id: string
+          media_caption: string | null
+          media_filename: string | null
+          media_lat: number | null
+          media_lng: number | null
+          media_mime: string | null
+          media_path: string | null
           procesado: boolean
           rol: string
           telefono: string | null
           texto: string | null
+          tipo: string
           wa_message_id: string | null
         }
         Insert: {
           created_at?: string
           descartado?: boolean
           id?: string
+          media_caption?: string | null
+          media_filename?: string | null
+          media_lat?: number | null
+          media_lng?: number | null
+          media_mime?: string | null
+          media_path?: string | null
           procesado?: boolean
           rol?: string
           telefono?: string | null
           texto?: string | null
+          tipo?: string
           wa_message_id?: string | null
         }
         Update: {
           created_at?: string
           descartado?: boolean
           id?: string
+          media_caption?: string | null
+          media_filename?: string | null
+          media_lat?: number | null
+          media_lng?: number | null
+          media_mime?: string | null
+          media_path?: string | null
           procesado?: boolean
           rol?: string
           telefono?: string | null
           texto?: string | null
+          tipo?: string
           wa_message_id?: string | null
         }
         Relationships: []
