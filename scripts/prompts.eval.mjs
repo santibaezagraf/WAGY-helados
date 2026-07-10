@@ -13,7 +13,10 @@
 //   EVAL_URL=http://localhost:3000   base del server
 //   EVAL_FILTER=cantidad             corre solo los casos cuyo nombre matchea
 //   EVAL_REPEAT=3                    repite cada caso N veces (mide flakiness del modelo)
-//   EVAL_DELAY_MS=1500               pausa entre casos (ayuda con el rate limit free-tier de Groq)
+//   EVAL_DELAY_MS=20000             pausa entre casos. Default 20s: el free-tier de Groq
+//                                   tiene 8000 TPM y cada caso pide ~3700 tokens, así que
+//                                   disparar en ráfaga agota el cupo (los fallos son del
+//                                   límite, no del prompt). Ponelo en 0 si tenés Dev Tier.
 //
 // NOTA: el endpoint NO pasa por intentarShortCircuit (eso es heurística pura y
 // determinista). Este suite evalúa el camino del LLM, que es el que tiene riesgo.
@@ -21,7 +24,9 @@
 const BASE_URL = process.env.EVAL_URL || 'http://localhost:3000';
 const FILTER = process.env.EVAL_FILTER || '';
 const REPEAT = Math.max(1, parseInt(process.env.EVAL_REPEAT || '1', 10));
-const DELAY_MS = Math.max(0, parseInt(process.env.EVAL_DELAY_MS || '0', 10));
+// Default 20s entre casos para no agotar el free-tier de Groq (8000 TPM). El
+// auto-retry de correrCaso cubre los choques residuales; en Dev Tier poné EVAL_DELAY_MS=0.
+const DELAY_MS = Math.max(0, parseInt(process.env.EVAL_DELAY_MS || '20000', 10));
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -90,6 +95,24 @@ const CASOS = [
     pedidoActivo: borrador({ cantidad_crema: 5, aclaracion: 'depto 6' }),
     espera: { aclaracion: 'depto 6', cantidad_crema: 8 },
   },
+  {
+    // Contradicción IMPLÍCITA (sin "no"): el cliente re-describe el mismo objeto
+    // (el portón) con otro color. Debe reemplazar ese valor, NO concatenar. La
+    // puerta gris (otro objeto) se conserva. Falla si sobrevive "rojo".
+    nombre: 'aclaracion: nueva contradice a la vieja sin decir "no" (reemplaza el atributo)',
+    mensaje: 'el porton es gris',
+    pedidoActivo: borrador({ aclaracion: 'porton rojo, puerta gris' }),
+    espera: { aclaracion: /^(?!.*rojo).*gris/i },
+  },
+  {
+    // Cambio de dirección: la aclaración vieja pertenecía a la dirección anterior,
+    // así que TS la descarta como base del merge. Solo debe quedar lo nuevo de
+    // ESTE mensaje ("ladrillo"), nunca "rojo" de la casa anterior.
+    nombre: 'aclaracion: cambiar de direccion descarta la aclaracion vieja',
+    mensaje: 'la direccion es Vergara 2664, la casa de ladrillo',
+    pedidoActivo: borrador({ aclaracion: 'porton rojo, puerta gris' }),
+    espera: { direccion: /vergara 2664/i, aclaracion: /^(?!.*rojo).*ladrillo/i },
+  },
 
   // ---- OBSERVACIONES (#4b: slots keyed por tipo) ----
   {
@@ -133,6 +156,32 @@ const CASOS = [
     mensaje: 'dale, está perfecto, confirmo',
     pedidoActivo: borrador({ cantidad_crema: 10 }),
     espera: { intencion: 'confirmar' },
+  },
+  {
+    nombre: 'intencion: consultar_precios sin pedido activo',
+    mensaje: 'hola, cuánto salen los helados?',
+    espera: { intencion: 'consultar_precios' },
+  },
+  {
+    nombre: 'intencion: consultar_precios pidiendo la lista',
+    mensaje: 'me pasás la lista de precios?',
+    espera: { intencion: 'consultar_precios' },
+  },
+  {
+    nombre: 'intencion: consultar_precios con typos',
+    mensaje: 'cuanto salne la lsita de precios porfa',
+    espera: { intencion: 'consultar_precios' },
+  },
+  {
+    nombre: 'intencion: consultar_precios con pedido en cocina no toca el pedido',
+    mensaje: 'y cuánto cuesta cada uno?',
+    pedidoActivo: cocina({ cantidad_crema: 10 }),
+    espera: { intencion: 'consultar_precios', cantidad_crema: 10 },
+  },
+  {
+    nombre: 'intencion: pedido con cantidad NO es consultar_precios',
+    mensaje: 'quiero 20 de agua, cuánto sale?',
+    espera: { intencion: 'datos_pedido', cantidad_agua: 20 },
   },
 
   // ---- PEDIDO NUEVO (desde cero) ----

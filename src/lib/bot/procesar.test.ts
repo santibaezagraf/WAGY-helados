@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   aplicarOperacionCantidad,
   aplicarOperacionAclaracion,
+  resolverAclaracion,
   aplicarOperacionObs,
   leerSlots,
   reconstruirObservaciones,
@@ -67,6 +68,34 @@ describe('aplicarOperacionAclaracion', () => {
   });
   it('reemplazar sin texto (defensivo) no borra el actual', () => {
     expect(aplicarOperacionAclaracion('reemplazar', null, 'depto 6')).toBe('depto 6');
+  });
+});
+
+describe('resolverAclaracion', () => {
+  it('sin cambio de dirección se comporta como el merge normal (agregar concatena)', () => {
+    expect(resolverAclaracion('agregar', 'piso 3', 'depto 6', 'Mitre 951', 'Mitre 951'))
+      .toBe('depto 6, piso 3');
+  });
+  it('misma dirección: mantener conserva la aclaración vieja', () => {
+    expect(resolverAclaracion('mantener', null, 'porton rojo', 'Mitre 951', 'Mitre 951'))
+      .toBe('porton rojo');
+  });
+  it('cambia la dirección + agregar: descarta la vieja, solo queda lo nuevo', () => {
+    expect(resolverAclaracion('agregar', 'la casa de ladrillo', 'porton rojo, puerta gris', 'Vergara 2664', 'Mitre 951'))
+      .toBe('la casa de ladrillo');
+  });
+  it('cambia la dirección + mantener: descarta la aclaración vieja por completo', () => {
+    expect(resolverAclaracion('mantener', null, 'porton rojo, puerta gris', 'Vergara 2664', 'Mitre 951'))
+      .toBeNull();
+  });
+  it('dirección nueva basura (no pasa pareceDireccion) NO descarta la aclaración', () => {
+    // "depto 6" no es calle+altura → no cuenta como cambio de dirección real.
+    expect(resolverAclaracion('agregar', 'piso 3', 'depto 6', 'depto 6', 'Mitre 951'))
+      .toBe('depto 6, piso 3');
+  });
+  it('sin dirección previa (pedido nuevo) no descarta nada', () => {
+    expect(resolverAclaracion('agregar', 'casa verde', null, 'Mitre 951', null))
+      .toBe('casa verde');
   });
 });
 

@@ -5,7 +5,7 @@ import {
   PedidoIASchema,
   buildSystemPrompt,
   aplicarOperacionCantidad,
-  aplicarOperacionAclaracion,
+  resolverAclaracion,
   aplicarOperacionObs,
   leerSlots,
   reconstruirObservaciones,
@@ -102,10 +102,12 @@ export async function POST(request: Request) {
     );
 
     const aclaracionActual = pedidoActivo?.aclaracion ?? null;
-    const aclaracionFinal = aplicarOperacionAclaracion(
+    const aclaracionFinal = resolverAclaracion(
       object.aclaracion_operacion,
       object.aclaracion,
       aclaracionActual,
+      object.direccion,
+      pedidoActivo?.direccion ?? null,
     );
 
     const slotsActuales = leerSlots(pedidoActivo ?? null);

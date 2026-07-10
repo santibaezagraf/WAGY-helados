@@ -17,7 +17,7 @@ export function Logo({ size = "md", className = "" }: LogoProps) {
   
   return (
     <Image
-      src="/wagy-logo-nombre.png"
+      src="/images/wagy-logo-nombre.png"
       alt="WAGY Helados"
       width={dimensions.width}
       height={dimensions.height}

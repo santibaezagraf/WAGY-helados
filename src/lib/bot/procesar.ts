@@ -5,6 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion } from '@/lib/whatsapp';
 import { atencionHumanaActiva } from '@/lib/bot/atencion-humana';
+import { obtenerListaPreciosPublica, formatearPreciosWhatsApp } from '@/lib/precios-publico';
 
 const supabaseAdmin = createClient<Database>(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -57,6 +58,7 @@ export const IntencionEnum = z.enum([
   'rechazar_cancelacion',
   'saludo',
   'modificar_sin_datos',
+  'consultar_precios',
   'datos_pedido',
 ]);
 export type Intencion = z.infer<typeof IntencionEnum>;
@@ -246,6 +248,35 @@ export function aplicarOperacionAclaracion(
 }
 
 /**
+ * Resuelve la aclaración final combinando la operación del modelo con el estado.
+ *
+ * Si el cliente CAMBIA la dirección a una distinta y válida, la aclaración previa
+ * pertenecía a la dirección vieja (color de casa, portón, etc.) y ya no aplica:
+ * la descartamos como base del merge para no arrastrar detalles contradictorios
+ * (ej: "portón rojo" de la casa anterior + "portón gris" de la nueva). Solo
+ * conservamos lo que traiga ESTE mensaje. Gateamos con `pareceDireccion` para no
+ * descartar por una dirección basura que el guard de formato va a anular igual.
+ *
+ * Vive como helper puro (no inline) para que el endpoint dev /api/dev/test-ia lo
+ * reuse y el eval mida exactamente lo que corre en producción.
+ */
+export function resolverAclaracion(
+  operacion: 'agregar' | 'reemplazar' | 'mantener',
+  texto: string | null,
+  aclaracionActual: string | null,
+  direccionNueva: string | null,
+  direccionActual: string | null,
+): string | null {
+  const cambiaDireccion =
+    direccionActual != null &&
+    direccionNueva != null &&
+    direccionNueva !== direccionActual &&
+    pareceDireccion(direccionNueva);
+  const base = cambiaDireccion ? null : aclaracionActual;
+  return aplicarOperacionAclaracion(operacion, texto, base);
+}
+
+/**
  * Lee los slots de observaciones de un pedido. Si la columna jsonb está vacía
  * (fila vieja pre-migración, o edición manual del dashboard que la setea null),
  * siembra `general` con el texto plano para no perder nada — degrada limpio:
@@ -368,8 +399,8 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
 
   if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
     const intencionesValidas = esperandoCancelacion
-      ? `"confirmar_cancelacion", "rechazar_cancelacion", "saludo", "datos_pedido"`
-      : `"cancelar", "confirmar", "saludo", "modificar_sin_datos", "datos_pedido"`;
+      ? `"confirmar_cancelacion", "rechazar_cancelacion", "saludo", "consultar_precios", "datos_pedido"`
+      : `"cancelar", "confirmar", "saludo", "modificar_sin_datos", "consultar_precios", "datos_pedido"`;
 
     const slots = leerSlots(pedidoActivo);
 
@@ -395,20 +426,22 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       - "confirmar_cancelacion": el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "exacto", "sí, cancelar").
       - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar (ej: "no", "no, pará", "me equivoqué", "dejalo así").
       - "saludo": el mensaje es ÚNICAMENTE un saludo, sin pista sobre la cancelación.
+      - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
       - "datos_pedido": cualquier otra cosa.
       ` : `
       - "cancelar": el cliente pide explícitamente cancelar, anular, dar de baja, o dice "ya no quiero el pedido" / "fue mentira".
       - "confirmar": ${tieneBorrador ? `el cliente acepta el resumen (ej: "sí", "dale", "está bien", "confirmo").` : `NO APLICA en este estado (el pedido no está en borrador).`}
       - "saludo": el mensaje es ÚNICAMENTE un saludo, sin datos del pedido.
       - "modificar_sin_datos": el cliente quiere cambiar el pedido pero NO aporta NINGÚN dato concreto (ej: "quiero cambiar algo", "modificar"). Si menciona sabores, cantidades, dirección o pago, NO uses esta opción — usá "datos_pedido".
+      - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos nuevos del pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
       - "datos_pedido": el cliente trae info concreta del pedido (cantidades, sabores, dirección, pago), incluso para modificar uno existente. Default cuando no aplique ninguna otra.
       `}
 
       2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
       - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}".
       - "aclaracion" + "aclaracion_operacion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde". NO fusiones vos el texto: solo extraé el dato de ESTE mensaje y elegí la operación; el sistema combina con lo actual (${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}).
-        * "agregar": el cliente suma un detalle NUEVO que no contradice lo actual. Devolvé SOLO el detalle nuevo en "aclaracion" (el sistema lo concatena con coma). Ej: actual "la casa es verde" + mensaje "con marco naranja" → aclaracion="con marco naranja", aclaracion_operacion="agregar". Otro: actual "depto 6" + mensaje "piso 3" → aclaracion="piso 3", aclaracion_operacion="agregar".
-        * "reemplazar": el cliente CONTRADICE un detalle puntual del actual. Acá SÍ devolvé el texto ya corregido COMPLETO en "aclaracion". Ej: actual "casa marron, de 2 pisos" + mensaje "no, es verde" → aclaracion="casa verde, de 2 pisos", aclaracion_operacion="reemplazar".
+        * "agregar": el cliente suma un detalle NUEVO sobre un objeto/atributo que NO estaba descrito. Devolvé SOLO el detalle nuevo en "aclaracion" (el sistema lo concatena con coma). Ej: actual "la casa es verde" + mensaje "con marco naranja" → aclaracion="con marco naranja", aclaracion_operacion="agregar" (color de casa y marco son cosas distintas). Otro: actual "depto 6" + mensaje "piso 3" → aclaracion="piso 3", aclaracion_operacion="agregar".
+        * "reemplazar": el cliente CONTRADICE un detalle del actual. OJO: contradecir NO requiere que diga "no". Si vuelve a describir el MISMO objeto/atributo (el portón, la casa, la puerta, el piso, el color) con otro valor, ES una contradicción → reemplazar, no agregar. Devolvé el texto ya corregido COMPLETO en "aclaracion", reemplazando el valor viejo de ese atributo y conservando los demás detalles. Ej explícito: actual "casa marron, de 2 pisos" + mensaje "no, es verde" → aclaracion="casa verde, de 2 pisos". Ej implícito: actual "porton rojo, puerta gris" + mensaje "porton gris" → aclaracion="porton gris, puerta gris" (el portón ya estaba descrito como rojo; se pisa ese valor, la puerta se mantiene), aclaracion_operacion="reemplazar".
         * "mantener": el cliente no menciona ninguna aclaración en este mensaje. aclaracion=null, aclaracion_operacion="mantener".
       - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
       - SABORES (campos "obs_agua" / "obs_crema" / "obs_general" + sus "_operacion"): NO armes el texto final ni pongas el prefijo "los de agua/crema"; extraé solo los sabores de ESTE mensaje en su slot y elegí la operación, TS combina y reconstruye. "de agua"/"de crema" es el TIPO, NO un sabor.
@@ -433,9 +466,10 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
 
     1. INTENCIÓN DEL MENSAJE (campo "intencion", elegí UNA opción):
-    Valores válidos en este contexto: "cancelar", "saludo", "datos_pedido".
+    Valores válidos en este contexto: "cancelar", "saludo", "consultar_precios", "datos_pedido".
     - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).
     - "saludo": el mensaje es ÚNICAMENTE un saludo (ej: "hola", "buenas"), sin datos del pedido.
+    - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin dar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen los helados?"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
     - "datos_pedido": el cliente trae info del pedido (cantidades, sabores, dirección, pago). Default cuando no aplique otra.
 
     2. REGLAS DE EXTRACCIÓN:
@@ -751,12 +785,16 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       console.log(`🧮 Cantidades: agua ${cantidadAguaActual} -> ${cantidadAguaFinal} (op: ${object.cantidad_agua_operacion}, valor: ${object.cantidad_agua}), crema ${cantidadCremaActual} -> ${cantidadCremaFinal} (op: ${object.cantidad_crema_operacion}, valor: ${object.cantidad_crema})`);
 
       // Misma filosofía que las cantidades: el modelo extrajo el texto literal
-      // + la operación; la fusión la hace TS de forma determinista.
+      // + la operación; la fusión la hace TS de forma determinista. Si además
+      // cambió la dirección, `resolverAclaracion` descarta la aclaración vieja
+      // (pertenecía a la dirección anterior) — ver su doc.
       const aclaracionActual = pedidoActivo?.aclaracion ?? null;
-      const aclaracionFinal = aplicarOperacionAclaracion(
+      const aclaracionFinal = resolverAclaracion(
         object.aclaracion_operacion,
         object.aclaracion,
         aclaracionActual,
+        object.direccion,
+        pedidoActivo?.direccion ?? null,
       );
       console.log(`📝 Aclaración: "${aclaracionActual ?? ''}" -> "${aclaracionFinal ?? ''}" (op: ${object.aclaracion_operacion}, texto: "${object.aclaracion ?? ''}")`);
 
@@ -799,6 +837,22 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   }
 
   try {
+
+    // CONSULTA DE PRECIOS: intención informativa, independiente del pedido.
+    // La resolvemos antes de tocar dirección/cantidades para que un "¿cuánto
+    // sale?" NUNCA dispare la lógica de armado (inyección de dirección
+    // histórica, datos faltantes, etc.). El pedido activo (si lo hay) queda
+    // intacto: solo mandamos la lista y salimos. Es la MISMA lista que muestra
+    // la página pública /precios, generada desde la lista de precios activa.
+    if (pedido.intencion === 'consultar_precios') {
+      console.log("💲 El cliente pregunta por los precios. Respondiendo con la lista activa.");
+      const lista = await obtenerListaPreciosPublica();
+      const respuesta = lista
+        ? formatearPreciosWhatsApp(lista)
+        : "Ahora no puedo ver la lista de precios 😅 Escribime qué querés pedir y te ayudo igual.";
+      await enviarMensajeWhatsApp(numeroCliente, respuesta);
+      return;
+    }
 
     // #7 — VALIDACIÓN DE DIRECCIÓN (determinista, antes de todo lo demás):
     // si el modelo puso en `direccion` algo que no parece calle+altura (metió
