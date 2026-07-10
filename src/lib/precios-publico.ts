@@ -29,6 +29,8 @@ export const CONTACTO = {
   whatsapp: '5493442689781',
   // Mensaje precargado al abrir el chat desde la landing.
   mensajeInicial: '¡Hola! Vi la página de precios y quiero hacer un pedido 🍦',
+  instagram: 'https://www.instagram.com/wagyhelados/',
+  facebook: 'https://www.facebook.com/people/Helados-de-agua-CdelU/61571815343733/',
 } as const;
 
 /** Link wa.me al chat con el bot, con mensaje precargado. */
