@@ -3,6 +3,12 @@ import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarMensajeConBotones } from '@/lib/whatsapp';
 import { marcarHistorialDescartado } from '@/lib/bot/procesar';
+import {
+  decidirAccionBorrador,
+  esBorradorCompleto,
+  AUTO_RECHAZO_HORAS,
+  RECORDATORIO_SILENCIO_MIN,
+} from '@/lib/bot/borradores';
 
 /**
  * Gestión de borradores silenciosos. Reemplaza a la vieja auto-confirmación
@@ -43,15 +49,9 @@ const supabaseAdmin = createClient<Database>(
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
 );
 
-// Minutos de silencio del cliente antes de mandar el "¿seguís ahí?". Mismo
-// umbral que usaba la vieja auto-confirmación.
-const RECORDATORIO_SILENCIO_MIN = 20;
-// Horas sin confirmar tras las cuales el borrador se cancela solo.
-const AUTO_RECHAZO_HORAS = 6;
-// Solo avisamos la cancelación de borradores razonablemente recientes: a un
-// zombie de días no tiene sentido escribirle (y Meta rechaza fuera de la
-// ventana de 24h igual). El pedido se cancela en DB de todos modos.
-const AVISO_CANCELACION_HORAS = 12;
+// Los umbrales (RECORDATORIO_SILENCIO_MIN, AUTO_RECHAZO_HORAS,
+// AVISO_CANCELACION_HORAS) y la decisión por borrador viven en
+// src/lib/bot/borradores.ts, que es puro y está testeado.
 
 const MENSAJE_RECORDATORIO =
   '⏰ ¿Seguís ahí? Tu pedido quedó esperando confirmación. Si no me respondés, en unas horas se cancela solo 🙏';
@@ -85,80 +85,60 @@ async function hayMensajesEnVuelo(telefono: string): Promise<boolean> {
 
 async function gestionarBorradores() {
   const ahora = Date.now();
-  const limiteRechazo = new Date(ahora - AUTO_RECHAZO_HORAS * 60 * 60 * 1000).toISOString();
-  const limiteAviso = new Date(ahora - AVISO_CANCELACION_HORAS * 60 * 60 * 1000).toISOString();
 
-  // ── 1. Recordatorios ──────────────────────────────────────────────────────
-  // Solo recordamos borradores COMPLETOS: un borrador parcial (armado a medias)
-  // usa '' de placeholder en direccion/metodo_pago y todavía le falta un dato,
-  // así que ofrecerle el botón "confirmar" no tendría sentido. El flujo del bot
-  // ya le pidió lo que falta; si igual queda mudo, el auto-rechazo lo limpia.
-  const { data: candidatos, error: errorCandidatos } = await supabaseAdmin
+  const { data: borradores, error } = await supabaseAdmin
     .from('pedidos')
-    .select('id, telefono')
-    .eq('estado', 'borrador')
-    .eq('recordatorio_enviado', false)
-    .neq('direccion', '')
-    .neq('metodo_pago', '')
-    .or('cantidad_agua.gt.0,cantidad_crema.gt.0')
-    .gte('created_at', limiteRechazo); // los más viejos van directo al paso 2
+    .select('id, telefono, created_at, recordatorio_enviado, direccion, metodo_pago, cantidad_agua, cantidad_crema')
+    .eq('estado', 'borrador');
 
-  if (errorCandidatos) {
-    console.error('❌ Error consultando borradores para recordatorio:', errorCandidatos);
+  if (error) {
+    console.error('❌ Error consultando borradores:', error);
     return NextResponse.json({ error: 'Error interno' }, { status: 500 });
   }
 
   let recordados = 0;
-  for (const p of candidatos ?? []) {
-    if (await clienteActivoReciente(p.telefono)) continue;
-    if (await hayMensajesEnVuelo(p.telefono)) continue;
-
-    const ok = await enviarMensajeConBotones(p.telefono, MENSAJE_RECORDATORIO, [
-      { id: `confirmar_borrador_${p.id}`, title: 'Sí, confirmar' },
-      { id: `modificar_borrador_${p.id}`, title: 'No, modificar' },
-    ]);
-    if (ok) {
-      await supabaseAdmin
-        .from('pedidos')
-        .update({ recordatorio_enviado: true })
-        .eq('id', p.id);
-      recordados++;
-    }
-  }
-
-  // ── 2. Auto-rechazo ───────────────────────────────────────────────────────
-  const { data: vencidos, error: errorVencidos } = await supabaseAdmin
-    .from('pedidos')
-    .select('id, telefono, created_at')
-    .eq('estado', 'borrador')
-    .lt('created_at', limiteRechazo);
-
-  if (errorVencidos) {
-    console.error('❌ Error consultando borradores vencidos:', errorVencidos);
-    return NextResponse.json({ error: 'Error interno' }, { status: 500 });
-  }
-
   let cancelados = 0;
-  for (const p of vencidos ?? []) {
-    if (await hayMensajesEnVuelo(p.telefono)) continue;
 
-    // Guard sobre el estado: si el cliente confirmó/canceló entre el read y acá,
-    // el UPDATE afecta 0 filas y no hacemos nada.
-    const { data: cancelado } = await supabaseAdmin
-      .from('pedidos')
-      .update({ estado: 'cancelado', auto_rechazado: true })
-      .eq('id', p.id)
-      .eq('estado', 'borrador')
-      .select('id')
-      .maybeSingle();
-    if (!cancelado) continue;
+  for (const p of borradores ?? []) {
+    const decision = decidirAccionBorrador({
+      msDesdeCreacion: ahora - new Date(p.created_at).getTime(),
+      esCompleto: esBorradorCompleto(p),
+      recordatorioEnviado: p.recordatorio_enviado,
+      clienteActivoReciente: await clienteActivoReciente(p.telefono),
+      hayMensajesEnVuelo: await hayMensajesEnVuelo(p.telefono),
+    });
 
-    cancelados++;
-    if (p.created_at >= limiteAviso) {
-      await enviarMensajeWhatsApp(p.telefono, MENSAJE_AUTO_RECHAZO);
+    if (decision.accion === 'recordar') {
+      const ok = await enviarMensajeConBotones(p.telefono, MENSAJE_RECORDATORIO, [
+        { id: `confirmar_borrador_${p.id}`, title: 'Sí, confirmar' },
+        { id: `modificar_borrador_${p.id}`, title: 'No, modificar' },
+      ]);
+      if (ok) {
+        await supabaseAdmin
+          .from('pedidos')
+          .update({ recordatorio_enviado: true })
+          .eq('id', p.id);
+        recordados++;
+      }
+    } else if (decision.accion === 'rechazar') {
+      // Guard sobre el estado: si el cliente confirmó/canceló entre el read y
+      // acá, el UPDATE afecta 0 filas y no hacemos nada.
+      const { data: cancelado } = await supabaseAdmin
+        .from('pedidos')
+        .update({ estado: 'cancelado', auto_rechazado: true })
+        .eq('id', p.id)
+        .eq('estado', 'borrador')
+        .select('id')
+        .maybeSingle();
+      if (!cancelado) continue;
+
+      cancelados++;
+      if (decision.avisarCliente) {
+        await enviarMensajeWhatsApp(p.telefono, MENSAJE_AUTO_RECHAZO);
+      }
+      await marcarHistorialDescartado(p.telefono);
+      console.log(`🚫 Borrador ${p.id} auto-rechazado por silencio de ${AUTO_RECHAZO_HORAS}h.`);
     }
-    await marcarHistorialDescartado(p.telefono);
-    console.log(`🚫 Borrador ${p.id} auto-rechazado por silencio de ${AUTO_RECHAZO_HORAS}h.`);
   }
 
   console.log(`🧹 Gestión de borradores: ${recordados} recordatorio(s), ${cancelados} auto-rechazo(s).`);

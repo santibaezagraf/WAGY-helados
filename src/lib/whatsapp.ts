@@ -349,7 +349,7 @@ export async function enviarMensajeConBotones(
   return true;
 }
 
-type PedidoResumen = {
+export type PedidoResumen = {
   id: number;
   cantidad_crema: number;
   cantidad_agua: number;
@@ -360,14 +360,16 @@ type PedidoResumen = {
   precio_total: number | null;
 };
 
-export async function enviarResumenYPedirConfirmacion(
-  numeroCliente: string,
+/**
+ * Arma el texto del resumen que se manda con los botones de confirmación.
+ * Pura y exportada para tests (el envío/persistencia queda en
+ * enviarResumenYPedirConfirmacion).
+ */
+export function construirResumenPedido(
   pedidoDB: PedidoResumen,
   esModificacion: boolean,
-  // #8: cuando la dirección se rellenó desde un pedido anterior (el cliente no
-  // la dio en este), lo avisamos para que pueda corregirla si cambió.
   direccionInyectadaDeHistorial: boolean = false,
-): Promise<boolean> {
+): string {
   const detalleHelado = [
     pedidoDB.cantidad_crema > 0 ? `• Crema: ${pedidoDB.cantidad_crema}` : '',
     pedidoDB.cantidad_agua > 0 ? `• Agua: ${pedidoDB.cantidad_agua}` : '',
@@ -388,7 +390,7 @@ export async function enviarResumenYPedirConfirmacion(
     ? `• *Total: ${formatearPesos(pedidoDB.precio_total)}*`
     : '• *Total: a confirmar*';
 
-  const mensaje = [
+  return [
     esModificacion ? "*Pedido actualizado:*" : "*Tu pedido:*",
     "\n" + detalleHelado,
     detalleEnvio,
@@ -397,6 +399,17 @@ export async function enviarResumenYPedirConfirmacion(
     avisoDireccion,
     "\n¿Está todo bien?"
   ].filter(Boolean).join('\n');
+}
+
+export async function enviarResumenYPedirConfirmacion(
+  numeroCliente: string,
+  pedidoDB: PedidoResumen,
+  esModificacion: boolean,
+  // #8: cuando la dirección se rellenó desde un pedido anterior (el cliente no
+  // la dio en este), lo avisamos para que pueda corregirla si cambió.
+  direccionInyectadaDeHistorial: boolean = false,
+): Promise<boolean> {
+  const mensaje = construirResumenPedido(pedidoDB, esModificacion, direccionInyectadaDeHistorial);
 
   const ok = await enviarMensajeConBotones(numeroCliente, mensaje, [
     { id: `confirmar_borrador_${pedidoDB.id}`, title: 'Sí, confirmar' },

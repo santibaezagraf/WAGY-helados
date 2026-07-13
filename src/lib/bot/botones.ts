@@ -26,6 +26,20 @@ export type BotonAccion =
   | 'rechazar_cancelacion';
 
 /**
+ * Botones de "respuesta rápida" que manda el bot cuando falta un solo dato
+ * (ver procesar.ts > pedirDatosFaltantes). No codifican un pedidoId: el
+ * webhook convierte el click en un mensaje de texto canónico que sigue el
+ * pipeline normal (QStash + LLM), que es quien sabe fusionarlo con el pedido
+ * en armado. Vive acá (y no en el route) para poder testear que sus ids nunca
+ * colisionen con los que parsea parsearBotonId.
+ */
+export const RESPUESTAS_RAPIDAS: Record<string, string> = {
+  resp_pago_efectivo: 'efectivo',
+  resp_pago_transferencia: 'transferencia',
+  resp_retira: 'paso a retirar',
+};
+
+/**
  * Parsea un button_id con formato "<accion>_<pedidoId>". Devuelve null si
  * el id no matchea ninguna de las acciones conocidas (no es un botón nuestro
  * o es de una versión vieja).

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
-import { ejecutarBoton, parsearBotonId } from '@/lib/bot/botones';
+import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS } from '@/lib/bot/botones';
 import { enviarMensajeWhatsApp, descargarYGuardarMedia } from '@/lib/whatsapp';
 import { atencionHumanaActiva, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
 
@@ -49,16 +49,6 @@ const TIPOS_MEDIA = ['image', 'audio', 'video', 'document', 'sticker'];
 // (media) y no hay un operador ya manejando la conversación.
 const MENSAJE_REQUIERE_HUMANO =
   'Recibí tu mensaje, en un momento te atiende una persona 🙏';
-
-// Botones de "respuesta rápida" que manda el bot cuando falta un solo dato
-// (ver procesar.ts > datos faltantes). No codifican un pedidoId: el click se
-// convierte en un mensaje de texto canónico y sigue el pipeline normal
-// (QStash + LLM), que es quien sabe fusionarlo con el pedido en armado.
-const RESPUESTAS_RAPIDAS: Record<string, string> = {
-  resp_pago_efectivo: 'efectivo',
-  resp_pago_transferencia: 'transferencia',
-  resp_retira: 'paso a retirar',
-};
 
 // Texto humano para informar el tipo de mensaje no soportado.
 function nombreLegibleTipo(tipo: string): string {

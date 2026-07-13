@@ -213,10 +213,10 @@ export function aplicarOperacionCantidad(
   actual: number
 ): number {
   switch (operacion) {
-    case 'sumar':       return Math.max(0, actual + valor);
-    case 'restar':      return Math.max(0, actual - valor);
-    case 'reemplazar':  return Math.max(0, valor);
-    case 'mantener':    return actual;
+    case 'sumar': return Math.max(0, actual + valor);
+    case 'restar': return Math.max(0, actual - valor);
+    case 'reemplazar': return Math.max(0, valor);
+    case 'mantener': return actual;
   }
 }
 
@@ -238,8 +238,8 @@ export function aplicarOperacionAclaracion(
   actual: string | null,
 ): string | null {
   switch (operacion) {
-    case 'mantener':    return actual;
-    case 'reemplazar':  return texto ?? actual; // defensivo: reemplazar sin texto = no tocar
+    case 'mantener': return actual;
+    case 'reemplazar': return texto ?? actual; // defensivo: reemplazar sin texto = no tocar
     case 'agregar':
       if (!texto) return actual;
       if (!actual) return texto;
@@ -305,9 +305,9 @@ export function aplicarOperacionObs(
   actual: string | null,
 ): string | null {
   switch (operacion) {
-    case 'mantener':    return actual;
-    case 'limpiar':     return null;
-    case 'reemplazar':  return texto ?? actual; // defensivo: reemplazar sin texto = no tocar
+    case 'mantener': return actual;
+    case 'limpiar': return null;
+    case 'reemplazar': return texto ?? actual; // defensivo: reemplazar sin texto = no tocar
     case 'agregar':
       if (!texto) return actual;
       if (!actual) return texto;
@@ -368,6 +368,36 @@ export function pareceDireccion(texto: string | null): boolean {
 }
 
 /**
+ * Qué responder cuando el pedido en armado está incompleto. La regla: si falta
+ * UN solo dato y es una elección cerrada, se pide con botones (pago) o con un
+ * botón de atajo (retiro cuando falta la dirección); si faltan varios, lista de
+ * texto. Pura y exportada para tests — el envío queda en el flow.
+ */
+export type RespuestaDatosFaltantes =
+  | { tipo: 'botones_pago' }
+  | { tipo: 'boton_retira' }
+  | { tipo: 'texto'; mensaje: string };
+
+export function elegirRespuestaDatosFaltantes(
+  faltaCantidad: boolean,
+  faltaDireccion: boolean,
+  faltaPago: boolean,
+): RespuestaDatosFaltantes {
+  if (!faltaCantidad && !faltaDireccion && faltaPago) return { tipo: 'botones_pago' };
+  if (!faltaCantidad && faltaDireccion && !faltaPago) return { tipo: 'boton_retira' };
+
+  const datosFaltantes: string[] = [];
+  if (faltaCantidad) datosFaltantes.push("Cantidades de helado");
+  if (faltaDireccion) datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
+  if (faltaPago) datosFaltantes.push("Forma de pago (efectivo o transferencia)");
+
+  const encabezado = datosFaltantes.length === 3
+    ? "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:"
+    : "Para armar tu pedido me falta:";
+  return { tipo: 'texto', mensaje: [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n') };
+}
+
+/**
  * Campos mínimos de un pedidoActivo que necesita el prompt builder.
  * Usado tanto por el flujo real (donde pasa una row completa de pedidos)
  * como por el endpoint de dev (donde se construye una row sintética).
@@ -424,10 +454,10 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       ${esperandoCancelacion ? `
       * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si está seguro de cancelar.
       - "confirmar_cancelacion": el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "exacto", "sí, cancelar").
-      - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar (ej: "no", "no, pará", "me equivoqué", "dejalo así").
+      - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar, SIN aportar ningún dato del pedido (ej: "no", "no, pará", "me equivoqué", "dejalo así"). OJO: si además trae cambios concretos (cantidades, sabores, dirección, pago), NO uses esta opción — usá "datos_pedido" (el sistema entiende que no quiere cancelar Y aplica los cambios).
       - "saludo": el mensaje es ÚNICAMENTE un saludo, sin pista sobre la cancelación.
       - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
-      - "datos_pedido": cualquier otra cosa.
+      - "datos_pedido": cualquier otra cosa. Incluye mensajes que rechazan la cancelación PERO traen cambios concretos (ej: "no, mejor sumale 5 de agua" → datos_pedido con cantidad_agua=5/sumar).
       ` : `
       - "cancelar": el cliente pide explícitamente cancelar, anular, dar de baja, o dice "ya no quiero el pedido" / "fue mentira".
       - "confirmar": ${tieneBorrador ? `el cliente acepta el resumen (ej: "sí", "dale", "está bien", "confirmo").` : `NO APLICA en este estado (el pedido no está en borrador).`}
@@ -455,6 +485,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
         * "reemplazar": valor FIJO, SIN "más"/"menos". Ej: "que sean 50", "cambialo a 20", "ahora 30 de crema". También el desglose ya sumado ("que los de agua sean 20 de frutilla y 40 de menta" → 60).
         * "mantener": no menciona ese tipo en el mensaje. Valor = 0.
         Contraste clave (cada tipo es independiente): "25 más de agua" = sumar 25 | "25 de agua" = reemplazar 25 | "5 menos de crema" = restar 5.
+        POR UNIDAD, NUNCA POR PESO: los helados se venden por unidad, no por kilo/gramo. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua"), NO conviertas ni inventes un número: dejá esa cantidad en "mantener" (el sistema vuelve a pedir las unidades).
 
       IMPORTANTE: Devolvé TODOS los campos del schema. "intencion" es una sola opción del enum, no un booleano.
     `;
@@ -476,7 +507,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si NO menciona direccion ni retiro, pon null.
     - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
     - "aclaracion_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay aclaración previa que combinar).
-    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10).
+    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10). POR UNIDAD, NUNCA POR PESO: los helados se venden por unidad, no por kilo/gramo. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua"), NO conviertas ni inventes un número: dejá esa cantidad en 0 (el sistema vuelve a pedir las unidades).
     - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
     - SABORES (campos "obs_agua" / "obs_crema" / "obs_general"): poné los sabores en el slot del tipo, SIN el prefijo "los de agua/crema". NO confundas el tipo de helado con un sabor.
       * "obs_agua": sabores de los de agua (ej. "frutilla y menta", "5 de frutilla y 5 de menta"). "obs_crema": ídem crema. "obs_general": sabores/detalles sin tipo ("sin coco", "de dulce de leche").
@@ -524,7 +555,10 @@ async function pedirDatosFaltantes(
 ) {
   console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}`);
 
-  if (!faltaCantidad && !faltaDireccion && faltaPago) {
+  // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
+  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago);
+
+  if (respuesta.tipo === 'botones_pago') {
     await enviarMensajeConBotones(numeroCliente, "¿Cómo lo pagás? 💰", [
       { id: 'resp_pago_efectivo', title: 'Efectivo' },
       { id: 'resp_pago_transferencia', title: 'Transferencia' },
@@ -532,7 +566,7 @@ async function pedirDatosFaltantes(
     return;
   }
 
-  if (!faltaCantidad && faltaDireccion && !faltaPago) {
+  if (respuesta.tipo === 'boton_retira') {
     // Si falta solo la dirección es porque tampoco hay histórica (la inyección
     // ya corrió). Pedimos calle y número; el botón cubre el caso retiro sin que
     // lo tenga que escribir.
@@ -544,17 +578,7 @@ async function pedirDatosFaltantes(
     return;
   }
 
-  const datosFaltantes: string[] = [];
-  if (faltaCantidad) datosFaltantes.push("Cantidad y sabores");
-  if (faltaDireccion) datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
-  if (faltaPago) datosFaltantes.push("Forma de pago (efectivo o transferencia)");
-
-  const encabezado = datosFaltantes.length === 3
-    ? "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:"
-    : "Para armar tu pedido me falta:";
-  const mensajeRespuesta = [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n');
-
-  await enviarMensajeWhatsApp(numeroCliente, mensajeRespuesta);
+  await enviarMensajeWhatsApp(numeroCliente, respuesta.mensaje);
 }
 
 export async function procesarMensajesDeCliente(numeroCliente: string) {
