@@ -5,6 +5,7 @@ import { Database } from '@/types/supabase';
 import { ejecutarBoton, parsearBotonId } from '@/lib/bot/botones';
 import { enviarMensajeWhatsApp, descargarYGuardarMedia } from '@/lib/whatsapp';
 import { atencionHumanaActiva, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
+import { verificarFirmaMeta } from '@/lib/firma-meta';
 
 // 1. GET: Meta usa esto una sola vez para verificar que la URL es tuya
 export async function GET(request: Request) {
@@ -90,7 +91,33 @@ function nombreLegibleTipo(tipo: string): string {
  */
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    // Verificación de autenticidad ANTES de tocar nada: Meta firma cada entrega
+    // con HMAC-SHA256(App Secret, body crudo) en X-Hub-Signature-256. Sin esto,
+    // cualquiera que conozca la URL puede forjar mensajes de "clientes" (crear/
+    // cancelar pedidos ajenos, disparar WhatsApps salientes, quemar tokens).
+    // La firma es sobre los bytes crudos → leemos text() y parseamos después.
+    const rawBody = await request.text();
+
+    // Fail-closed: sin el secret configurado no podemos distinguir un request
+    // de Meta de uno forjado, así que rechazamos todo. Si el bot deja de
+    // responder tras un deploy, revisar que WHATSAPP_APP_SECRET esté cargada
+    // (App Secret de la app de Meta: panel → Configuración → Básica).
+    const appSecret = process.env.WHATSAPP_APP_SECRET;
+    if (!appSecret) {
+      console.error('⛔ WHATSAPP_APP_SECRET no configurado: rechazando el webhook. Cargar el App Secret de Meta en las env vars.');
+      return NextResponse.json({ error: 'webhook sin configurar' }, { status: 503 });
+    }
+
+    const firma = request.headers.get('x-hub-signature-256');
+    if (!verificarFirmaMeta(rawBody, firma, appSecret)) {
+      console.warn('⛔ Webhook con firma inválida o ausente. Rechazado (403).');
+      // 403 y no 200: un request forjado no debe procesarse. Los requests
+      // legítimos de Meta siempre traen firma válida, así que esto no afecta
+      // el flujo normal ni provoca reintentos de Meta sobre mensajes reales.
+      return NextResponse.json({ error: 'firma inválida' }, { status: 403 });
+    }
+
+    const body = JSON.parse(rawBody);
 
     if (body.object !== 'whatsapp_business_account') {
       return NextResponse.json({ status: 'ignored' }, { status: 200 });
