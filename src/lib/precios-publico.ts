@@ -24,6 +24,17 @@ export const ENVIOS = {
   minimoGratis: 10000,
 } as const;
 
+export const PAGO_TRANSFERENCIA = {
+  // Datos que el bot manda al confirmar un pedido con metodo_pago='transferencia'.
+  alias: 'wagy.helados',
+  titular: 'WAGY helados',
+} as const;
+
+export const ENTREGA = {
+  // Tiempo estimado que el bot comunica al confirmar un pedido. Texto libre.
+  tiempoEstimado: '30 a 60 minutos',
+} as const;
+
 export const CONTACTO = {
   // Número del bot en formato internacional wa.me (con el 9 de móvil AR).
   whatsapp: '5493442689781',

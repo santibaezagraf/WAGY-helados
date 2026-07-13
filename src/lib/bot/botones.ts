@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
-import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion } from '@/lib/whatsapp';
+import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, mensajeConfirmacion } from '@/lib/whatsapp';
 import { marcarHistorialDescartado } from '@/lib/bot/procesar';
 
 const supabaseAdmin = createClient<Database>(
@@ -71,6 +71,11 @@ export async function ejecutarBoton(
 }
 
 async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
+  // Guard de completitud: un borrador parcial (armado a medias) usa '' de
+  // placeholder en direccion/metodo_pago y puede tener cantidad 0. No se puede
+  // mandar a cocina así — el UPDATE lo exige con .neq('','')/.or(cantidad>0),
+  // de modo que un borrador incompleto afecta 0 filas y cae al fallback, que
+  // le pide al cliente completar en vez de confirmar por error.
   const { data } = await supabaseAdmin
     .from('pedidos')
     .update({ estado: 'pendiente' })
@@ -78,11 +83,14 @@ async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
     .eq('telefono', numeroCliente) // seguridad: solo el dueño puede confirmar
     .eq('estado', 'borrador')
     .neq('enviado', true)
-    .select('id')
+    .neq('direccion', '')
+    .neq('metodo_pago', '')
+    .or('cantidad_agua.gt.0,cantidad_crema.gt.0')
+    .select('id, direccion, metodo_pago')
     .maybeSingle();
 
   if (data) {
-    await enviarMensajeWhatsApp(numeroCliente, "¡Confirmado! Va a la cocina 🍦 ¡Gracias!");
+    await enviarMensajeWhatsApp(numeroCliente, mensajeConfirmacion(data.direccion, data.metodo_pago));
     await marcarHistorialDescartado(numeroCliente);
     console.log(`✅ Pedido ${pedidoId} confirmado por botón.`);
   } else {

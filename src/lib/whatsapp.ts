@@ -8,6 +8,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
+import { formatearPesos, PAGO_TRANSFERENCIA, ENTREGA } from '@/lib/precios-publico';
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v18.0';
 
@@ -214,6 +215,41 @@ export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string
   if (ok) await persistirMensajeBot(numeroDestino, texto);
 }
 
+/**
+ * Marca el último mensaje del cliente como leído (tildes azules) y muestra el
+ * indicador "escribiendo…" (Meta lo mantiene hasta 25s o hasta que mandemos la
+ * respuesta). Se llama recién cuando el worker CLAIMEÓ los mensajes y va a
+ * responder — no desde el webhook — para no cortar al cliente que sigue
+ * tipeando durante el debounce: si ve "escribiendo…" deja de escribir para
+ * esperar la respuesta. Best-effort: si falla, solo se pierde el efecto visual.
+ */
+export async function marcarLeidoYEscribiendo(waMessageId: string): Promise<void> {
+  await postAMeta({
+    messaging_product: 'whatsapp',
+    status: 'read',
+    message_id: waMessageId,
+    typing_indicator: { type: 'text' },
+  }, 'indicador de escribiendo');
+}
+
+/**
+ * Texto de "pedido confirmado" con tiempo estimado y, si paga por
+ * transferencia, los datos para transferir. Pura y exportada para tests.
+ * Los valores editables viven en precios-publico.ts (ENTREGA / PAGO_TRANSFERENCIA).
+ */
+export function mensajeConfirmacion(direccion: string, metodoPago: string): string {
+  const lineas = ['¡Confirmado! Va a la cocina 🍦'];
+  lineas.push(
+    direccion === 'retira'
+      ? `En aproximadamente ${ENTREGA.tiempoEstimado} lo podés pasar a buscar.`
+      : `Te llega en aproximadamente ${ENTREGA.tiempoEstimado} 🛵`
+  );
+  if (metodoPago === 'transferencia') {
+    lineas.push(`💸 Alias para transferir: *${PAGO_TRANSFERENCIA.alias}* (${PAGO_TRANSFERENCIA.titular}). Mandanos el comprobante por acá 🙏`);
+  }
+  return lineas.join('\n');
+}
+
 export type MensajePersistido = {
   id: string;
   rol: string;
@@ -346,12 +382,18 @@ export async function enviarResumenYPedirConfirmacion(
     ? "\n_📍 Usé la dirección de tu último pedido. Si cambió, decime._"
     : '';
 
+  // precio_total puede venir null (p.ej. cantidad por debajo del tier mínimo de
+  // la lista de precios): sin este fallback el cliente veía "Total: $null".
+  const detalleTotal = pedidoDB.precio_total != null
+    ? `• *Total: ${formatearPesos(pedidoDB.precio_total)}*`
+    : '• *Total: a confirmar*';
+
   const mensaje = [
     esModificacion ? "*Pedido actualizado:*" : "*Tu pedido:*",
     "\n" + detalleHelado,
     detalleEnvio,
     `• Pago: ${pedidoDB.metodo_pago}`,
-    `• *Total: $${pedidoDB.precio_total}*`,
+    detalleTotal,
     avisoDireccion,
     "\n¿Está todo bien?"
   ].filter(Boolean).join('\n');
@@ -366,9 +408,12 @@ export async function enviarResumenYPedirConfirmacion(
   // /api/reenviar-resumenes lo reintente. Si salió, limpiamos el flag (pudo
   // haber quedado en true de un intento anterior). El resumen es reconstruible
   // desde la fila, por eso se puede reenviar; otros mensajes del bot no.
+  // Re-armamos también el recordatorio de silencio: cada resumen nuevo abre una
+  // nueva espera de confirmación, así el cron puede volver a insistir si el
+  // cliente se queda callado otra vez.
   const { error } = await supabaseAdmin
     .from('pedidos')
-    .update({ resumen_pendiente: !ok })
+    .update({ resumen_pendiente: !ok, recordatorio_enviado: false })
     .eq('id', pedidoDB.id);
   if (error) console.error('⚠️ No se pudo actualizar resumen_pendiente:', error);
 

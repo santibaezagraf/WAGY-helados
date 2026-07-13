@@ -138,6 +138,7 @@ export type Database = {
         Row: {
           aclaracion: string | null
           auto_confirmado: boolean | null
+          auto_rechazado: boolean
           cantidad_agua: number
           cantidad_crema: number
           costo_envio: number
@@ -156,6 +157,7 @@ export type Database = {
           precio_total: number | null
           precio_unitario_agua: number | null
           precio_unitario_crema: number | null
+          recordatorio_enviado: boolean
           resumen_pendiente: boolean
           telefono: string
           updated_at: string | null
@@ -163,6 +165,7 @@ export type Database = {
         Insert: {
           aclaracion?: string | null
           auto_confirmado?: boolean | null
+          auto_rechazado?: boolean
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
@@ -181,6 +184,7 @@ export type Database = {
           precio_total?: number | null
           precio_unitario_agua?: number | null
           precio_unitario_crema?: number | null
+          recordatorio_enviado?: boolean
           resumen_pendiente?: boolean
           telefono: string
           updated_at?: string | null
@@ -188,6 +192,7 @@ export type Database = {
         Update: {
           aclaracion?: string | null
           auto_confirmado?: boolean | null
+          auto_rechazado?: boolean
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
@@ -206,6 +211,7 @@ export type Database = {
           precio_total?: number | null
           precio_unitario_agua?: number | null
           precio_unitario_crema?: number | null
+          recordatorio_enviado?: boolean
           resumen_pendiente?: boolean
           telefono?: string
           updated_at?: string | null
@@ -249,7 +255,6 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      auto_confirmar_borradores_silenciosos: { Args: never; Returns: undefined }
       auto_confirmar_pedidos_expirados: { Args: never; Returns: undefined }
       obtener_balance: {
         Args: { fecha_fin: string; fecha_inicio: string }

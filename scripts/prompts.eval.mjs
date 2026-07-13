@@ -82,6 +82,27 @@ const CASOS = [
     espera: { cantidad_agua: 60 },
   },
 
+  // ---- PEDIDO EN ARMADO EN PARTES (multiturno) ----
+  // Regresión real: el cliente daba la cantidad en un mensaje y el pago en otro.
+  // Como antes NO se persistía nada hasta tener el pedido completo, el 2º turno
+  // re-extraía todo desde el historial y el modelo perdía la cantidad (log real:
+  // "50 de crema" en el turno 1, "efectivo" en el turno 2 → crema volvía a 0).
+  // Ahora el 1er turno deja un borrador PARCIAL (metodo_pago=''), así que el 2º
+  // turno llega con pedidoActivo y TS mergea determinísticamente: la cantidad ya
+  // cargada tiene que sobrevivir al mensaje que solo trae el pago ("mantener").
+  {
+    nombre: 'multiturno: pasar el pago mantiene la cantidad de crema ya cargada',
+    mensaje: 'efectivo',
+    pedidoActivo: borrador({ cantidad_crema: 50, metodo_pago: '' }),
+    espera: { cantidad_crema: 50, metodo_pago: 'efectivo', intencion: 'datos_pedido' },
+  },
+  {
+    nombre: 'multiturno: pasar el pago mantiene agua y crema',
+    mensaje: 'lo pago por transferencia',
+    pedidoActivo: borrador({ cantidad_agua: 20, cantidad_crema: 30, metodo_pago: '' }),
+    espera: { cantidad_agua: 20, cantidad_crema: 30, metodo_pago: 'transferencia' },
+  },
+
   // ---- ACLARACION (#4: patch estructurado) ----
   {
     nombre: 'aclaracion: agregar concatena sin perder lo viejo',
@@ -277,7 +298,8 @@ async function main() {
 
   if (casos.length === 0) {
     console.error(`No hay casos que matcheen el filtro "${FILTER}".`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   console.log(`\n🧪 Eval del prompt — ${casos.length} caso(s)${REPEAT > 1 ? ` x${REPEAT} repeticiones` : ''} contra ${BASE_URL}\n`);
@@ -298,7 +320,8 @@ async function main() {
       } catch (e) {
         if (e?.cause?.code === 'ECONNREFUSED' || /fetch failed/.test(String(e))) {
           console.error(`\n❌ No me pude conectar a ${BASE_URL}. ¿Está corriendo "npm run dev"?\n`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         throw e;
       }
@@ -321,7 +344,11 @@ async function main() {
   }
 
   console.log(`\n${fallados === 0 ? '✅' : '❌'} ${pasados}/${casos.length} pasaron${fallados > 0 ? `, ${fallados} fallaron` : ''}.\n`);
-  process.exit(fallados === 0 ? 0 : 1);
+  // Seteamos exitCode en vez de process.exit(): forzar la salida mientras undici
+  // todavía cierra sus sockets keep-alive dispara un abort de libuv en Windows
+  // ("Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"). Dejamos que Node
+  // drene el event loop y salga solo con el código correcto.
+  process.exitCode = fallados === 0 ? 0 : 1;
 }
 
 main();

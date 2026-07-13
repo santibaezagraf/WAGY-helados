@@ -46,9 +46,19 @@ function normalizarNumero(numero: string): string {
 const TIPOS_MEDIA = ['image', 'audio', 'video', 'document', 'sticker'];
 
 // Lo que le respondemos al cliente cuando manda algo que el bot no entiende
-// (media/ubicación) y no hay un operador ya manejando la conversación.
+// (media) y no hay un operador ya manejando la conversación.
 const MENSAJE_REQUIERE_HUMANO =
   'Recibí tu mensaje, en un momento te atiende una persona 🙏';
+
+// Botones de "respuesta rápida" que manda el bot cuando falta un solo dato
+// (ver procesar.ts > datos faltantes). No codifican un pedidoId: el click se
+// convierte en un mensaje de texto canónico y sigue el pipeline normal
+// (QStash + LLM), que es quien sabe fusionarlo con el pedido en armado.
+const RESPUESTAS_RAPIDAS: Record<string, string> = {
+  resp_pago_efectivo: 'efectivo',
+  resp_pago_transferencia: 'transferencia',
+  resp_retira: 'paso a retirar',
+};
 
 // Texto humano para informar el tipo de mensaje no soportado.
 function nombreLegibleTipo(tipo: string): string {
@@ -263,6 +273,11 @@ async function manejarMedia(
 /**
  * Ubicación compartida. No es un archivo (no hay media_id): viene con lat/long
  * y opcionalmente nombre/dirección. La guardamos como tipo='location'.
+ *
+ * A diferencia del media, acá NO derivamos a un humano: quien manda un pin
+ * casi seguro está pasando su dirección de entrega, así que el bot le pide la
+ * versión escrita (calle y número) y el pedido se sigue cargando solo. El pin
+ * queda visible en el chat del dashboard igual, por si el operador lo necesita.
  */
 async function manejarUbicacion(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -296,7 +311,16 @@ async function manejarUbicacion(
     return NextResponse.json({ status: 'error' }, { status: 200 });
   }
 
-  return await avisarSiHaceFaltaHumano(numeroCliente);
+  // Con un operador en la conversación no interferimos; si no, pedimos la
+  // dirección escrita para que el flujo normal la tome sin intervención humana.
+  const enTomaHumana = await atencionHumanaActiva(numeroCliente);
+  if (!enTomaHumana) {
+    await enviarMensajeWhatsApp(
+      numeroCliente,
+      '¡Gracias por la ubicación! 🙏 Para el reparto necesito la dirección escrita: mandame calle y número (ej: *Mitre 950*).',
+    );
+  }
+  return NextResponse.json({ status: 'ok' }, { status: 200 });
 }
 
 /**
@@ -329,6 +353,14 @@ async function manejarInteractivo(
   const buttonId: string = buttonReply.id;
   const buttonTitle: string = buttonReply.title;
   console.log(`🔘 Click de botón de ${numeroCliente}: id="${buttonId}", title="${buttonTitle}"`);
+
+  // Respuesta rápida (falta un solo dato): el click ES el dato. Lo mapeamos a
+  // su texto canónico y lo mandamos por el pipeline normal de texto.
+  const textoRapido = RESPUESTAS_RAPIDAS[buttonId];
+  if (textoRapido) {
+    console.log(`⚡ Respuesta rápida "${buttonId}" → texto "${textoRapido}".`);
+    return await guardarComoTextoYAgendar(numeroCliente, textoRapido, waMessageId);
+  }
 
   const parsed = parsearBotonId(buttonId);
   if (!parsed) {

@@ -3,7 +3,7 @@ import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
-import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion } from '@/lib/whatsapp';
+import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
 import { atencionHumanaActiva } from '@/lib/bot/atencion-humana';
 import { obtenerListaPreciosPublica, formatearPreciosWhatsApp } from '@/lib/precios-publico';
 
@@ -506,6 +506,57 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
 // que la última wake-up siempre vea su propio mensaje como "viejo" y procese.
 const DEFER_THRESHOLD_MS = 5000;
 
+/**
+ * Envía el mensaje que pide el/los dato(s) que faltan para completar un pedido.
+ * Cuando falta UN solo dato y es una elección cerrada (pago / dirección), lo
+ * pedimos con botones: el click vuelve por el webhook mapeado a texto canónico
+ * (RESPUESTAS_RAPIDAS) y sigue el pipeline normal. Menos tipeo y menos
+ * ambigüedad que pedirlo como texto libre.
+ *
+ * Se comparte entre el armado de un pedido nuevo y la actualización de un
+ * borrador todavía incompleto, así el texto es idéntico en ambos caminos.
+ */
+async function pedirDatosFaltantes(
+  numeroCliente: string,
+  faltaCantidad: boolean,
+  faltaDireccion: boolean,
+  faltaPago: boolean,
+) {
+  console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}`);
+
+  if (!faltaCantidad && !faltaDireccion && faltaPago) {
+    await enviarMensajeConBotones(numeroCliente, "¿Cómo lo pagás? 💰", [
+      { id: 'resp_pago_efectivo', title: 'Efectivo' },
+      { id: 'resp_pago_transferencia', title: 'Transferencia' },
+    ]);
+    return;
+  }
+
+  if (!faltaCantidad && faltaDireccion && !faltaPago) {
+    // Si falta solo la dirección es porque tampoco hay histórica (la inyección
+    // ya corrió). Pedimos calle y número; el botón cubre el caso retiro sin que
+    // lo tenga que escribir.
+    await enviarMensajeConBotones(
+      numeroCliente,
+      "¿A qué dirección te lo llevamos? Mandame calle y número (ej: *Mitre 950*) 🛵",
+      [{ id: 'resp_retira', title: 'Paso a retirar' }],
+    );
+    return;
+  }
+
+  const datosFaltantes: string[] = [];
+  if (faltaCantidad) datosFaltantes.push("Cantidad y sabores");
+  if (faltaDireccion) datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
+  if (faltaPago) datosFaltantes.push("Forma de pago (efectivo o transferencia)");
+
+  const encabezado = datosFaltantes.length === 3
+    ? "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:"
+    : "Para armar tu pedido me falta:";
+  const mensajeRespuesta = [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n');
+
+  await enviarMensajeWhatsApp(numeroCliente, mensajeRespuesta);
+}
+
 export async function procesarMensajesDeCliente(numeroCliente: string) {
   // 0.bis TOMA HUMANA (defensa): el webhook ya no agenda wake-ups durante una
   //    toma humana, pero pudo quedar uno agendado de antes de iniciarla. Si la
@@ -559,7 +610,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .eq('telefono', numeroCliente)
     .eq('rol', 'cliente') // refuerzo: nunca reclamamos un row del bot como input
     .eq('procesado', false)
-    .select('id, texto, created_at');
+    .select('id, texto, created_at, wa_message_id');
 
   if (claimError) {
     console.error(`❌ Error al hacer claim de mensajes para ${numeroCliente}:`, claimError);
@@ -572,6 +623,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   }
 
   console.log(`📦 Claimed ${mensajesClaim.length} mensaje(s) nuevo(s) para ${numeroCliente}.`);
+
+  // Tildes azules + "escribiendo…" sobre el mensaje más reciente del batch.
+  // Va acá (post-claim) y NO en el webhook a propósito: durante el debounce el
+  // cliente puede seguir tipeando, y si ve "escribiendo…" antes de tiempo deja
+  // de mandar sus mensajes para esperar la respuesta.
+  const masReciente = [...mensajesClaim].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  )[0];
+  if (masReciente?.wa_message_id) {
+    await marcarLeidoYEscribiendo(masReciente.wa_message_id);
+  }
 
   // 2. Buscar pedido activo reciente — necesitamos saber si existe ANTES de
   //    armar el historial, porque el contexto que le damos al modelo depende
@@ -832,7 +894,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   if (!pedido) {
     console.error("❌ Falló la extracción structured tras todos los reintentos:", lastError);
-    await enviarMensajeWhatsApp(numeroCliente, "Disculpá, no te entendí. ¿Lo repetís? 🙏");
+    await enviarMensajeWhatsApp(numeroCliente, "Disculpá, no te entendí 😅 ¿Me lo repetís? Por ejemplo: *20 de agua y 10 de crema, Mitre 950, efectivo* 🙏");
     return;
   }
 
@@ -850,7 +912,16 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       const respuesta = lista
         ? formatearPreciosWhatsApp(lista)
         : "Ahora no puedo ver la lista de precios 😅 Escribime qué querés pedir y te ayudo igual.";
-      await enviarMensajeWhatsApp(numeroCliente, respuesta);
+      // Cola contextual: si el hilo quedó esperando una respuesta del cliente
+      // (confirmar el borrador / la cancelación), se lo recordamos para que la
+      // consulta de precios no le pierda el pedido en el medio.
+      let cola = '';
+      if (pedidoActivo?.estado === 'borrador') {
+        cola = '\n\n👆 Ojo: tu pedido sigue esperando tu confirmación. ¿Está todo bien? Respondé *SÍ* o *NO*.';
+      } else if (pedidoActivo?.estado === 'esperando_cancelacion') {
+        cola = '\n\n👆 Ojo: tenés una cancelación pendiente. ¿Cancelás el pedido? Respondé *SÍ* o *NO*.';
+      }
+      await enviarMensajeWhatsApp(numeroCliente, respuesta + cola);
       return;
     }
 
@@ -934,6 +1005,23 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
     pedido.datos_completos = Boolean(pedido.direccion && pedido.metodo_pago && (pedido.cantidad_agua > 0 || pedido.cantidad_crema > 0));
 
+    // VALORES FINALES tras mergear el mensaje actual con el pedido activo (si
+    // lo hay). Son la base tanto para decidir completitud como para persistir.
+    // Usamos '' como placeholder de "dato todavía no cargado" en las columnas
+    // NOT NULL (direccion/metodo_pago): '' es falsy, así que la lógica de
+    // faltantes lo trata como ausente sin ramas especiales. `pedido.cantidad_*`
+    // y `pedido.observaciones` ya vienen mergeados de arriba.
+    const aguaFinal = pedido.cantidad_agua;
+    const cremaFinal = pedido.cantidad_crema;
+    const dirFinal = pedido.direccion ?? pedidoActivo?.direccion ?? '';
+    const pagoFinal = pedido.metodo_pago ?? pedidoActivo?.metodo_pago ?? '';
+    const aclaracionFinal = pedido.aclaracion ?? pedidoActivo?.aclaracion ?? null;
+
+    const faltaCantidad = !(aguaFinal > 0 || cremaFinal > 0);
+    const faltaDireccion = !dirFinal;
+    const faltaPago = !pagoFinal;
+    const pedidoCompleto = !faltaCantidad && !faltaDireccion && !faltaPago;
+
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
     //
     // Todos los UPDATE de estos flujos van con guard atómico:
@@ -974,6 +1062,36 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
         if (rechazados) {
           await enviarResumenYPedirConfirmacion(numeroCliente, rechazados, false);
+        } else {
+          console.log(`⚠️ El pedido ${pedidoActivo.id} ya no está en 'esperando_cancelacion'. Algo cambió en paralelo.`);
+          await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
+        }
+      } else if (pedido.intencion === 'datos_pedido' && hayCambiosReales) {
+        // El cliente no contestó la cancelación: mandó cambios concretos
+        // ("no, mejor 20 de crema"). Antes esto se descartaba en silencio y se
+        // re-preguntaba "¿querés cancelar?". Lo tratamos como rechazo implícito
+        // de la cancelación + modificación: volvemos a borrador con los datos
+        // nuevos y mandamos el resumen actualizado.
+        console.log("🛠️ Cambios reales durante esperando_cancelacion: rechazo implícito + modificación.");
+        const { data: actualizado } = await supabaseAdmin
+          .from('pedidos')
+          .update({
+            cantidad_agua: pedido.cantidad_agua ?? pedidoActivo.cantidad_agua,
+            cantidad_crema: pedido.cantidad_crema ?? pedidoActivo.cantidad_crema,
+            direccion: pedido.direccion ?? pedidoActivo.direccion,
+            aclaracion: pedido.aclaracion ?? pedidoActivo.aclaracion,
+            observaciones: pedido.observaciones,
+            observaciones_detalle: pedido.observaciones_detalle,
+            metodo_pago: pedido.metodo_pago ?? pedidoActivo.metodo_pago,
+            estado: 'borrador',
+          })
+          .eq('id', pedidoActivo.id)
+          .eq('estado', 'esperando_cancelacion') // guard contra races
+          .select('*')
+          .maybeSingle();
+
+        if (actualizado) {
+          await enviarResumenYPedirConfirmacion(numeroCliente, actualizado, true);
         } else {
           console.log(`⚠️ El pedido ${pedidoActivo.id} ya no está en 'esperando_cancelacion'. Algo cambió en paralelo.`);
           await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
@@ -1042,132 +1160,176 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       return;
     }
 
-    // 4. CONFIRMACIÓN (Solo si está en borrador)
+    // A esta altura ya resolvimos cancelación, saludo, precios y modificar_sin_datos.
+    // Queda el flujo de armado/modificación con datos concretos (datos_pedido).
+
+    // 4. BORRADOR EN CURSO (completo, o incompleto todavía en armado).
     if (tieneBorrador) {
+      // Confirmación explícita: solo válida si el borrador ya está completo.
+      // Un borrador incompleto (armado en partes) no se puede confirmar: falta
+      // algún dato, así que lo pedimos en vez de mandarlo a cocina.
       if (pedido.intencion === 'confirmar' && !hayCambiosReales) {
+        if (!pedidoCompleto) {
+          console.log("⚠️ El cliente confirmó pero el borrador todavía está incompleto. Pido lo que falta.");
+          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+          return;
+        }
         const { data: finalData } = await supabaseAdmin.from('pedidos').update({ estado: 'pendiente' }).eq('id', pedidoActivo.id).select('*').single();
         if (finalData) {
-          await enviarMensajeWhatsApp(numeroCliente, `¡Confirmado! Va a la cocina 🍦 ¡Gracias!`);
+          await enviarMensajeWhatsApp(numeroCliente, mensajeConfirmacion(finalData.direccion, finalData.metodo_pago));
           console.log("✅ Pedido borrador confirmado por el cliente. Enviado a cocina.");
           // Cierre de la fase de armado: descartamos los mensajes del historial
           // para que futuras modificaciones no vean "quiero 10 de crema" etc.
           await marcarHistorialDescartado(numeroCliente);
         }
-      } else if (hayCambiosReales) {
+        return;
+      }
+
+      // Hay cambios reales, o el borrador sigue incompleto: persistimos el merge
+      // (aunque quede incompleto) para no perder lo ya cargado, y después
+      // decidimos si mandar el resumen o pedir lo que falta.
+      if (hayCambiosReales || !pedidoCompleto) {
         const { data: updatedData } = await supabaseAdmin.from('pedidos').update({
-          cantidad_agua: pedido.cantidad_agua ?? pedidoActivo.cantidad_agua,
-          cantidad_crema: pedido.cantidad_crema ?? pedidoActivo.cantidad_crema,
-          direccion: pedido.direccion ?? pedidoActivo.direccion,
-          aclaracion: pedido.aclaracion ?? pedidoActivo.aclaracion,
+          cantidad_agua: aguaFinal,
+          cantidad_crema: cremaFinal,
+          direccion: dirFinal,
+          aclaracion: aclaracionFinal,
           // pedido.observaciones ya es la proyección del merge (slots sembrados
           // desde lo actual), así que NO usamos `?? pedidoActivo.observaciones`:
           // eso rompería un "limpiar" que dejó las observaciones en null a propósito.
           observaciones: pedido.observaciones,
           observaciones_detalle: pedido.observaciones_detalle,
-          metodo_pago: pedido.metodo_pago ?? pedidoActivo.metodo_pago,
+          metodo_pago: pagoFinal,
           estado: 'borrador'
         }).eq('id', pedidoActivo.id).select('*').single();
 
-        console.log("🔄 Pedido en borrador modificado por el cliente. Datos actualizados en DB:", updatedData);
+        console.log("🔄 Borrador actualizado. Datos en DB:", updatedData);
 
-        if (updatedData) await enviarResumenYPedirConfirmacion(numeroCliente, updatedData, true);
+        if (updatedData) {
+          if (pedidoCompleto) {
+            await enviarResumenYPedirConfirmacion(numeroCliente, updatedData, true);
+          } else {
+            console.log("📝 El borrador sigue incompleto tras el merge. Pido lo que falta.");
+            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+          }
+        }
+        return;
       }
+
+      // Borrador completo, sin cambios y sin confirmar: nada que hacer.
+      return;
     }
-    // 5. FLUJO NORMAL: pedido nuevo o pedido en cocina
-    else {
-      if (pedido.datos_completos === false) {
-        const datosFaltantes: string[] = [];
 
-        if ((pedido.cantidad_agua === 0 || !pedido.cantidad_agua) && (pedido.cantidad_crema === 0 || !pedido.cantidad_crema)) {
-          datosFaltantes.push("Cantidad y sabores");
-        }
-        if (!pedido.direccion) {
-          datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
-        }
-        if (!pedido.metodo_pago) {
-          datosFaltantes.push("Forma de pago (efectivo o transferencia)");
-        }
+    // 5. NO HAY BORRADOR: pedido ya en cocina (modificación) o pedido nuevo.
 
-        console.log("⚠️ Datos faltantes detectados:", datosFaltantes);
+    // 5.a Pedido en cocina sin cambios reales: probablemente está saludando o
+    //     iniciando una conversación nueva; avisamos que ya hay uno en curso.
+    if (yaExisteEnCocina && !hayCambiosReales) {
+      console.log("ℹ️ Cliente con pedido en cocina sin cambios reales. Avisando que ya hay uno en preparación.");
+      await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en preparación. ¿Querés modificar algo?");
+      return;
+    }
 
-        const encabezado = datosFaltantes.length === 3
-          ? "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:"
-          : "Para armar tu pedido me falta:";
-        const mensajeRespuesta = [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n');
-
-        await enviarMensajeWhatsApp(numeroCliente, mensajeRespuesta);
+    // 5.b Falta información para tener un pedido completo.
+    if (!pedidoCompleto) {
+      if (yaExisteEnCocina) {
+        // Un pedido en cocina ya tenía datos completos; si un merge lo dejó
+        // "incompleto" es por algo puntual del mensaje. No degradamos su estado
+        // ni persistimos placeholders: solo pedimos el dato que falte.
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+        return;
       }
-      else if (pedido.datos_completos === true) {
-        // `datos_completos === true` ya garantiza direccion y metodo_pago no nulos,
-        // pero TS no lo infiere del Boolean(...). Asertamos no-null acá.
-        const direccion = pedido.direccion!;
-        const metodoPago = pedido.metodo_pago!;
 
-        // Si el cliente tiene pedido en cocina pero no hay cambios reales,
-        // probablemente está saludando o iniciando una conversación nueva
-        // (ej: "hola, quiero hacer un pedido"). El modelo "extrajo" datos
-        // completos solo porque el prompt le dice que mantenga los valores
-        // actuales; no hay intención real de modificar nada.
-        if (yaExisteEnCocina && !hayCambiosReales) {
-          console.log("ℹ️ Cliente con pedido en cocina sin cambios reales. Avisando que ya hay uno en preparación.");
-          await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en preparación. ¿Querés modificar algo?");
-          return;
-        }
+      // PEDIDO NUEVO EN ARMADO: persistimos un borrador PARCIAL en cuanto hay
+      // algún dato real, así los próximos turnos mergean determinísticamente
+      // contra la DB en vez de re-extraer el historial (que perdía datos: ej.
+      // la cantidad de crema se caía al pasar el método de pago). Placeholder
+      // '' en las columnas NOT NULL para lo que todavía no se cargó.
+      const hayAlgunDato = !faltaCantidad || !faltaDireccion || !faltaPago;
+      if (hayAlgunDato) {
+        const { data: parcial, error: errorParcial } = await supabaseAdmin
+          .from('pedidos')
+          .insert([{
+            telefono: numeroCliente,
+            direccion: dirFinal,
+            aclaracion: aclaracionFinal,
+            cantidad_agua: aguaFinal,
+            cantidad_crema: cremaFinal,
+            observaciones: pedido.observaciones,
+            observaciones_detalle: pedido.observaciones_detalle,
+            metodo_pago: pagoFinal,
+            estado: 'borrador'
+          }])
+          .select('id')
+          .single();
 
-        let borradorDB = null;
-
-        if (yaExisteEnCocina) {
-          console.log("🔄 El cliente quiere modificar su pedido activo. Actualizando datos...");
-          const { data: updateData, error: updateError } = await supabaseAdmin
-            .from('pedidos')
-            .update({
-              cantidad_agua: pedido.cantidad_agua,
-              cantidad_crema: pedido.cantidad_crema,
-              direccion: direccion,
-              aclaracion: pedido.aclaracion,
-              observaciones: pedido.observaciones,
-              observaciones_detalle: pedido.observaciones_detalle,
-              metodo_pago: metodoPago,
-              estado: 'borrador'
-            })
-            .eq('id', pedidoActivo.id)
-            .select('*')
-            .single();
-
-          if (!updateError) {
-            borradorDB = updateData;
-            console.log("💾 Pedido actualizado en DB:", borradorDB);
-          } else {
-            console.error("❌ Error al actualizar en Supabase:", updateError);
-          }
+        if (errorParcial) {
+          console.error("❌ Error creando el borrador parcial:", errorParcial);
         } else {
-          const { data: insertData, error: insertError } = await supabaseAdmin
-            .from('pedidos')
-            .insert([{
-              telefono: numeroCliente,
-              direccion: direccion,
-              aclaracion: pedido.aclaracion,
-              cantidad_agua: pedido.cantidad_agua,
-              cantidad_crema: pedido.cantidad_crema,
-              observaciones: pedido.observaciones,
-              observaciones_detalle: pedido.observaciones_detalle,
-              metodo_pago: metodoPago,
-              estado: 'borrador'
-            }])
-            .select('*')
-            .single();
-
-          if (!insertError) {
-            borradorDB = insertData;
-            console.log("💾 Pedido creado en DB:", borradorDB);
-          } else {
-            console.error("❌ Error al crear el pedido en la base de datos:", insertError);
-          }
+          console.log(`💾 Borrador parcial creado (id ${parcial?.id}). Falta: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}.`);
         }
+      }
 
-        if (borradorDB) {
-          await enviarResumenYPedirConfirmacion(numeroCliente, borradorDB, Boolean(yaExisteEnCocina), direccionInyectadaDeHistorial);
+      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+      return;
+    }
+
+    // 5.c Datos completos en un solo mensaje: modificar el pedido en cocina, o
+    //     crear el borrador nuevo, y mandar el resumen para confirmar.
+    {
+      let borradorDB = null;
+
+      if (yaExisteEnCocina) {
+        console.log("🔄 El cliente quiere modificar su pedido activo. Actualizando datos...");
+        const { data: updateData, error: updateError } = await supabaseAdmin
+          .from('pedidos')
+          .update({
+            cantidad_agua: aguaFinal,
+            cantidad_crema: cremaFinal,
+            direccion: dirFinal,
+            aclaracion: aclaracionFinal,
+            observaciones: pedido.observaciones,
+            observaciones_detalle: pedido.observaciones_detalle,
+            metodo_pago: pagoFinal,
+            estado: 'borrador'
+          })
+          .eq('id', pedidoActivo.id)
+          .select('*')
+          .single();
+
+        if (!updateError) {
+          borradorDB = updateData;
+          console.log("💾 Pedido actualizado en DB:", borradorDB);
+        } else {
+          console.error("❌ Error al actualizar en Supabase:", updateError);
         }
+      } else {
+        const { data: insertData, error: insertError } = await supabaseAdmin
+          .from('pedidos')
+          .insert([{
+            telefono: numeroCliente,
+            direccion: dirFinal,
+            aclaracion: aclaracionFinal,
+            cantidad_agua: aguaFinal,
+            cantidad_crema: cremaFinal,
+            observaciones: pedido.observaciones,
+            observaciones_detalle: pedido.observaciones_detalle,
+            metodo_pago: pagoFinal,
+            estado: 'borrador'
+          }])
+          .select('*')
+          .single();
+
+        if (!insertError) {
+          borradorDB = insertData;
+          console.log("💾 Pedido creado en DB:", borradorDB);
+        } else {
+          console.error("❌ Error al crear el pedido en la base de datos:", insertError);
+        }
+      }
+
+      if (borradorDB) {
+        await enviarResumenYPedirConfirmacion(numeroCliente, borradorDB, Boolean(yaExisteEnCocina), direccionInyectadaDeHistorial);
       }
     }
   } catch (flowError) {
