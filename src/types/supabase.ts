@@ -137,13 +137,13 @@ export type Database = {
       pedidos: {
         Row: {
           aclaracion: string | null
-          auto_confirmado: boolean | null
           auto_rechazado: boolean
           cantidad_agua: number
           cantidad_crema: number
           costo_envio: number
           created_at: string
           direccion: string
+          direccion_de_historial: boolean
           enviado: boolean
           es_cambio_manual: boolean | null
           estado: string
@@ -164,13 +164,13 @@ export type Database = {
         }
         Insert: {
           aclaracion?: string | null
-          auto_confirmado?: boolean | null
           auto_rechazado?: boolean
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
           created_at?: string
           direccion?: string
+          direccion_de_historial?: boolean
           enviado?: boolean
           es_cambio_manual?: boolean | null
           estado?: string
@@ -191,13 +191,13 @@ export type Database = {
         }
         Update: {
           aclaracion?: string | null
-          auto_confirmado?: boolean | null
           auto_rechazado?: boolean
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
           created_at?: string
           direccion?: string
+          direccion_de_historial?: boolean
           enviado?: boolean
           es_cambio_manual?: boolean | null
           estado?: string
