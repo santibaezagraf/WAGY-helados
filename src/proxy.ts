@@ -7,11 +7,18 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 const RUTAS_PUBLICAS = ["/login", "/precios"];
 
 function esRutaPublica(pathname: string): boolean {
-    // Los endpoints /api/* se autentican solos (firma de Meta en el webhook,
-    // firma de QStash en procesar-pendientes, token en los crons). No llevan
-    // sesión de usuario, así que NO deben pasar por el gate de login: hacerlo
-    // los redirigiría a /login y rompería el bot y las tareas programadas.
-    if (pathname.startsWith("/api")) return true;
+    // Algunos endpoints /api/* no llevan sesión de usuario y se autentican por
+    // otros medios (firma de Meta/QStash, CRON_SECRET). Solo esos deben evitar
+    // el redirect a /login.
+    const API_PUBLICAS = [
+        "/api/webhook",
+        "/api/procesar-pendientes",
+        "/api/reenviar-resumenes",
+        "/api/gestionar-borradores",
+    ];
+    if (API_PUBLICAS.some((ruta) => pathname === ruta || pathname.startsWith(ruta + "/"))) {
+        return true;
+    }
     return RUTAS_PUBLICAS.some(
         (ruta) => pathname === ruta || pathname.startsWith(ruta + "/"),
     );
