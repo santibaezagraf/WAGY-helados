@@ -3,8 +3,7 @@ import { timingSafeEqual } from 'crypto';
 /**
  * Autorización de los endpoints internos disparados por infraestructura, no por
  * usuarios: los pg_cron de Supabase (`/api/reenviar-resumenes`,
- * `/api/gestionar-borradores`) y el DB webhook (`/api/webhook/notificacion`).
- *
+ * `/api/gestionar-borradores`).
  * Decisiones (ver review de seguridad):
  *  - Secreto DEDICADO `CRON_SECRET`, distinto de `VERIFY_TOKEN`. Antes los tres
  *    endpoints reusaban VERIFY_TOKEN (que además es el handshake de Meta): un
