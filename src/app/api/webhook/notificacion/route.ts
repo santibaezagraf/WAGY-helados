@@ -1,21 +1,21 @@
 import { NextResponse } from 'next/server';
 import { enviarMensajeWhatsApp } from '@/lib/whatsapp';
+import { cronAutorizado } from '@/lib/auth-cron';
 
 /**
  * Receptor del Database Webhook de Supabase.
  *
  * Se dispara cuando un pedido pasa de 'borrador' a 'pendiente' con
- * auto_confirmado=true (lo hace la función auto_confirmar_borradores_silenciosos
- * agendada por pg_cron). Avisamos al cliente que su pedido se confirmó solo.
+ * auto_confirmado=true (lo hacía la vieja auto-confirmación). Esa función se
+ * eliminó y nada setea ya `auto_confirmado`, así que este endpoint es
+ * vestigial (queda por filas viejas); se puede desactivar el DB webhook y
+ * borrarlo. Mientras exista, va protegido igual.
  *
- * Auth: el secret viene como ?token=... en la URL y se compara contra
- * VERIFY_TOKEN (la misma env var que ya usamos para el handshake de Meta).
+ * Auth: header `Authorization: Bearer <CRON_SECRET>` (ver auth-cron.ts). El DB
+ * webhook de Supabase permite configurar headers HTTP custom.
  */
 export async function POST(request: Request) {
-  const url = new URL(request.url);
-  const token = url.searchParams.get('token');
-
-  if (!process.env.VERIFY_TOKEN || token !== process.env.VERIFY_TOKEN) {
+  if (!cronAutorizado(request)) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
   }
 
