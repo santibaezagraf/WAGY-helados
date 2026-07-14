@@ -9,6 +9,8 @@ import {
   pareceDireccion,
   normalizarTextoShortCircuit,
   intentarShortCircuit,
+  elegirRespuestaDatosFaltantes,
+  estaDespachado,
   type PedidoActivoContext,
 } from './procesar';
 
@@ -221,5 +223,90 @@ describe('intentarShortCircuit', () => {
   });
   it('"dale" en borrador NO se confunde con confirmar_cancelacion', () => {
     expect(intentarShortCircuit('dale', 'esperando_cancelacion')).toBe('confirmar_cancelacion');
+  });
+});
+
+// Decisión pura de cómo pedir los datos faltantes (botones vs lista de texto).
+// La regla: botones solo cuando falta UN dato y es una elección cerrada.
+describe('elegirRespuestaDatosFaltantes', () => {
+  it('falta solo el pago → botones efectivo/transferencia', () => {
+    expect(elegirRespuestaDatosFaltantes(false, false, true)).toEqual({ tipo: 'botones_pago' });
+  });
+
+  it('falta solo la dirección → botón de retiro', () => {
+    expect(elegirRespuestaDatosFaltantes(false, true, false)).toEqual({ tipo: 'boton_retira' });
+  });
+
+  it('falta solo la cantidad → texto con un único ítem', () => {
+    const r = elegirRespuestaDatosFaltantes(true, false, false);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('Para armar tu pedido me falta:');
+      expect(r.mensaje).toContain('Cantidades de helado');
+      expect(r.mensaje).not.toContain('Dirección');
+      expect(r.mensaje).not.toContain('Forma de pago');
+    }
+  });
+
+  it('faltan dirección y pago → texto con ambos ítems (sin botones)', () => {
+    const r = elegirRespuestaDatosFaltantes(false, true, true);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('Dirección de envío');
+      expect(r.mensaje).toContain('Forma de pago');
+      expect(r.mensaje).not.toContain('Cantidades de helado');
+    }
+  });
+
+  it('falta cantidad + otro dato → texto, nunca botones', () => {
+    expect(elegirRespuestaDatosFaltantes(true, false, true).tipo).toBe('texto');
+    expect(elegirRespuestaDatosFaltantes(true, true, false).tipo).toBe('texto');
+  });
+
+  it('faltan los tres → encabezado de bienvenida', () => {
+    const r = elegirRespuestaDatosFaltantes(true, true, true);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('¿Qué te gustaría pedir?');
+      expect(r.mensaje).toContain('Cantidades de helado');
+      expect(r.mensaje).toContain('Dirección de envío');
+      expect(r.mensaje).toContain('Forma de pago');
+    }
+  });
+});
+
+describe('estaDespachado', () => {
+  it('estado="enviado" → despachado (aunque enviado sea false/null)', () => {
+    expect(estaDespachado({ estado: 'enviado', enviado: false })).toBe(true);
+    expect(estaDespachado({ estado: 'enviado', enviado: null })).toBe(true);
+  });
+
+  it('enviado=true → despachado aunque el estado todavía sea "pendiente"', () => {
+    // Caso central: se copió el mensaje al cadete (enviado=true) pero nadie
+    // movió el estado a mano todavía.
+    expect(estaDespachado({ estado: 'pendiente', enviado: true })).toBe(true);
+  });
+
+  it('pendiente sin enviar → no despachado', () => {
+    expect(estaDespachado({ estado: 'pendiente', enviado: false })).toBe(false);
+  });
+
+  it('borrador / esperando_cancelacion sin enviar → no despachado', () => {
+    expect(estaDespachado({ estado: 'borrador', enviado: false })).toBe(false);
+    expect(estaDespachado({ estado: 'esperando_cancelacion', enviado: null })).toBe(false);
+  });
+
+  it('cancelado con enviado ausente → no despachado (patchConEnviadoCoherente fuerza enviado=false)', () => {
+    expect(estaDespachado({ estado: 'cancelado' })).toBe(false);
+  });
+
+  it('la cancelación gana: cancelado + enviado=true colgado → NO despachado', () => {
+    // Defensa contra un enviado=true que quedó sin limpiar al cancelar desde el
+    // bot: no queremos re-disparar el viejo bug de "ya fue despachado".
+    expect(estaDespachado({ estado: 'cancelado', enviado: true })).toBe(false);
+  });
+
+  it('campos ausentes → no despachado', () => {
+    expect(estaDespachado({})).toBe(false);
   });
 });

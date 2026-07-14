@@ -43,6 +43,7 @@ const borrador = (extra) => ({
   ...extra,
 });
 const cocina = (extra) => borrador({ estado: 'pendiente', ...extra });
+const esperandoCancelacion = (extra) => borrador({ estado: 'esperando_cancelacion', ...extra });
 
 // Cada caso: { nombre, mensaje, pedidoActivo?, espera }.
 // `espera` es un objeto: cada clave se compara contra el resultado aplanado
@@ -80,6 +81,22 @@ const CASOS = [
     mensaje: 'que los de agua sean 20 de frutilla y 40 de menta',
     pedidoActivo: borrador({ cantidad_agua: 0 }),
     espera: { cantidad_agua: 60 },
+  },
+  {
+    // Se venden por unidad, no por peso. En pedido nuevo, "2 kilos" no debe
+    // convertirse ni inventar un número: la cantidad queda en 0 y el flujo de
+    // datos faltantes vuelve a pedir las unidades. Falla si mete 2 en crema.
+    nombre: 'cantidad: kilos en pedido nuevo no inventa cantidad',
+    mensaje: 'quiero 2 kilos de crema, pago efectivo',
+    espera: { cantidad_crema: 0, metodo_pago: 'efectivo' },
+  },
+  {
+    // Sobre un borrador con cantidad ya cargada, pedir en kilos debe DEJARLA
+    // intacta (operación "mantener"), no pisarla con un número inventado.
+    nombre: 'cantidad: kilos sobre borrador mantiene la cantidad cargada',
+    mensaje: 'que sea medio kilo de agua',
+    pedidoActivo: borrador({ cantidad_agua: 30 }),
+    espera: { cantidad_agua: 30 },
   },
 
   // ---- PEDIDO EN ARMADO EN PARTES (multiturno) ----
@@ -203,6 +220,44 @@ const CASOS = [
     nombre: 'intencion: pedido con cantidad NO es consultar_precios',
     mensaje: 'quiero 20 de agua, cuánto sale?',
     espera: { intencion: 'datos_pedido', cantidad_agua: 20 },
+  },
+
+  // ---- CAMBIOS DURANTE CANCELACION ----
+  // El flujo trata datos_pedido + cambios reales en esperando_cancelacion como
+  // RECHAZO IMPLÍCITO de la cancelación: vuelve a borrador con los cambios
+  // aplicados. Para que eso funcione el modelo tiene que clasificar el mensaje
+  // como "datos_pedido" (con la operación correcta), NO como
+  // "rechazar_cancelacion" — esa rama vuelve a borrador SIN aplicar nada y los
+  // cambios se perderían.
+  {
+    nombre: 'cancelacion: cambios concretos durante la cancelación son datos_pedido',
+    mensaje: 'mejor cambiale, que sean 20 de crema',
+    pedidoActivo: esperandoCancelacion({ cantidad_crema: 10 }),
+    espera: { intencion: 'datos_pedido', cantidad_crema: 20 },
+  },
+  {
+    nombre: 'cancelacion: "no" + cambios sigue siendo datos_pedido (los cambios no se pierden)',
+    mensaje: 'no, mejor sumale 5 de agua',
+    pedidoActivo: esperandoCancelacion({ cantidad_agua: 10 }),
+    espera: { intencion: 'datos_pedido', cantidad_agua: 15 },
+  },
+  {
+    nombre: 'cancelacion: cambio de dirección durante la cancelación',
+    mensaje: 'mandalo a Vergara 2664 mejor',
+    pedidoActivo: esperandoCancelacion({ cantidad_crema: 10 }),
+    espera: { intencion: 'datos_pedido', direccion: /vergara 2664/i },
+  },
+  {
+    nombre: 'cancelacion: confirmación no trivial (fuera del short-circuit)',
+    mensaje: 'si si, cancelalo nomas',
+    pedidoActivo: esperandoCancelacion({ cantidad_crema: 10 }),
+    espera: { intencion: 'confirmar_cancelacion' },
+  },
+  {
+    nombre: 'cancelacion: arrepentimiento SIN datos es rechazar_cancelacion',
+    mensaje: 'no no, dejalo así como estaba',
+    pedidoActivo: esperandoCancelacion({ cantidad_crema: 10 }),
+    espera: { intencion: 'rechazar_cancelacion' },
   },
 
   // ---- PEDIDO NUEVO (desde cero) ----

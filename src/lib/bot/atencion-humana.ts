@@ -27,6 +27,83 @@ const supabaseAdmin = createClient(
 // Ventana de auto-expiración de una toma humana olvidada (12h).
 export const VENTANA_TOMA_MS = 12 * 60 * 60 * 1000;
 
+// Ventana del gate por mensajes: si el último mensaje saliente de un OPERADOR
+// (rol='operador') tiene menos que esto, la conversación se considera "en manos
+// humanas" aunque la toma no esté activa (ej: falló el upsert de activación).
+export const VENTANA_MENSAJE_OPERADOR_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Decisión pura del gate por mensajes (testeable sin DB): ¿debe callarse el
+ * bot porque un operador habló hace poco?
+ *
+ *  - Sin mensaje de operador en la ventana → no.
+ *  - Con mensaje reciente, PERO el operador devolvió la conversación al bot
+ *    DESPUÉS de ese mensaje (fila atencion_humana con activa=false y
+ *    updated_at posterior) → no: la devolución explícita gana.
+ *  - En cualquier otro caso → sí (aunque la fila diga activa=true expirada o
+ *    directamente no exista: el mensaje es la evidencia).
+ */
+export function debeSilenciarBotPorOperador(
+  ultimoMensajeOperadorAt: string | null,
+  atencion: { activa: boolean; updated_at: string } | null,
+  ahoraMs: number,
+): boolean {
+  if (!ultimoMensajeOperadorAt) return false;
+
+  const mensajeMs = new Date(ultimoMensajeOperadorAt).getTime();
+  if (ahoraMs - mensajeMs > VENTANA_MENSAJE_OPERADOR_MS) return false;
+
+  const devolvioAlBotDespues =
+    atencion != null &&
+    !atencion.activa &&
+    new Date(atencion.updated_at).getTime() >= mensajeMs;
+
+  return !devolvioAlBotDespues;
+}
+
+/**
+ * Gate por mensajes: true si el último mensaje saliente hacia este cliente lo
+ * mandó un OPERADOR hace menos de VENTANA_MENSAJE_OPERADOR_MS y no hubo una
+ * devolución explícita al bot después. Es la red de seguridad de la toma
+ * humana: deriva el estado de los mensajes mismos, así que cubre el caso en
+ * que `activarAtencionHumana` falló y la conversación quedó sin flag.
+ * Se ignoran mensajes descartados (conversaciones ya cerradas).
+ */
+export async function intervencionHumanaReciente(telefono: string): Promise<boolean> {
+  const desde = new Date(Date.now() - VENTANA_MENSAJE_OPERADOR_MS).toISOString();
+
+  const { data: ultimoOperador, error } = await supabaseAdmin
+    .from('mensajes_chat')
+    .select('created_at')
+    .eq('telefono', telefono)
+    .eq('rol', 'operador')
+    .eq('descartado', false)
+    .gte('created_at', desde)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    // Mismo criterio que atencionHumanaActiva: ante un fallo de lectura no
+    // silenciamos al bot.
+    console.error(`⚠️ No se pudo leer el último mensaje de operador para ${telefono}:`, error.message);
+    return false;
+  }
+  if (!ultimoOperador) return false;
+
+  const { data: atencion } = await supabaseAdmin
+    .from('atencion_humana')
+    .select('activa, updated_at')
+    .eq('telefono', telefono)
+    .maybeSingle();
+
+  return debeSilenciarBotPorOperador(
+    ultimoOperador.created_at as string,
+    (atencion as { activa: boolean; updated_at: string } | null) ?? null,
+    Date.now(),
+  );
+}
+
 /** True si hay una toma humana activa y vigente (no expirada) para el teléfono. */
 export async function atencionHumanaActiva(telefono: string): Promise<boolean> {
   const { data, error } = await supabaseAdmin

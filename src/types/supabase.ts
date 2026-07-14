@@ -143,6 +143,7 @@ export type Database = {
           costo_envio: number
           created_at: string
           direccion: string
+          direccion_de_historial: boolean
           enviado: boolean
           es_cambio_manual: boolean | null
           estado: string
@@ -169,6 +170,7 @@ export type Database = {
           costo_envio?: number
           created_at?: string
           direccion?: string
+          direccion_de_historial?: boolean
           enviado?: boolean
           es_cambio_manual?: boolean | null
           estado?: string
@@ -195,6 +197,7 @@ export type Database = {
           costo_envio?: number
           created_at?: string
           direccion?: string
+          direccion_de_historial?: boolean
           enviado?: boolean
           es_cambio_manual?: boolean | null
           estado?: string

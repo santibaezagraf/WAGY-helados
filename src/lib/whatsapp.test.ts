@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { mimeAExtension, mensajeConfirmacion } from './whatsapp';
-import { PAGO_TRANSFERENCIA, ENTREGA } from './precios-publico';
+import { mimeAExtension, mensajeConfirmacion, construirResumenPedido } from './whatsapp';
+import { PAGO_TRANSFERENCIA, ENTREGA, formatearPesos } from './precios-publico';
 
 // Función pura: mapeo mime -> extensión para el nombre del archivo en Storage.
 // (El resto de whatsapp.ts es red/Storage y no se testea acá.)
@@ -60,5 +60,65 @@ describe('mensajeConfirmacion', () => {
     const msg = mensajeConfirmacion('Mitre 950', 'transferencia');
     expect(msg).toContain(PAGO_TRANSFERENCIA.alias);
     expect(msg).toContain(PAGO_TRANSFERENCIA.titular);
+  });
+});
+
+// Función pura: texto del resumen con botones de confirmación.
+describe('construirResumenPedido', () => {
+  const base = {
+    id: 1,
+    cantidad_crema: 10,
+    cantidad_agua: 20,
+    observaciones: 'los de agua de frutilla',
+    direccion: 'Mitre 950',
+    aclaracion: 'depto 6',
+    metodo_pago: 'efectivo',
+    precio_total: 12000,
+  };
+
+  it('incluye cantidades, sabores, envío con aclaración, pago y total formateado', () => {
+    const msg = construirResumenPedido(base, false);
+    expect(msg).toContain('*Tu pedido:*');
+    expect(msg).toContain('• Crema: 10');
+    expect(msg).toContain('• Agua: 20');
+    expect(msg).toContain('_Sabores: los de agua de frutilla_');
+    expect(msg).toContain('• Envío a: Mitre 950 (depto 6)');
+    expect(msg).toContain('• Pago: efectivo');
+    expect(msg).toContain(`• *Total: ${formatearPesos(12000)}*`);
+  });
+
+  it('precio_total null cae a "a confirmar" (nunca "$null")', () => {
+    const msg = construirResumenPedido({ ...base, precio_total: null }, false);
+    expect(msg).toContain('• *Total: a confirmar*');
+    expect(msg).not.toContain('null');
+  });
+
+  it('retira: muestra retiro en sucursal y no la dirección', () => {
+    const msg = construirResumenPedido({ ...base, direccion: 'retira' }, false);
+    expect(msg).toContain('• Retira en sucursal');
+    expect(msg).not.toContain('Envío a');
+  });
+
+  it('modificación: cambia el encabezado', () => {
+    const msg = construirResumenPedido(base, true);
+    expect(msg).toContain('*Pedido actualizado:*');
+    expect(msg).not.toContain('*Tu pedido:*');
+  });
+
+  it('avisa cuando la dirección salió del historial, salvo en retiro', () => {
+    const conAviso = construirResumenPedido(base, false, true);
+    expect(conAviso).toContain('Usé la dirección de tu último pedido');
+
+    const sinFlag = construirResumenPedido(base, false, false);
+    expect(sinFlag).not.toContain('Usé la dirección');
+
+    const retira = construirResumenPedido({ ...base, direccion: 'retira' }, false, true);
+    expect(retira).not.toContain('Usé la dirección');
+  });
+
+  it('omite la línea de un tipo con cantidad 0', () => {
+    const msg = construirResumenPedido({ ...base, cantidad_crema: 0 }, false);
+    expect(msg).not.toContain('• Crema');
+    expect(msg).toContain('• Agua: 20');
   });
 });
