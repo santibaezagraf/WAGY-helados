@@ -4,7 +4,7 @@ import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
 import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS } from '@/lib/bot/botones';
 import { enviarMensajeWhatsApp, descargarYGuardarMedia } from '@/lib/whatsapp';
-import { atencionHumanaActiva, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
+import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
 
 // 1. GET: Meta usa esto una sola vez para verificar que la URL es tuya
 export async function GET(request: Request) {
@@ -157,6 +157,12 @@ async function manejarTexto(
   // defer) y NO agendamos el wake-up de QStash. 0 tokens, el LLM ni se entera.
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
 
+  // Gate por mensajes (red de seguridad de la toma): aunque la toma no esté
+  // activa, si el último mensaje saliente fue de un OPERADOR hace <6h (y no
+  // hubo "devolver al bot" después), la conversación está en manos humanas.
+  // El bot no responde; en cambio avisamos al operador (requiere_atencion).
+  const operadorReciente = !enTomaHumana && await intervencionHumanaReciente(numeroCliente);
+
   // 1. Insert con idempotencia: si Meta reintenta, el unique index en
   //    wa_message_id devuelve 23505 y cortamos sin volver a procesar.
   const { error: insertError } = await supabaseAdmin
@@ -165,7 +171,7 @@ async function manejarTexto(
       telefono: numeroCliente,
       texto: textoMensaje,
       wa_message_id: waMessageId,
-      procesado: enTomaHumana,
+      procesado: enTomaHumana || operadorReciente,
     }]);
 
   if (insertError) {
@@ -180,6 +186,12 @@ async function manejarTexto(
   if (enTomaHumana) {
     console.log(`🙋 Toma humana activa para ${numeroCliente}. Mensaje guardado sin agendar al bot.`);
     return NextResponse.json({ status: 'atencion_humana' }, { status: 200 });
+  }
+
+  if (operadorReciente) {
+    console.log(`🙋 Último saliente fue de un operador hace <6h para ${numeroCliente}. El bot no responde; se avisa al operador.`);
+    await marcarRequiereAtencion(numeroCliente);
+    return NextResponse.json({ status: 'intervencion_humana_reciente' }, { status: 200 });
   }
 
   // 2. Agendar el wake-up en QStash. Cada mensaje agenda el suyo. El primer
@@ -305,10 +317,15 @@ async function manejarUbicacion(
   // dirección escrita para que el flujo normal la tome sin intervención humana.
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
   if (!enTomaHumana) {
-    await enviarMensajeWhatsApp(
-      numeroCliente,
-      '¡Gracias por la ubicación! 🙏 Para el reparto necesito la dirección escrita: mandame calle y número (ej: *Mitre 950*).',
-    );
+    if (await intervencionHumanaReciente(numeroCliente)) {
+      // Un operador habló hace poco: el pin es para él, no para el bot.
+      await marcarRequiereAtencion(numeroCliente);
+    } else {
+      await enviarMensajeWhatsApp(
+        numeroCliente,
+        '¡Gracias por la ubicación! 🙏 Para el reparto necesito la dirección escrita: mandame calle y número (ej: *Mitre 950*).',
+      );
+    }
   }
   return NextResponse.json({ status: 'ok' }, { status: 200 });
 }
@@ -323,7 +340,12 @@ async function avisarSiHaceFaltaHumano(numeroCliente: string) {
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
   if (!enTomaHumana) {
     await marcarRequiereAtencion(numeroCliente);
-    await enviarMensajeWhatsApp(numeroCliente, MENSAJE_REQUIERE_HUMANO);
+    // Si un operador habló hace poco (gate por mensajes), ya está "en" la
+    // conversación: avisamos en el dashboard pero no prometemos atención con
+    // un mensaje automático en el medio del intercambio humano.
+    if (!(await intervencionHumanaReciente(numeroCliente))) {
+      await enviarMensajeWhatsApp(numeroCliente, MENSAJE_REQUIERE_HUMANO);
+    }
   }
   return NextResponse.json({ status: 'ok' }, { status: 200 });
 }
