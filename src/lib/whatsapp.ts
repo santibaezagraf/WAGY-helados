@@ -204,7 +204,7 @@ export async function descargarYGuardarMedia(
   }
 }
 
-export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string) {
+export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string): Promise<boolean> {
   const ok = await postAMeta({
     messaging_product: "whatsapp",
     to: numeroDestino,
@@ -213,6 +213,7 @@ export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string
   }, "mensaje de texto");
 
   if (ok) await persistirMensajeBot(numeroDestino, texto);
+  return ok;
 }
 
 /**
@@ -358,6 +359,10 @@ export type PedidoResumen = {
   aclaracion: string | null;
   metodo_pago: string;
   precio_total: number | null;
+  // Persistido en la fila: la dirección vino del historial (el cliente no la
+  // dio en esta conversación). Opcional para no romper llamadores con filas
+  // parciales; si falta se asume false.
+  direccion_de_historial?: boolean | null;
 };
 
 /**
@@ -409,7 +414,13 @@ export async function enviarResumenYPedirConfirmacion(
   // la dio en este), lo avisamos para que pueda corregirla si cambió.
   direccionInyectadaDeHistorial: boolean = false,
 ): Promise<boolean> {
-  const mensaje = construirResumenPedido(pedidoDB, esModificacion, direccionInyectadaDeHistorial);
+  // El aviso sale si la inyección pasó en ESTE turno (parámetro) O si quedó
+  // persistida en la fila (direccion_de_historial): con borradores parciales la
+  // inyección suele ocurrir turnos antes de que el resumen finalmente salga, y
+  // la variable local de aquel turno ya no existe. También cubre el reenvío de
+  // resúmenes del cron, que reconstruye todo desde la fila.
+  const avisoHistorial = direccionInyectadaDeHistorial || Boolean(pedidoDB.direccion_de_historial);
+  const mensaje = construirResumenPedido(pedidoDB, esModificacion, avisoHistorial);
 
   const ok = await enviarMensajeConBotones(numeroCliente, mensaje, [
     { id: `confirmar_borrador_${pedidoDB.id}`, title: 'Sí, confirmar' },

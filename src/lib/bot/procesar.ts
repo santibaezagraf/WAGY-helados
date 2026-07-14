@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
-import { atencionHumanaActiva } from '@/lib/bot/atencion-humana';
+import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
+import { esBorradorCompleto } from '@/lib/bot/borradores';
 import { obtenerListaPreciosPublica, formatearPreciosWhatsApp } from '@/lib/precios-publico';
 
 const supabaseAdmin = createClient<Database>(
@@ -415,14 +416,38 @@ export type PedidoActivoContext = {
 };
 
 /**
+ * ¿El pedido ya salió al cliente? Es TRUE con CUALQUIERA de las dos señales:
+ *
+ *   - estado === 'enviado': lo marca el usuario a mano en el dashboard, y muchas
+ *     veces tarde (a veces recién al día siguiente).
+ *   - enviado === true: se marca solo al copiar desde el sistema el mensaje para
+ *     el cadete (copiar == "ya lo despaché"). Es la señal TEMPRANA y confiable.
+ *
+ * Por eso hay que mirar ambas, no solo el estado: entre que se copia el mensaje
+ * (enviado=true) y que mueven el estado a 'enviado' hay una ventana en la que el
+ * pedido YA salió pero estado sigue en 'pendiente'. Tratarlo como despachado en
+ * esa ventana evita que el bot deje cancelar/modificar algo que ya está en camino.
+ *
+ * LA CANCELACIÓN GANA SIEMPRE: si estado='cancelado' devolvemos false aunque
+ * enviado=true. patchConEnviadoCoherente ya fuerza enviado=false al cancelar
+ * desde el dashboard, pero las cancelaciones del bot (auto-rechazo y cancelación
+ * colgada en /api/gestionar-borradores) NO limpian el booleano, así que podría
+ * quedar un enviado=true colgado sobre un cancelado. Sin este cortocircuito eso
+ * re-introduciría el viejo bug de "tu pedido ya fue despachado" sobre algo que
+ * el cliente canceló — y además un cancelado no está "en camino" por definición.
+ */
+export function estaDespachado(p: { estado?: string | null; enviado?: boolean | null }): boolean {
+  if (p.estado === 'cancelado') return false;
+  return p.estado === 'enviado' || p.enviado === true;
+}
+
+/**
  * Construye el SYSTEM_PROMPT que se le pasa a Groq, dependiendo de si hay
  * un pedido activo y en qué estado está. Exportado para que el endpoint de
  * dev pueda reproducir el mismo contexto que el flujo real.
  */
 export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): string {
-  const pedidoEnviado = Boolean(
-    pedidoActivo && (pedidoActivo.estado === 'enviado' || pedidoActivo.enviado === true)
-  );
+  const pedidoEnviado = Boolean(pedidoActivo && estaDespachado(pedidoActivo));
   const tieneBorrador = pedidoActivo && pedidoActivo.estado === 'borrador';
   const yaExisteEnCocina = pedidoActivo && pedidoActivo.estado === 'pendiente' && !pedidoEnviado;
   const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
@@ -455,13 +480,13 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si está seguro de cancelar.
       - "confirmar_cancelacion": el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "exacto", "sí, cancelar").
       - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar, SIN aportar ningún dato del pedido (ej: "no", "no, pará", "me equivoqué", "dejalo así"). OJO: si además trae cambios concretos (cantidades, sabores, dirección, pago), NO uses esta opción — usá "datos_pedido" (el sistema entiende que no quiere cancelar Y aplica los cambios).
-      - "saludo": el mensaje es ÚNICAMENTE un saludo, sin pista sobre la cancelación.
+      - "saludo": SOLO si el mensaje es un saludo o cortesía reconocible y nada más (ej: "hola", "buenas", "buen día", "gracias"). Un mensaje sin sentido, off-topic o que no encaja en ninguna de las otras opciones NO es un saludo → usá "datos_pedido".
       - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
       - "datos_pedido": cualquier otra cosa. Incluye mensajes que rechazan la cancelación PERO traen cambios concretos (ej: "no, mejor sumale 5 de agua" → datos_pedido con cantidad_agua=5/sumar).
       ` : `
       - "cancelar": el cliente pide explícitamente cancelar, anular, dar de baja, o dice "ya no quiero el pedido" / "fue mentira".
       - "confirmar": ${tieneBorrador ? `el cliente acepta el resumen (ej: "sí", "dale", "está bien", "confirmo").` : `NO APLICA en este estado (el pedido no está en borrador).`}
-      - "saludo": el mensaje es ÚNICAMENTE un saludo, sin datos del pedido.
+      - "saludo": SOLO si el mensaje es un saludo o cortesía reconocible y nada más (ej: "hola", "buenas", "buen día", "gracias"). Un mensaje sin sentido, off-topic o que no encaja en ninguna de las otras opciones NO es un saludo → usá "datos_pedido" (el default).
       - "modificar_sin_datos": el cliente quiere cambiar el pedido pero NO aporta NINGÚN dato concreto (ej: "quiero cambiar algo", "modificar"). Si menciona sabores, cantidades, dirección o pago, NO uses esta opción — usá "datos_pedido".
       - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos nuevos del pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
       - "datos_pedido": el cliente trae info concreta del pedido (cantidades, sabores, dirección, pago), incluso para modificar uno existente. Default cuando no aplique ninguna otra.
@@ -547,53 +572,123 @@ const DEFER_THRESHOLD_MS = 5000;
  * Se comparte entre el armado de un pedido nuevo y la actualización de un
  * borrador todavía incompleto, así el texto es idéntico en ambos caminos.
  */
-async function pedirDatosFaltantes(
+// Exportada porque también la usa el cron /api/gestionar-borradores para
+// re-pedir el dato faltante de un borrador parcial abandonado (recordatorio
+// one-shot). Devuelve si el envío a Meta salió bien, para que el cron solo
+// marque `recordatorio_enviado` en ese caso (igual que el recordatorio completo).
+export async function pedirDatosFaltantes(
   numeroCliente: string,
   faltaCantidad: boolean,
   faltaDireccion: boolean,
   faltaPago: boolean,
-) {
+): Promise<boolean> {
   console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}`);
 
   // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
   const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago);
 
   if (respuesta.tipo === 'botones_pago') {
-    await enviarMensajeConBotones(numeroCliente, "¿Cómo lo pagás? 💰", [
+    return enviarMensajeConBotones(numeroCliente, "¿Cómo lo pagás? 💰", [
       { id: 'resp_pago_efectivo', title: 'Efectivo' },
       { id: 'resp_pago_transferencia', title: 'Transferencia' },
     ]);
-    return;
   }
 
   if (respuesta.tipo === 'boton_retira') {
     // Si falta solo la dirección es porque tampoco hay histórica (la inyección
     // ya corrió). Pedimos calle y número; el botón cubre el caso retiro sin que
     // lo tenga que escribir.
-    await enviarMensajeConBotones(
+    return enviarMensajeConBotones(
       numeroCliente,
       "¿A qué dirección te lo llevamos? Mandame calle y número (ej: *Mitre 950*) 🛵",
       [{ id: 'resp_retira', title: 'Paso a retirar' }],
     );
-    return;
   }
 
-  await enviarMensajeWhatsApp(numeroCliente, respuesta.mensaje);
+  return enviarMensajeWhatsApp(numeroCliente, respuesta.mensaje);
+}
+
+/**
+ * Fallback del índice único pedidos_un_borrador_por_telefono: si un INSERT de
+ * borrador rebota con 23505, ya existe un borrador para ese teléfono que el
+ * lookup de pedidoActivo no vio (zombie fuera de la ventana de 12h, o una
+ * carrera). En vez de perder los datos del mensaje, los fusionamos sobre el
+ * borrador existente: lo que vino en este turno pisa, lo que no vino se
+ * conserva. Devuelve la fila fusionada, o null si no se pudo (el borrador
+ * desapareció entre el conflicto y el update — caso rarísimo; el caller loguea).
+ */
+async function fusionarEnBorradorExistente(
+  numeroCliente: string,
+  entrante: {
+    direccion: string;
+    aclaracion: string | null;
+    cantidad_agua: number;
+    cantidad_crema: number;
+    observaciones: string | null;
+    observaciones_detalle: Json | null;
+    metodo_pago: string;
+    direccion_de_historial: boolean;
+  },
+) {
+  const { data: existente } = await supabaseAdmin
+    .from('pedidos')
+    .select('*')
+    .eq('telefono', numeroCliente)
+    .eq('estado', 'borrador')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!existente) return null;
+
+  const { data: fusionado } = await supabaseAdmin
+    .from('pedidos')
+    .update({
+      cantidad_agua: entrante.cantidad_agua > 0 ? entrante.cantidad_agua : existente.cantidad_agua,
+      cantidad_crema: entrante.cantidad_crema > 0 ? entrante.cantidad_crema : existente.cantidad_crema,
+      direccion: entrante.direccion || existente.direccion,
+      // El flag de dirección histórica sigue a la dirección que quedó.
+      direccion_de_historial: entrante.direccion
+        ? entrante.direccion_de_historial
+        : existente.direccion_de_historial,
+      aclaracion: entrante.aclaracion ?? existente.aclaracion,
+      observaciones: entrante.observaciones ?? existente.observaciones,
+      observaciones_detalle: entrante.observaciones_detalle ?? existente.observaciones_detalle,
+      metodo_pago: entrante.metodo_pago || existente.metodo_pago,
+    })
+    .eq('id', existente.id)
+    .eq('estado', 'borrador') // guard: sigue siendo borrador
+    .select('*')
+    .maybeSingle();
+
+  if (fusionado) {
+    console.log(`🔀 Borrador duplicado evitado: fusionado sobre el existente ${existente.id}.`);
+  }
+  return fusionado;
 }
 
 export async function procesarMensajesDeCliente(numeroCliente: string) {
   // 0.bis TOMA HUMANA (defensa): el webhook ya no agenda wake-ups durante una
   //    toma humana, pero pudo quedar uno agendado de antes de iniciarla. Si la
-  //    toma está activa, reclamamos los pendientes (procesado=true) para que no
-  //    queden colgados ni disparen wake-ups futuros, pero NO respondemos.
-  if (await atencionHumanaActiva(numeroCliente)) {
+  //    toma está activa — o el último saliente fue de un OPERADOR hace <6h
+  //    (gate por mensajes, misma red de seguridad que aplica el webhook) —,
+  //    reclamamos los pendientes (procesado=true) para que no queden colgados
+  //    ni disparen wake-ups futuros, pero NO respondemos.
+  const tomaActiva = await atencionHumanaActiva(numeroCliente);
+  const operadorReciente = !tomaActiva && await intervencionHumanaReciente(numeroCliente);
+  if (tomaActiva || operadorReciente) {
     await supabaseAdmin
       .from('mensajes_chat')
       .update({ procesado: true })
       .eq('telefono', numeroCliente)
       .eq('rol', 'cliente')
       .eq('procesado', false);
-    console.log(`🙋 Toma humana activa para ${numeroCliente}. El bot no responde.`);
+    if (operadorReciente) {
+      // Sin toma activa nadie está mirando el chat: avisamos al operador que
+      // el cliente escribió y el bot se abstuvo.
+      await marcarRequiereAtencion(numeroCliente);
+    }
+    console.log(`🙋 ${tomaActiva ? 'Toma humana activa' : 'Último saliente de operador hace <6h'} para ${numeroCliente}. El bot no responde.`);
     return;
   }
 
@@ -686,22 +781,27 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   // o "ya canceleste hace un rato". Lo usamos solo si la última acción del
   // cliente fue un despacho — si después de eso canceló (u otro evento), su
   // "estado actual" ya no es el del despacho y caemos al saludo genérico.
+  //
+  // "Despachado" = estado='enviado' O enviado=true (ver estaDespachado): el
+  // query de pedidoActivo de arriba excluye enviado=true, así que un pedido ya
+  // copiado al cadete pero con estado todavía en 'pendiente' cae acá y lo
+  // reconocemos igual como despachado.
   let ultimoPedidoEnviado: { id: number; estado: string; created_at: string } | null = null;
   if (!pedidoActivo) {
     const { data: ultimoPedido } = await supabaseAdmin
       .from('pedidos')
-      .select('id, estado, created_at')
+      .select('id, estado, enviado, created_at')
       .eq('telefono', numeroCliente)
       .gte('created_at', hace12Horas)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (ultimoPedido?.estado === 'enviado') {
+    if (ultimoPedido && estaDespachado(ultimoPedido)) {
       ultimoPedidoEnviado = ultimoPedido;
-      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado enviado. Lo uso para respuestas contextuales.`);
+      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) ya está despachado (estado=${ultimoPedido.estado}, enviado=${ultimoPedido.enviado}). Lo uso para respuestas contextuales.`);
     } else if (ultimoPedido) {
-      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado ${ultimoPedido.estado}; no aplica respuesta contextual de despacho.`);
+      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado ${ultimoPedido.estado} (enviado=${ultimoPedido.enviado}); no aplica respuesta contextual de despacho.`);
     }
   }
 
@@ -771,9 +871,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   console.log(`🤖 Texto final agrupado para la IA (${numeroCliente}):\n${historialParaIA}`);
 
-  const pedidoEnviado = Boolean(
-    pedidoActivo && (pedidoActivo.estado === 'enviado' || pedidoActivo.enviado === true)
-  );
+  const pedidoEnviado = Boolean(pedidoActivo && estaDespachado(pedidoActivo));
 
   console.log("🔍 Ultimo pedido encontrado para el cliente:", pedidoActivo);
   console.log(`¿El pedido ya fue enviado? ${pedidoEnviado}`);
@@ -1103,6 +1201,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             cantidad_agua: pedido.cantidad_agua ?? pedidoActivo.cantidad_agua,
             cantidad_crema: pedido.cantidad_crema ?? pedidoActivo.cantidad_crema,
             direccion: pedido.direccion ?? pedidoActivo.direccion,
+            // Dirección nueva del cliente → deja de ser la del historial.
+            ...(pedido.direccion && pedido.direccion !== pedidoActivo.direccion
+              ? { direccion_de_historial: false }
+              : {}),
             aclaracion: pedido.aclaracion ?? pedidoActivo.aclaracion,
             observaciones: pedido.observaciones,
             observaciones_detalle: pedido.observaciones_detalle,
@@ -1149,7 +1251,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     if (pedido.intencion === 'cancelar' && !pedidoActivo) {
       if (ultimoPedidoEnviado) {
         await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya está en camino, no podemos cancelarlo 🛵");
-        console.log(`ℹ️ Cliente intentó cancelar pero el pedido ${ultimoPedidoEnviado.id} ya está enviado.`);
+        console.log(`ℹ️ Cliente intentó cancelar pero el pedido ${ultimoPedidoEnviado.id} ya está despachado.`);
         // La conversación sobre ese pedido se cerró. Descartamos el historial
         // para que próximos mensajes no se mezclen con este intento.
         await marcarHistorialDescartado(numeroCliente);
@@ -1160,16 +1262,49 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       return;
     }
 
+    // Modificación de un pedido ya despachado (sin pedidoActivo): el pedido ya
+    // salió, no se puede tocar. Mismo criterio que la cancelación de un
+    // despachado. "Despachado" incluye enviado=true con estado='pendiente' (el
+    // usuario copió el mensaje al cadete pero todavía no movió el estado a mano).
+    // Limitación conocida: dentro de la ventana de 12h no podemos distinguir
+    // "sumale 10 a lo que pedí" de "quiero pedir de nuevo", así que un pedido
+    // NUEVO también se rebota hasta que el despachado sale de la ventana.
+    if (pedido.intencion === 'datos_pedido' && !pedidoActivo && ultimoPedidoEnviado) {
+      await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya está en camino, no se puede modificar 🛵");
+      console.log(`ℹ️ Cliente intentó modificar pero el pedido ${ultimoPedidoEnviado.id} ya está despachado.`);
+      // Cerramos la conversación de ese pedido para que no se mezcle después.
+      await marcarHistorialDescartado(numeroCliente);
+      return;
+    }
+
     // 2. SALUDO
     if (pedido.intencion === 'saludo') {
       if (yaExisteEnCocina) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en preparación. ¿Querés modificar algo?");
       } else if (tieneBorrador) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tenés un pedido en pausa esperando confirmación. ¿Está bien? Respondé *SÍ* o *NO*");
+        if (pedidoCompleto) {
+          // Hay un resumen pendiente de confirmar: re-ofrecemos los MISMOS
+          // botones del resumen (Sí, confirmar / No, modificar) para que
+          // confirme con un toque. El "sí"/"no" escrito a mano sigue andando
+          // igual (lo clasifica el LLM), así que damos las dos vías.
+          await enviarMensajeConBotones(
+            numeroCliente,
+            "¡Hola! 👋 Tenés un pedido en pausa esperando confirmación. ¿Está todo bien? Tocá un botón o escribime *SÍ* / *NO*.",
+            [
+              { id: `confirmar_borrador_${pedidoActivo!.id}`, title: 'Sí, confirmar' },
+              { id: `modificar_borrador_${pedidoActivo!.id}`, title: 'No, modificar' },
+            ],
+          );
+        } else {
+          // Borrador parcial: todavía no hay nada que confirmar (ofrecer
+          // "confirmar" acá haría 0 filas). Saludamos y re-pedimos lo que falta.
+          await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tengo tu pedido en armado, me falta un dato para cerrarlo:");
+          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+        }
       } else if (esperandoCancelacion) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido está por cancelarse. ¿Confirmás? *SÍ* o *NO*");
       } else if (ultimoPedidoEnviado) {
-        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en camino 🛵 ¿Hacés otro?");
+        await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en camino 🛵");
       } else {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 ¿Qué te gustaría pedir?");
       }
@@ -1217,6 +1352,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           cantidad_agua: aguaFinal,
           cantidad_crema: cremaFinal,
           direccion: dirFinal,
+          // Si el cliente cambió la dirección, ya no es la del historial: el
+          // aviso "usé tu última dirección" deja de corresponder.
+          ...(dirFinal !== pedidoActivo.direccion ? { direccion_de_historial: false } : {}),
           aclaracion: aclaracionFinal,
           // pedido.observaciones ya es la proyección del merge (slots sembrados
           // desde lo actual), así que NO usamos `?? pedidoActivo.observaciones`:
@@ -1282,12 +1420,41 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             observaciones: pedido.observaciones,
             observaciones_detalle: pedido.observaciones_detalle,
             metodo_pago: pagoFinal,
-            estado: 'borrador'
+            estado: 'borrador',
+            direccion_de_historial: direccionInyectadaDeHistorial,
           }])
           .select('id')
           .single();
 
-        if (errorParcial) {
+        if (errorParcial?.code === '23505') {
+          // Índice único de borradores: ya hay uno que el lookup no vio.
+          // Fusionamos este mensaje sobre él y seguimos el flujo con la fila
+          // fusionada (que puede haber quedado completa).
+          const fusionado = await fusionarEnBorradorExistente(numeroCliente, {
+            direccion: dirFinal,
+            aclaracion: aclaracionFinal,
+            cantidad_agua: aguaFinal,
+            cantidad_crema: cremaFinal,
+            observaciones: pedido.observaciones,
+            observaciones_detalle: pedido.observaciones_detalle,
+            metodo_pago: pagoFinal,
+            direccion_de_historial: direccionInyectadaDeHistorial,
+          });
+          if (fusionado) {
+            if (esBorradorCompleto(fusionado)) {
+              await enviarResumenYPedirConfirmacion(numeroCliente, fusionado, true);
+              return;
+            }
+            await pedirDatosFaltantes(
+              numeroCliente,
+              !(fusionado.cantidad_agua > 0 || fusionado.cantidad_crema > 0),
+              !fusionado.direccion,
+              !fusionado.metodo_pago,
+            );
+            return;
+          }
+          console.error("❌ Conflicto de borrador único pero no se pudo fusionar (¿desapareció en el medio?).");
+        } else if (errorParcial) {
           console.error("❌ Error creando el borrador parcial:", errorParcial);
         } else {
           console.log(`💾 Borrador parcial creado (id ${parcial?.id}). Falta: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}.`);
@@ -1311,6 +1478,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             cantidad_agua: aguaFinal,
             cantidad_crema: cremaFinal,
             direccion: dirFinal,
+            ...(dirFinal !== pedidoActivo.direccion ? { direccion_de_historial: false } : {}),
             aclaracion: aclaracionFinal,
             observaciones: pedido.observaciones,
             observaciones_detalle: pedido.observaciones_detalle,
@@ -1339,7 +1507,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             observaciones: pedido.observaciones,
             observaciones_detalle: pedido.observaciones_detalle,
             metodo_pago: pagoFinal,
-            estado: 'borrador'
+            estado: 'borrador',
+            direccion_de_historial: direccionInyectadaDeHistorial,
           }])
           .select('*')
           .single();
@@ -1347,6 +1516,21 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         if (!insertError) {
           borradorDB = insertData;
           console.log("💾 Pedido creado en DB:", borradorDB);
+        } else if (insertError.code === '23505') {
+          // Índice único de borradores: fusionamos sobre el existente. Como el
+          // mensaje traía datos completos, la fila fusionada queda completa y
+          // el resumen sale abajo como siempre.
+          borradorDB = await fusionarEnBorradorExistente(numeroCliente, {
+            direccion: dirFinal,
+            aclaracion: aclaracionFinal,
+            cantidad_agua: aguaFinal,
+            cantidad_crema: cremaFinal,
+            observaciones: pedido.observaciones,
+            observaciones_detalle: pedido.observaciones_detalle,
+            metodo_pago: pagoFinal,
+            direccion_de_historial: direccionInyectadaDeHistorial,
+          });
+          if (!borradorDB) console.error("❌ Conflicto de borrador único pero no se pudo fusionar (¿desapareció en el medio?).");
         } else {
           console.error("❌ Error al crear el pedido en la base de datos:", insertError);
         }

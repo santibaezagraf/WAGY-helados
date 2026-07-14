@@ -10,6 +10,7 @@ import {
   normalizarTextoShortCircuit,
   intentarShortCircuit,
   elegirRespuestaDatosFaltantes,
+  estaDespachado,
   type PedidoActivoContext,
 } from './procesar';
 
@@ -271,5 +272,41 @@ describe('elegirRespuestaDatosFaltantes', () => {
       expect(r.mensaje).toContain('Dirección de envío');
       expect(r.mensaje).toContain('Forma de pago');
     }
+  });
+});
+
+describe('estaDespachado', () => {
+  it('estado="enviado" → despachado (aunque enviado sea false/null)', () => {
+    expect(estaDespachado({ estado: 'enviado', enviado: false })).toBe(true);
+    expect(estaDespachado({ estado: 'enviado', enviado: null })).toBe(true);
+  });
+
+  it('enviado=true → despachado aunque el estado todavía sea "pendiente"', () => {
+    // Caso central: se copió el mensaje al cadete (enviado=true) pero nadie
+    // movió el estado a mano todavía.
+    expect(estaDespachado({ estado: 'pendiente', enviado: true })).toBe(true);
+  });
+
+  it('pendiente sin enviar → no despachado', () => {
+    expect(estaDespachado({ estado: 'pendiente', enviado: false })).toBe(false);
+  });
+
+  it('borrador / esperando_cancelacion sin enviar → no despachado', () => {
+    expect(estaDespachado({ estado: 'borrador', enviado: false })).toBe(false);
+    expect(estaDespachado({ estado: 'esperando_cancelacion', enviado: null })).toBe(false);
+  });
+
+  it('cancelado con enviado ausente → no despachado (patchConEnviadoCoherente fuerza enviado=false)', () => {
+    expect(estaDespachado({ estado: 'cancelado' })).toBe(false);
+  });
+
+  it('la cancelación gana: cancelado + enviado=true colgado → NO despachado', () => {
+    // Defensa contra un enviado=true que quedó sin limpiar al cancelar desde el
+    // bot: no queremos re-disparar el viejo bug de "ya fue despachado".
+    expect(estaDespachado({ estado: 'cancelado', enviado: true })).toBe(false);
+  });
+
+  it('campos ausentes → no despachado', () => {
+    expect(estaDespachado({})).toBe(false);
   });
 });

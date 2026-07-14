@@ -41,7 +41,7 @@ async function reenviarPendientes() {
 
   const { data: pendientes, error } = await supabaseAdmin
     .from('pedidos')
-    .select('id, telefono, cantidad_crema, cantidad_agua, observaciones, direccion, aclaracion, metodo_pago, precio_total')
+    .select('id, telefono, cantidad_crema, cantidad_agua, observaciones, direccion, aclaracion, metodo_pago, precio_total, direccion_de_historial')
     .eq('estado', 'borrador')
     .eq('resumen_pendiente', true)
     .gte('created_at', desde);
