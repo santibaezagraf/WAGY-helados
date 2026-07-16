@@ -10,6 +10,7 @@ import {
   AUTO_RECHAZO_HORAS,
   CANCELACION_SILENCIO_HORAS,
 } from '@/lib/bot/borradores';
+import { cronAutorizado } from '@/lib/auth-cron';
 
 /**
  * Gestión de borradores silenciosos. Reemplaza a la vieja auto-confirmación
@@ -55,7 +56,7 @@ import {
  * Ambos pasos saltean teléfonos con mensajes sin procesar (hay un wake-up de
  * QStash en vuelo: ese flow decide, no le pisamos el resultado).
  *
- * Auth: ?token=... comparado contra VERIFY_TOKEN, igual que /api/reenviar-resumenes.
+ * Auth: header `Authorization: Bearer <CRON_SECRET>` (ver auth-cron.ts).
  *
  * Programación (pg_cron + pg_net en Supabase, manual como el reenvío de resúmenes).
  * OJO: la expresión cron es cada 5 minutos, SIN el espacio entre * y / — acá va
@@ -63,8 +64,8 @@ import {
  *   select cron.schedule(
  *     'gestionar-borradores', '* /5 * * * *',
  *     $$ select net.http_post(
- *          url := 'https://TU-APP/api/gestionar-borradores?token=EL_VERIFY_TOKEN',
- *          headers := '{"Content-Type":"application/json"}'::jsonb,
+ *          url := 'https://TU-APP/api/gestionar-borradores',
+ *          headers := '{"Content-Type":"application/json","Authorization":"Bearer EL_CRON_SECRET"}'::jsonb,
  *          body := '{}'::jsonb) $$
  *   );
  */
@@ -287,8 +288,7 @@ async function gestionarBorradores() {
 }
 
 export async function POST(request: Request) {
-  const token = new URL(request.url).searchParams.get('token');
-  if (!process.env.VERIFY_TOKEN || token !== process.env.VERIFY_TOKEN) {
+  if (!cronAutorizado(request)) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
   }
   return gestionarBorradores();

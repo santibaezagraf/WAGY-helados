@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
 import { enviarResumenYPedirConfirmacion } from '@/lib/whatsapp';
+import { cronAutorizado } from '@/lib/auth-cron';
 
 /**
  * Reenvío de resúmenes que no llegaron al cliente (mitigación de cortes largos
@@ -14,14 +15,14 @@ import { enviarResumenYPedirConfirmacion } from '@/lib/whatsapp';
  * pendientes. El resumen es reconstruible desde la fila de `pedidos`, por eso se
  * puede reenviar (otros mensajes sueltos del bot no).
  *
- * Auth: ?token=... comparado contra VERIFY_TOKEN, igual que /api/webhook/notificacion.
+ * Auth: header `Authorization: Bearer <CRON_SECRET>` (ver auth-cron.ts).
  *
  * Programación (pg_cron + pg_net en Supabase):
  *   select cron.schedule(
  *     'reenviar-resumenes-pendientes', '* / 2 * * * *',
  *     $$ select net.http_post(
- *          url := 'https://TU-APP/api/reenviar-resumenes?token=EL_VERIFY_TOKEN',
- *          headers := '{"Content-Type":"application/json"}'::jsonb,
+ *          url := 'https://TU-APP/api/reenviar-resumenes',
+ *          headers := '{"Content-Type":"application/json","Authorization":"Bearer EL_CRON_SECRET"}'::jsonb,
  *          body := '{}'::jsonb) $$
  *   );
  */
@@ -68,8 +69,7 @@ async function reenviarPendientes() {
 }
 
 export async function POST(request: Request) {
-  const token = new URL(request.url).searchParams.get('token');
-  if (!process.env.VERIFY_TOKEN || token !== process.env.VERIFY_TOKEN) {
+  if (!cronAutorizado(request)) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
   }
   return reenviarPendientes();
