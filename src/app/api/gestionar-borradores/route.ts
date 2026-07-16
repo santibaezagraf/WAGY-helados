@@ -194,9 +194,11 @@ async function gestionarBorradores() {
         { id: `modificar_borrador_${p.id}`, title: 'No, modificar' },
       ]);
       if (ok) {
+        // Ronda nueva de botones: armamos el token de un solo uso para que
+        // ejecutarBoton procese solo el primer click (ver botones.ts).
         await supabaseAdmin
           .from('pedidos')
-          .update({ recordatorio_enviado: true })
+          .update({ recordatorio_enviado: true, esperando_respuesta_boton: true })
           .eq('id', p.id);
         recordados++;
       }

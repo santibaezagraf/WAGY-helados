@@ -1,9 +1,12 @@
 'use server'
 
+import { revalidatePath, updateTag } from 'next/cache'
 import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { Database } from '@/types/supabase'
+import { Pedido } from '@/types/pedidos'
 import { createClient as createUserClient } from '@/lib/supabase-server'
-import { enviarMensajeManual } from '@/lib/whatsapp'
+import { enviarMensajeManual, enviarResumenYPedirConfirmacion } from '@/lib/whatsapp'
+import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
 import {
   activarAtencionHumana,
   desactivarAtencionHumana,
@@ -202,4 +205,106 @@ export async function getEstadoAtencion(telefono: string): Promise<{ activa: boo
 export async function finalizarAtencion(telefono: string): Promise<void> {
   await exigirUsuario()
   await desactivarAtencionHumana(telefono)
+}
+
+/**
+ * Pedido "vigente" del teléfono para el panel del chat modal: el más reciente
+ * en armado o en cocina. Misma ventana y filtros que el lookup de pedidoActivo
+ * del bot (12h, estados intervenibles, enviado=false), así el panel muestra
+ * exactamente el pedido sobre el que el bot va a actuar — editar/mandar el
+ * resumen de otro pedido generaría botones apuntando a una orden que el bot
+ * no reconoce como activa.
+ */
+export async function getPedidoActivoChat(telefono: string): Promise<Pedido | null> {
+  await exigirUsuario()
+
+  const hace12Horas = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString()
+  const { data, error } = await supabaseAdmin
+    .from('pedidos')
+    .select('*')
+    .eq('telefono', telefono)
+    .gte('created_at', hace12Horas)
+    .in('estado', ['borrador', 'pendiente', 'esperando_cancelacion'])
+    .eq('enviado', false)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    console.error('⚠️ No se pudo traer el pedido activo del chat:', error.message)
+    return null
+  }
+  return data
+}
+
+/**
+ * Envía manualmente el resumen del pedido con los botones de confirmación
+ * (Sí, confirmar / No, modificar) y le devuelve el control del chat al bot.
+ *
+ * Caso de uso: el operador corrigió datos que la extracción de la IA falló, o
+ * cargó un precio especial (promo / caso fuera de la lista) desde el modal de
+ * edición — el precio manual sobrevive a updates posteriores del bot porque el
+ * trigger procesar_pedido_final solo re-lista los montos cuando CAMBIAN las
+ * cantidades. Después de eso el flujo vuelve a ser el normal: el cliente
+ * confirma con el botón, o pide cambios y los sigue manejando el bot.
+ *
+ * El UPDATE lleva los mismos guards que usa el bot: solo estados intervenibles,
+ * nunca un despachado (enviado=true), solo el pedido del teléfono del chat, y
+ * completitud (un resumen de un borrador parcial mostraría campos vacíos).
+ * Pase lo que pase con el estado previo, el pedido queda en 'borrador': el
+ * resumen ofrece "confirmar", y el botón de confirmar solo actúa sobre borradores.
+ */
+export async function enviarResumenManualAccion(
+  pedidoId: number,
+  telefono: string,
+): Promise<{ ok: boolean; motivo?: string }> {
+  await exigirUsuario()
+
+  const { data: fila, error } = await supabaseAdmin
+    .from('pedidos')
+    .update({ estado: 'borrador' })
+    .eq('id', pedidoId)
+    .eq('telefono', telefono)
+    .in('estado', ['borrador', 'pendiente', 'esperando_cancelacion'])
+    .neq('enviado', true)
+    .neq('direccion', '')
+    .neq('metodo_pago', '')
+    .or('cantidad_agua.gt.0,cantidad_crema.gt.0')
+    .select('*')
+    .maybeSingle()
+
+  if (error) {
+    console.error('⚠️ No se pudo preparar el pedido para el resumen manual:', error.message)
+    return { ok: false, motivo: 'Error al actualizar el pedido.' }
+  }
+  if (!fila) {
+    // 0 filas = algún guard falló: pedido despachado/cancelado en el medio,
+    // de otro teléfono, o incompleto.
+    return {
+      ok: false,
+      motivo: 'El pedido ya no se puede confirmar (¿está incompleto, despachado o cancelado?). Recargá el chat.',
+    }
+  }
+
+  const enviado = await enviarResumenYPedirConfirmacion(telefono, fila, true)
+  if (!enviado) {
+    // enviarResumenYPedirConfirmacion ya dejó resumen_pendiente=true (el cron
+    // /api/reenviar-resumenes reintenta), pero el operador tiene que saber que
+    // el cliente todavía no vio nada.
+    return {
+      ok: false,
+      motivo: 'No se pudo enviar el resumen (¿ventana de 24 h vencida?). Queda marcado para reintento automático.',
+    }
+  }
+
+  // Resumen afuera → el bot retoma la conversación. La desactivación explícita
+  // (activa=false con updated_at nuevo) también satisface el gate por mensajes:
+  // sin esto, el último saliente de operador <6h dejaría al bot mudo justo
+  // cuando el cliente responde al resumen.
+  await desactivarAtencionHumana(telefono)
+
+  // El estado pudo cambiar (pendiente → borrador): refrescamos el listado.
+  revalidatePath('/')
+  updateTag(PEDIDOS_TAG)
+  return { ok: true }
 }

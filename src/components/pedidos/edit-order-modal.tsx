@@ -8,19 +8,26 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { createClient } from "@/lib/supabase-client"
 import { Pedido } from "@/types/pedidos"
-import { Check, Clock, X, IceCream, Droplet, Banknote, CreditCard } from "lucide-react"
+import { Check, Clock, X, IceCream, Droplet, Banknote, CreditCard, FileText } from "lucide-react"
 import { calcularPreciosUnitarios, obtenerReglasListaActiva, ReglaPrecios } from "@/lib/precio-utils"
 import { Logo } from "@/components/ui/logo"
 import { actualizarPedidoCompleto } from "@/lib/actions/pedidos"
 import { useRouter } from "next/navigation"
 
+// Estados que el modal permite ver/elegir. Incluye 'borrador' porque el chat
+// modal edita pedidos todavía en armado (sin él, el Select quedaba vacío y
+// guardar pisaba el estado del borrador).
+type EstadoEditable = "borrador" | "pendiente" | "enviado" | "cancelado"
+
 interface EditOrderModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   pedido: Pedido
+  /** Avisa al llamador que se guardó (p.ej. el chat modal refresca su panel). */
+  onSaved?: () => void
 }
 
-export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalProps) {
+export function EditOrderModal({ open, onOpenChange, pedido, onSaved }: EditOrderModalProps) {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   
   // Estados con valores iniciales del pedido
@@ -40,7 +47,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
   const [totalCremaEditado, setTotalCremaEditado] = React.useState<boolean>(false)
   const [totalAguaManualStr, setTotalAguaManualStr] = React.useState<string>("")
   const [totalCremaManualStr, setTotalCremaManualStr] = React.useState<string>("")
-  const [estado, setEstado] = React.useState<"pendiente" | "enviado" | "cancelado">("pendiente")
+  const [estado, setEstado] = React.useState<EstadoEditable>("pendiente")
   const [pagado, setPagado] = React.useState(false)
 
   // Estado para las reglas de precios
@@ -64,7 +71,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
       setPrecioUnitarioCrema(pedido.precio_unitario_crema)
       setTotalAguaManualStr(pedido.monto_total_agua?.toString() || "")
       setTotalCremaManualStr(pedido.monto_total_crema?.toString() || "")
-      setEstado(pedido.estado as "pendiente" | "enviado" | "cancelado")
+      setEstado(pedido.estado as EstadoEditable)
       setPagado(pedido.pagado || false)
       setTotalAguaEditado(true)
       setTotalCremaEditado(true)
@@ -145,6 +152,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
         monto_total_agua: parseInt(totalAgua || "0"),
         monto_total_crema: parseInt(totalCrema || "0"),
       })
+      onSaved?.()
       onOpenChange(false)
 
     } catch (error) {
@@ -153,7 +161,7 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
     } finally {
       setIsSubmitting(false)
     }
-  }, [pedido.id, direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, estado, pagado, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, onOpenChange, router])
+  }, [pedido.id, direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, estado, pagado, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, onOpenChange, onSaved, router])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -371,11 +379,15 @@ export function EditOrderModal({ open, onOpenChange, pedido }: EditOrderModalPro
               <Label htmlFor="estado" className="text-base font-semibold">
                 Estado
               </Label>
-              <Select value={estado} onValueChange={(value: "pendiente" | "enviado" | "cancelado") => setEstado(value)}>
+              <Select value={estado} onValueChange={(value: EstadoEditable) => setEstado(value)}>
                 <SelectTrigger className="h-12 text-base">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="borrador" className="gap-2 text-amber-700 hover:text-amber-800 hover:bg-amber-50 focus:bg-amber-50 focus:text-amber-800">
+                    <FileText className="inline h-4 w-4 text-amber-500 mx-1" />
+                    Borrador
+                  </SelectItem>
                   <SelectItem value="pendiente" className="gap-2 text-gray-700 hover:text-gray-800 hover:bg-gray-50 focus:bg-gray-50 focus:text-gray-800">
                     <Clock className="inline h-4 w-4 text-gray-500 mx-1" />
                     Pendiente

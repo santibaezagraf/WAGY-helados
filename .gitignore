@@ -13,6 +13,12 @@
 # testing
 /coverage
 
+# transcripts/informes del harness de testeo del bot (scripts/probar-bot.mjs)
+/informes-bot
+
+# worktrees locales de sesiones de Claude Code (no van al repo)
+.claude/worktrees/
+
 # next.js
 /.next/
 /out/

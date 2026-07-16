@@ -65,12 +65,48 @@ export function parsearBotonId(buttonId: string): { accion: BotonAccion; pedidoI
   return null;
 }
 
+/**
+ * Consume atómico del token de "una sola respuesta por ronda de botones".
+ *
+ * WhatsApp deja los dos botones de un par tocables para siempre y los clicks se
+ * ejecutan inline (sin el debounce + claim del texto), así que el cliente puede
+ * tocar AMBOS y disparar dos ejecuciones en paralelo. El bot arma
+ * esperando_respuesta_boton=true al mandar cada set de botones (ver whatsapp.ts);
+ * acá lo bajamos a false con un UPDATE guardado por su valor actual: solo la
+ * PRIMERA ejecución de la ronda lo gana (RETURNING trae fila). Las demás afectan
+ * 0 filas → no actúan y no mandan un segundo mensaje contradictorio.
+ *
+ * Devuelve true si esta ejecución ganó el token (debe seguir), false si no.
+ */
+async function consumirTokenRespuesta(numeroCliente: string, pedidoId: number): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('pedidos')
+    .update({ esperando_respuesta_boton: false })
+    .eq('id', pedidoId)
+    .eq('telefono', numeroCliente)
+    .eq('esperando_respuesta_boton', true)
+    .select('id')
+    .maybeSingle();
+  if (error) {
+    console.error(`❌ Error consumiendo token de respuesta del pedido ${pedidoId}:`, error);
+  }
+  return Boolean(data);
+}
+
 export async function ejecutarBoton(
   numeroCliente: string,
   accion: BotonAccion,
   pedidoId: number,
 ) {
   console.log(`🔘 Ejecutando acción de botón "${accion}" para pedido ${pedidoId} (cliente ${numeroCliente}).`);
+
+  // Un solo click por ronda: si otro click (el botón opuesto, o un doble-tap)
+  // ya consumió el token, esta ejecución sale sin hacer nada. Evita las dos
+  // respuestas simultáneas y el race de "modificar" pisando un "confirmar".
+  if (!(await consumirTokenRespuesta(numeroCliente, pedidoId))) {
+    console.log(`🚫 Click de botón "${accion}" sobre pedido ${pedidoId} ignorado: la ronda ya fue respondida.`);
+    return;
+  }
 
   switch (accion) {
     case 'confirmar_borrador':
@@ -111,12 +147,18 @@ async function buscarBorradorCompletoActivo(numeroCliente: string) {
 async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
   // Guard de completitud: un borrador parcial (armado a medias) usa '' de
   // placeholder en direccion/metodo_pago y puede tener cantidad 0. No se puede
-  // mandar a cocina así — el UPDATE lo exige con .neq('','')/.or(cantidad>0),
-  // de modo que un borrador incompleto afecta 0 filas y cae al fallback, que
-  // le pide al cliente completar en vez de confirmar por error.
-  const { data } = await supabaseAdmin
+  // mandar a cocina así.
+  //
+  // IMPORTANTE: la completitud se valida en un SELECT y recién después se hace
+  // el UPDATE de estado. No se puede meter `.or('cantidad_agua.gt.0,...')` en el
+  // UPDATE: postgrest-js serializa un `or=(...)` que sobre un PATCH revienta con
+  // error 42703 ("column pedidos.cantidad_agua does not exist") — funciona en
+  // SELECT pero NO en mutations. Como el código toma solo `data` (y `data` es
+  // null ante error), CUALQUIER confirmación caía al fallback y reenviaba el
+  // resumen en loop, sin mandar nunca el pedido a cocina.
+  const { data: candidato, error: errorCandidato } = await supabaseAdmin
     .from('pedidos')
-    .update({ estado: 'pendiente' })
+    .select('id')
     .eq('id', pedidoId)
     .eq('telefono', numeroCliente) // seguridad: solo el dueño puede confirmar
     .eq('estado', 'borrador')
@@ -124,8 +166,28 @@ async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
     .neq('direccion', '')
     .neq('metodo_pago', '')
     .or('cantidad_agua.gt.0,cantidad_crema.gt.0')
-    .select('id, direccion, metodo_pago')
     .maybeSingle();
+  if (errorCandidato) {
+    console.error(`❌ Error consultando completitud del pedido ${pedidoId} (confirmar_borrador):`, errorCandidato);
+  }
+
+  // UPDATE atómico sin `.or()`: la completitud ya la validó el SELECT de arriba.
+  // Los guards de estado/enviado siguen acá para atrapar la carrera con el cron
+  // o el repartidor entre el SELECT y el UPDATE (afecta 0 filas → fallback).
+  const { data, error } = candidato
+    ? await supabaseAdmin
+        .from('pedidos')
+        .update({ estado: 'pendiente' })
+        .eq('id', pedidoId)
+        .eq('telefono', numeroCliente)
+        .eq('estado', 'borrador')
+        .neq('enviado', true)
+        .select('id, direccion, metodo_pago')
+        .maybeSingle()
+    : { data: null, error: null };
+  if (error) {
+    console.error(`❌ Error confirmando pedido ${pedidoId} por botón:`, error);
+  }
 
   if (data) {
     await enviarMensajeWhatsApp(numeroCliente, mensajeConfirmacion(data.direccion, data.metodo_pago));
@@ -212,7 +274,7 @@ async function leerEstadoPedido(numeroCliente: string, pedidoId: number) {
 }
 
 async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
-  const { data } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('pedidos')
     .update({ estado: 'cancelado' })
     .eq('id', pedidoId)
@@ -221,6 +283,9 @@ async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
     .neq('enviado', true)
     .select('id')
     .maybeSingle();
+  if (error) {
+    console.error(`❌ Error cancelando pedido ${pedidoId} por botón:`, error);
+  }
 
   if (data) {
     await enviarMensajeWhatsApp(numeroCliente, "Pedido cancelado. Cuando quieras helado, acá estoy 👋");
@@ -247,7 +312,7 @@ async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
 }
 
 async function rechazarCancelacion(numeroCliente: string, pedidoId: number) {
-  const { data } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('pedidos')
     .update({ estado: 'borrador' })
     .eq('id', pedidoId)
@@ -255,6 +320,9 @@ async function rechazarCancelacion(numeroCliente: string, pedidoId: number) {
     .eq('estado', 'esperando_cancelacion')
     .select('*')
     .maybeSingle();
+  if (error) {
+    console.error(`❌ Error rechazando cancelación del pedido ${pedidoId} por botón:`, error);
+  }
 
   if (data) {
     await enviarResumenYPedirConfirmacion(numeroCliente, data, false);

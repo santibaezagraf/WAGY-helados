@@ -60,6 +60,7 @@ export const IntencionEnum = z.enum([
   'saludo',
   'modificar_sin_datos',
   'consultar_precios',
+  'consulta_negocio',
   'datos_pedido',
 ]);
 export type Intencion = z.infer<typeof IntencionEnum>;
@@ -454,8 +455,8 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
 
   if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
     const intencionesValidas = esperandoCancelacion
-      ? `"confirmar_cancelacion", "rechazar_cancelacion", "saludo", "consultar_precios", "datos_pedido"`
-      : `"cancelar", "confirmar", "saludo", "modificar_sin_datos", "consultar_precios", "datos_pedido"`;
+      ? `"confirmar_cancelacion", "rechazar_cancelacion", "saludo", "consultar_precios", "consulta_negocio", "datos_pedido"`
+      : `"cancelar", "confirmar", "saludo", "modificar_sin_datos", "consultar_precios", "consulta_negocio", "datos_pedido"`;
 
     const slots = leerSlots(pedidoActivo);
 
@@ -482,6 +483,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar, SIN aportar ningún dato del pedido (ej: "no", "no, pará", "me equivoqué", "dejalo así"). OJO: si además trae cambios concretos (cantidades, sabores, dirección, pago), NO uses esta opción — usá "datos_pedido" (el sistema entiende que no quiere cancelar Y aplica los cambios).
       - "saludo": SOLO si el mensaje es un saludo o cortesía reconocible y nada más (ej: "hola", "buenas", "buen día", "gracias"). Un mensaje sin sentido, off-topic o que no encaja en ninguna de las otras opciones NO es un saludo → usá "datos_pedido".
       - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
+      - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio o su pedido que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, demora de la entrega, un reclamo o problema con un pedido, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos del pedido, usá "datos_pedido".
       - "datos_pedido": cualquier otra cosa. Incluye mensajes que rechazan la cancelación PERO traen cambios concretos (ej: "no, mejor sumale 5 de agua" → datos_pedido con cantidad_agua=5/sumar).
       ` : `
       - "cancelar": el cliente pide explícitamente cancelar, anular, dar de baja, o dice "ya no quiero el pedido" / "fue mentira".
@@ -489,6 +491,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       - "saludo": SOLO si el mensaje es un saludo o cortesía reconocible y nada más (ej: "hola", "buenas", "buen día", "gracias"). Un mensaje sin sentido, off-topic o que no encaja en ninguna de las otras opciones NO es un saludo → usá "datos_pedido" (el default).
       - "modificar_sin_datos": el cliente quiere cambiar el pedido pero NO aporta NINGÚN dato concreto (ej: "quiero cambiar algo", "modificar"). Si menciona sabores, cantidades, dirección o pago, NO uses esta opción — usá "datos_pedido".
       - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos nuevos del pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
+      - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio o su pedido que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, demora de la entrega, un reclamo o problema con un pedido, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos del pedido, usá "datos_pedido".
       - "datos_pedido": el cliente trae info concreta del pedido (cantidades, sabores, dirección, pago), incluso para modificar uno existente. Default cuando no aplique ninguna otra.
       `}
 
@@ -522,10 +525,11 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
 
     1. INTENCIÓN DEL MENSAJE (campo "intencion", elegí UNA opción):
-    Valores válidos en este contexto: "cancelar", "saludo", "consultar_precios", "datos_pedido".
+    Valores válidos en este contexto: "cancelar", "saludo", "consultar_precios", "consulta_negocio", "datos_pedido".
     - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).
     - "saludo": el mensaje es ÚNICAMENTE un saludo (ej: "hola", "buenas"), sin datos del pedido.
     - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin dar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen los helados?"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
+    - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, un reclamo o problema con un pedido anterior, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos de un pedido, usá "datos_pedido".
     - "datos_pedido": el cliente trae info del pedido (cantidades, sabores, dirección, pago). Default cuando no aplique otra.
 
     2. REGLAS DE EXTRACCIÓN:
@@ -1047,6 +1051,31 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       return;
     }
 
+    // CONSULTA DE NEGOCIO: pregunta real sobre el negocio (horarios, zonas,
+    // sabores disponibles, stock, promos, mayorista, reclamos...) que el bot
+    // no sabe responder. Se DELEGA a un humano con el mismo mecanismo que los
+    // medias entrantes: requiere_atencion=true → punto ámbar + badge en el
+    // menú de conversaciones del dashboard. El pedido activo (si lo hay) queda
+    // intacto; igual que con precios, si el hilo esperaba una respuesta se lo
+    // recordamos para que la consulta no le pierda el pedido en el medio.
+    // El filtro "pregunta REAL vs sin sentido/off-topic" lo hace el prompt:
+    // mensajes nada que ver caen en datos_pedido y siguen el flujo normal.
+    if (pedido.intencion === 'consulta_negocio') {
+      console.log("🙋 Consulta de negocio que el bot no puede responder. Delegando a un humano.");
+      await marcarRequiereAtencion(numeroCliente);
+      let cola = '';
+      if (pedidoActivo?.estado === 'borrador') {
+        cola = '\n\n👆 Ojo: tu pedido sigue esperando tu confirmación. ¿Está todo bien? Respondé *SÍ* o *NO*.';
+      } else if (pedidoActivo?.estado === 'esperando_cancelacion') {
+        cola = '\n\n👆 Ojo: tenés una cancelación pendiente. ¿Cancelás el pedido? Respondé *SÍ* o *NO*.';
+      }
+      await enviarMensajeWhatsApp(
+        numeroCliente,
+        'Buena pregunta 🙌 Esa no te la puedo responder yo, pero en un momento te contesta una persona del equipo 🙏' + cola,
+      );
+      return;
+    }
+
     // #7 — VALIDACIÓN DE DIRECCIÓN (determinista, antes de todo lo demás):
     // si el modelo puso en `direccion` algo que no parece calle+altura (metió
     // una aclaración como "depto 6", o una calle sin número), lo descartamos.
@@ -1287,7 +1316,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           // botones del resumen (Sí, confirmar / No, modificar) para que
           // confirme con un toque. El "sí"/"no" escrito a mano sigue andando
           // igual (lo clasifica el LLM), así que damos las dos vías.
-          await enviarMensajeConBotones(
+          const okBotones = await enviarMensajeConBotones(
             numeroCliente,
             "¡Hola! 👋 Tenés un pedido en pausa esperando confirmación. ¿Está todo bien? Tocá un botón o escribime *SÍ* / *NO*.",
             [
@@ -1295,6 +1324,15 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               { id: `modificar_borrador_${pedidoActivo!.id}`, title: 'No, modificar' },
             ],
           );
+          // Ronda nueva de botones: armamos el token de un solo uso para que
+          // ejecutarBoton procese solo el primer click (ver botones.ts). Igual
+          // que enviarResumenYPedirConfirmacion / enviarConfirmacionCancelacion.
+          if (okBotones) {
+            await supabaseAdmin
+              .from('pedidos')
+              .update({ esperando_respuesta_boton: true })
+              .eq('id', pedidoActivo!.id);
+          }
         } else {
           // Borrador parcial: todavía no hay nada que confirmar (ofrecer
           // "confirmar" acá haría 0 filas). Saludamos y re-pedimos lo que falta.
@@ -1378,7 +1416,16 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         return;
       }
 
-      // Borrador completo, sin cambios y sin confirmar: nada que hacer.
+      // Borrador completo, sin cambios y sin confirmar. Antes esto era un return
+      // silencioso, pero dejaba al cliente en un callejón: si venía de "No,
+      // modificar" (el bot preguntó "¿qué querés cambiar?") y respondía "nada"
+      // / "así está bien" / cualquier mensaje-ruido, el LLM lo clasificaba como
+      // datos_pedido sin cambios reales y el bot no contestaba nada. Reenviamos
+      // el resumen con los botones para devolverlo al punto de confirmación en
+      // vez de dejarlo colgado. esModificacion=false: no hubo cambios, es el
+      // mismo pedido re-ofrecido.
+      await enviarResumenYPedirConfirmacion(numeroCliente, pedidoActivo, false);
+      console.log("↩️ Borrador completo sin cambios: reenvío el resumen para no dejar al cliente sin respuesta.");
       return;
     }
 

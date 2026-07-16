@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test": "vitest run",
     "eval": "node scripts/prompts.eval.mjs",
+    "probar-bot": "node --env-file=.env.local scripts/probar-bot.mjs",
     "minar": "node scripts/minar-expresiones.mjs",
     "update-types": "npx supabase gen types typescript --project-id \"bhexbncbuieuxklegnjm\" --schema public > src/types/supabase.ts",
     "update-types:local": "npx supabase gen types typescript --local > src/types/supabase.ts"

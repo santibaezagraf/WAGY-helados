@@ -5,16 +5,20 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { createClient } from "@/lib/supabase-client"
-import { Send, Bot, User, Loader2, AlertCircle, FileText, MapPin, Download } from "lucide-react"
+import { Send, Bot, User, Loader2, AlertCircle, FileText, MapPin, Download, Pencil, ClipboardCheck } from "lucide-react"
 import {
   getHistorialChat,
   getEstadoAtencion,
+  getPedidoActivoChat,
   enviarMensajeManualAccion,
+  enviarResumenManualAccion,
   finalizarAtencion,
   firmarMedia,
   marcarAtendido,
   type MensajeChat,
 } from "@/lib/actions/mensajes"
+import { EditOrderModal } from "@/components/pedidos/edit-order-modal"
+import type { Pedido } from "@/types/pedidos"
 
 interface ChatModalProps {
   open: boolean
@@ -34,6 +38,17 @@ const VENTANA_24H_MS = 24 * 60 * 60 * 1000
 function horaCorta(iso: string): string {
   return new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })
 }
+
+const ETIQUETA_ESTADO: Record<string, string> = {
+  borrador: "Borrador",
+  pendiente: "En cocina",
+  esperando_cancelacion: "Esperando cancelación",
+}
+
+// Mismo criterio de completitud que usa el bot para mandar el resumen
+// (esBorradorCompleto): '' es el placeholder de "dato no cargado".
+const pedidoCompletoParaResumen = (p: Pedido) =>
+  Boolean(p.direccion && p.metodo_pago && (p.cantidad_agua > 0 || p.cantidad_crema > 0))
 
 // Render del cuerpo de una burbuja según el tipo de mensaje. Texto se muestra
 // como siempre; los media usan la URL firmada (media_url) que arma el server.
@@ -137,6 +152,11 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
   const [enviando, setEnviando] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [atencionActiva, setAtencionActiva] = React.useState(false)
+  // Pedido vigente (borrador/cocina/esperando_cancelacion) del teléfono, para
+  // el panel de acceso rápido: editarlo o mandarle el resumen de confirmación.
+  const [pedidoActivo, setPedidoActivo] = React.useState<Pedido | null>(null)
+  const [editandoPedido, setEditandoPedido] = React.useState(false)
+  const [enviandoResumen, setEnviandoResumen] = React.useState(false)
   // Tick para que la ventana de 24h se cierre sola en la UI aunque no llegue
   // un mensaje nuevo (re-evalúa `ventanaAbierta` cada minuto mientras está abierto).
   const [ahora, setAhora] = React.useState<number>(() => Date.now())
@@ -171,11 +191,12 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
     setError(null)
     // Abrir el chat cuenta como "ya lo vi": limpiamos el aviso de requiere_atencion.
     marcarAtendido(telefono).catch(() => {})
-    Promise.all([getHistorialChat(telefono), getEstadoAtencion(telefono)])
-      .then(([historial, estado]) => {
+    Promise.all([getHistorialChat(telefono), getEstadoAtencion(telefono), getPedidoActivoChat(telefono)])
+      .then(([historial, estado, pedido]) => {
         if (cancelado) return
         setMensajes(historial)
         setAtencionActiva(estado.activa)
+        setPedidoActivo(pedido)
       })
       .catch((e) => {
         if (!cancelado) setError(e instanceof Error ? e.message : "No se pudo cargar el chat")
@@ -277,6 +298,35 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
     }
   }, [texto, enviando, ventanaAbierta, telefono, agregarMensaje])
 
+  // Re-lee el pedido vigente (tras editar o mandar el resumen, el estado y los
+  // montos pueden haber cambiado).
+  const refrescarPedido = React.useCallback(() => {
+    getPedidoActivoChat(telefono)
+      .then(setPedidoActivo)
+      .catch(() => {})
+  }, [telefono])
+
+  const handleEnviarResumen = React.useCallback(async () => {
+    if (!pedidoActivo || enviandoResumen || !ventanaAbierta) return
+    setEnviandoResumen(true)
+    setError(null)
+    try {
+      const { ok, motivo } = await enviarResumenManualAccion(pedidoActivo.id, telefono)
+      if (ok) {
+        // El resumen salió y el control volvió al bot (la burbuja llega por
+        // Realtime; la toma humana se desactivó server-side).
+        setAtencionActiva(false)
+      } else {
+        setError(motivo ?? "No se pudo enviar el resumen.")
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "No se pudo enviar el resumen.")
+    } finally {
+      setEnviandoResumen(false)
+      refrescarPedido()
+    }
+  }, [pedidoActivo, enviandoResumen, ventanaAbierta, telefono, refrescarPedido])
+
   const handleDevolverAlBot = React.useCallback(async () => {
     try {
       await finalizarAtencion(telefono)
@@ -304,6 +354,7 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
   )
 
   return (
+    <>
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="w-[95vw] max-w-[480px] p-0 overflow-hidden gap-0">
         {/* Encabezado estilo WhatsApp */}
@@ -329,6 +380,65 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
             >
               Devolver al bot
             </Button>
+          </div>
+        )}
+
+        {/* Panel del pedido vigente: acceso rápido a editarlo y a mandar el
+            resumen con botones de confirmación (devuelve el control al bot).
+            Pensado para cuando la extracción de la IA falló o hay que cargar
+            un precio especial (promo) que la lista no contempla. */}
+        {pedidoActivo && (
+          <div className="flex items-center justify-between gap-2 bg-cyan-50 border-b border-cyan-200 px-4 py-2">
+            <div className="min-w-0 text-xs text-slate-700">
+              <div>
+                <span className="font-semibold">Pedido #{pedidoActivo.id}</span>
+                <span className="mx-1.5 text-slate-400">·</span>
+                <span>{ETIQUETA_ESTADO[pedidoActivo.estado] ?? pedidoActivo.estado}</span>
+              </div>
+              <div className="truncate text-slate-500">
+                {[
+                  pedidoActivo.cantidad_agua > 0 ? `${pedidoActivo.cantidad_agua} agua` : null,
+                  pedidoActivo.cantidad_crema > 0 ? `${pedidoActivo.cantidad_crema} crema` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" + ") || "sin cantidades"}
+                {" · "}
+                {pedidoActivo.precio_total != null
+                  ? `$${pedidoActivo.precio_total}`
+                  : "total a confirmar"}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs border-cyan-300 text-cyan-800 hover:bg-cyan-100"
+                onClick={() => setEditandoPedido(true)}
+              >
+                <Pencil className="h-3 w-3" /> Editar
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs border-cyan-300 text-cyan-800 hover:bg-cyan-100"
+                onClick={handleEnviarResumen}
+                disabled={enviandoResumen || !ventanaAbierta || !pedidoCompletoParaResumen(pedidoActivo)}
+                title={
+                  !pedidoCompletoParaResumen(pedidoActivo)
+                    ? "Al pedido le faltan datos (cantidades, dirección o pago)"
+                    : !ventanaAbierta
+                      ? "Fuera de la ventana de 24 h de WhatsApp"
+                      : "Manda el resumen con botones de confirmación y devuelve el control al bot"
+                }
+              >
+                {enviandoResumen ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <ClipboardCheck className="h-3 w-3" />
+                )}{" "}
+                Enviar resumen
+              </Button>
+            </div>
           </div>
         )}
 
@@ -422,5 +532,17 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
         </div>
       </DialogContent>
     </Dialog>
+
+    {/* Edición del pedido vigente (mismo modal que usa la tabla). Al guardar
+        refrescamos el panel; el resumen se manda aparte con su botón. */}
+    {pedidoActivo && (
+      <EditOrderModal
+        open={editandoPedido}
+        onOpenChange={setEditandoPedido}
+        pedido={pedidoActivo}
+        onSaved={refrescarPedido}
+      />
+    )}
+    </>
   )
 }

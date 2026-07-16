@@ -222,6 +222,57 @@ const CASOS = [
     espera: { intencion: 'datos_pedido', cantidad_agua: 20 },
   },
 
+  // ---- CONSULTA DE NEGOCIO (delegación a humano) ----
+  // Preguntas reales sobre el negocio que el bot no sabe responder → se marca
+  // requiere_atencion y contesta una persona. Los negativos importan tanto como
+  // los positivos: un off-topic o un sinsentido NO debe molestar a un humano.
+  {
+    nombre: 'consulta_negocio: horarios',
+    mensaje: 'hola! hasta qué hora hacen envíos?',
+    espera: { intencion: 'consulta_negocio' },
+  },
+  {
+    nombre: 'consulta_negocio: zona de entrega',
+    mensaje: 'llegan hasta barrio norte?',
+    espera: { intencion: 'consulta_negocio' },
+  },
+  {
+    nombre: 'consulta_negocio: sabores disponibles',
+    mensaje: 'qué sabores tenés hoy?',
+    espera: { intencion: 'consulta_negocio' },
+  },
+  {
+    nombre: 'consulta_negocio: venta mayorista',
+    mensaje: 'venden al por mayor para un kiosco?',
+    espera: { intencion: 'consulta_negocio' },
+  },
+  {
+    nombre: 'consulta_negocio: reclamo por pedido con borrador activo no toca el pedido',
+    mensaje: 'che, el pedido de la semana pasada vino derretido',
+    pedidoActivo: borrador({ cantidad_crema: 10 }),
+    espera: { intencion: 'consulta_negocio', cantidad_crema: 10 },
+  },
+  {
+    nombre: 'consulta_negocio: pregunta off-topic NO delega',
+    mensaje: 'quién ganó el partido de anoche?',
+    espera: { intencion: 'datos_pedido' },
+  },
+  {
+    nombre: 'consulta_negocio: mensaje sin sentido NO delega',
+    mensaje: 'asdf jkl qwerty',
+    espera: { intencion: 'datos_pedido' },
+  },
+  {
+    nombre: 'consulta_negocio: pregunta + datos del pedido es datos_pedido',
+    mensaje: 'quiero 20 de agua, hasta qué hora entregan?',
+    espera: { intencion: 'datos_pedido', cantidad_agua: 20 },
+  },
+  {
+    nombre: 'consulta_negocio: precios sigue siendo consultar_precios, no consulta_negocio',
+    mensaje: 'cuánto están los helados?',
+    espera: { intencion: 'consultar_precios' },
+  },
+
   // ---- CAMBIOS DURANTE CANCELACION ----
   // El flujo trata datos_pedido + cambios reales en esperando_cancelacion como
   // RECHAZO IMPLÍCITO de la cancelación: vuelve a borrador con los cambios

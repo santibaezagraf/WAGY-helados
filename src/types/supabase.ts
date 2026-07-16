@@ -146,6 +146,7 @@ export type Database = {
           direccion_de_historial: boolean
           enviado: boolean
           es_cambio_manual: boolean | null
+          esperando_respuesta_boton: boolean
           estado: string
           id: number
           metodo_pago: string
@@ -173,6 +174,7 @@ export type Database = {
           direccion_de_historial?: boolean
           enviado?: boolean
           es_cambio_manual?: boolean | null
+          esperando_respuesta_boton?: boolean
           estado?: string
           id?: number
           metodo_pago: string
@@ -200,6 +202,7 @@ export type Database = {
           direccion_de_historial?: boolean
           enviado?: boolean
           es_cambio_manual?: boolean | null
+          esperando_respuesta_boton?: boolean
           estado?: string
           id?: number
           metodo_pago?: string

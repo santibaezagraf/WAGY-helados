@@ -33,11 +33,33 @@ async function persistirMensajeBot(telefono: string, texto: string) {
 
 // Timeout propio por intento: más corto que el connect-timeout de 10s de undici,
 // así un blip de red corta rápido y reintenta en vez de colgar el worker.
-const META_TIMEOUT_MS = 8000;
+const META_TIMEOUT_MS = 10000;
 // 1 intento + 2 reintentos. Cubre cortes transitorios de pocos segundos hacia
 // Meta (el caso típico: el cliente quedaba sin recibir el resumen porque el
 // `fetch` falló una vez y el error se tragaba en silencio).
 const META_MAX_INTENTOS = 3;
+
+// ───────────────────────────────────────────────────────────────────────────
+// Modo test (BOT_TEST_MODE='1'): intercepta TODA la salida hacia Meta.
+//
+// El harness de testeo del bot (scripts/probar-bot.mjs + el endpoint dev
+// /api/dev/simular-conversacion) corre el pipeline REAL contra la DB pero NO
+// debe mandar WhatsApp de verdad: el WHATSAPP_TOKEN local puede estar vivo.
+// Con el flag encendido, postAMeta no hace fetch — registra el body en un
+// buffer en memoria por teléfono (el endpoint lo drena) y devuelve true, así la
+// persistencia posterior (rol='bot'/'operador') corre igual que en producción y
+// las respuestas quedan en mensajes_chat. Con el flag apagado esta rama es
+// inerte y el comportamiento es idéntico al de siempre.
+// ───────────────────────────────────────────────────────────────────────────
+export type SalidaCapturada = { descripcion: string; body: unknown; ts: number };
+const bufferSalidaTest = new Map<string, SalidaCapturada[]>();
+
+/** Lee y limpia lo capturado para un teléfono. Solo lo usa el endpoint dev de testeo. */
+export function drenarSalidaTest(telefono: string): SalidaCapturada[] {
+  const salida = bufferSalidaTest.get(telefono) ?? [];
+  bufferSalidaTest.delete(telefono);
+  return salida;
+}
 
 /**
  * POST al endpoint de mensajes de Meta con timeout + reintentos.
@@ -50,6 +72,18 @@ const META_MAX_INTENTOS = 3;
  * El caller persiste el mensaje del bot SOLO si devolvió true.
  */
 async function postAMeta(body: object, descripcion: string): Promise<boolean> {
+  // Modo test: cortamos antes de la red. Los mensajes de status (read/typing)
+  // no llevan `to` y no se bufferean; el resto se guarda por teléfono.
+  if (process.env.BOT_TEST_MODE === '1') {
+    const to = (body as { to?: string }).to;
+    if (to) {
+      const previas = bufferSalidaTest.get(to) ?? [];
+      previas.push({ descripcion, body, ts: Date.now() });
+      bufferSalidaTest.set(to, previas);
+    }
+    return true;
+  }
+
   const token = process.env.WHATSAPP_TOKEN;
   const phoneId = process.env.WHATSAPP_PHONE_ID;
   const url = `${WHATSAPP_API_URL}/${phoneId}/messages`;
@@ -435,9 +469,13 @@ export async function enviarResumenYPedirConfirmacion(
   // Re-armamos también el recordatorio de silencio: cada resumen nuevo abre una
   // nueva espera de confirmación, así el cron puede volver a insistir si el
   // cliente se queda callado otra vez.
+  // esperando_respuesta_boton: si el resumen salió, esta es una ronda nueva de
+  // botones (Confirmar/Modificar) → armamos el token de un solo uso para que
+  // ejecutarBoton procese solo el PRIMER click (ver botones.ts). Si no salió, no
+  // hay botones vivos, lo dejamos en false.
   const { error } = await supabaseAdmin
     .from('pedidos')
-    .update({ resumen_pendiente: !ok, recordatorio_enviado: false })
+    .update({ resumen_pendiente: !ok, recordatorio_enviado: false, esperando_respuesta_boton: ok })
     .eq('id', pedidoDB.id);
   if (error) console.error('⚠️ No se pudo actualizar resumen_pendiente:', error);
 
@@ -458,8 +496,19 @@ export async function enviarConfirmacionCancelacion(
   pedidoId: number,
   texto: string = "⚠️ ¿Estás seguro de que querés cancelar tu pedido?",
 ) {
-  await enviarMensajeConBotones(numeroCliente, texto, [
+  const ok = await enviarMensajeConBotones(numeroCliente, texto, [
     { id: `confirmar_cancelacion_${pedidoId}`, title: 'Sí, cancelar' },
     { id: `rechazar_cancelacion_${pedidoId}`, title: 'No, mantenerlo' },
   ]);
+
+  // Ronda nueva de botones (Sí,cancelar / No,mantenerlo): armamos el token de
+  // un solo uso para que ejecutarBoton procese solo el primer click. Si el
+  // envío falló, no hay botones vivos → no lo armamos.
+  if (ok) {
+    const { error } = await supabaseAdmin
+      .from('pedidos')
+      .update({ esperando_respuesta_boton: true })
+      .eq('id', pedidoId);
+    if (error) console.error('⚠️ No se pudo armar esperando_respuesta_boton:', error);
+  }
 }
