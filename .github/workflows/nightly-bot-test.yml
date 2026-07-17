@@ -1,0 +1,92 @@
+# Testeo nocturno del bot (suite guionada) contra la Supabase de STAGING.
+#
+# Corre en la nube de GitHub (tu PC puede estar apagada), todas las noches, y
+# levanta un `next dev` con BOT_TEST_MODE=1 para ejercitar el bot real SIN enviar
+# WhatsApp. Los guionados se autopuntúan (chequeoAutomatico): si alguno sale en
+# rojo, el workflow FALLA y GitHub te manda un mail. Los transcripts quedan como
+# artifact descargable para que después Claude Code los juzgue si hace falta.
+#
+# ── Secrets a cargar (repo → Settings → Secrets and variables → Actions) ──
+#   STAGING_SUPABASE_URL                 = https://oqrufwtuwvogdfhojips.supabase.co
+#   STAGING_SUPABASE_ANON_KEY            = <anon key de staging>
+#   STAGING_SUPABASE_SERVICE_ROLE_KEY    = <service_role key de staging>
+#   GROQ_API_KEY                         = <tu Groq API key>
+# (Son claves de STAGING, no de prod: si se filtran, rotás staging sin drama.)
+#
+# Probalo a mano primero: pestaña Actions → "nightly-bot-test" → Run workflow.
+
+name: nightly-bot-test
+
+on:
+  schedule:
+    # 05:07 UTC = 02:07 ART (UTC-3). GitHub Actions usa siempre UTC.
+    - cron: '7 5 * * *'
+  workflow_dispatch: {}   # permite dispararlo a mano desde la pestaña Actions
+
+jobs:
+  guionados:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      BOT_TEST_MODE: '1'
+      PROBAR_SOLO_GUIONADOS: '1'
+      PROBAR_DELAY_MS: '6000'
+      PROBAR_FAIL_ON_RED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Chequeo de seguridad (staging + modo test)
+        run: |
+          test "$BOT_TEST_MODE" = "1" || { echo "::error::BOT_TEST_MODE != 1 (abortado para no mandar WhatsApp reales)"; exit 1; }
+          echo "$NEXT_PUBLIC_SUPABASE_URL" | grep -q "oqrufwtuwvogdfhojips" \
+            || { echo "::error::NEXT_PUBLIC_SUPABASE_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
+          echo "OK: modo test + staging."
+
+      - name: Levantar server + correr guionados
+        run: |
+          npm run dev > devserver.log 2>&1 &
+          DEV_PID=$!
+
+          # Esperar a que el endpoint responda (hasta ~120s).
+          listo=0
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST http://localhost:3000/api/dev/simular-conversacion \
+              -H 'content-type: application/json' \
+              -d '{"accion":"estado","telefono":"540000000099"}' || true)
+            if [ "$code" = "200" ]; then listo=1; break; fi
+            if [ "$code" = "403" ]; then
+              echo "::error::El endpoint dio 403 (¿BOT_TEST_MODE apagado?)"; cat devserver.log; kill $DEV_PID 2>/dev/null; exit 1
+            fi
+            sleep 3
+          done
+          if [ "$listo" != "1" ]; then
+            echo "::error::El dev server no respondió a tiempo"; cat devserver.log; kill $DEV_PID 2>/dev/null; exit 1
+          fi
+
+          # Correr los guionados. Con PROBAR_FAIL_ON_RED=1 sale != 0 si hay chequeos rojos.
+          set +e
+          node scripts/probar-bot.mjs
+          RESULT=$?
+          kill $DEV_PID 2>/dev/null
+          exit $RESULT
+
+      - name: Subir transcripts (para juicio con Claude Code)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcripts-${{ github.run_id }}
+          path: informes-bot/**
+          if-no-files-found: warn

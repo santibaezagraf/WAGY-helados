@@ -371,6 +371,22 @@ async function main() {
 
   console.log(`\n📝 Transcripts guardados en ${carpeta}/`);
   console.log('   Paso 2 — pedile a Claude Code: "juzgá la última corrida de probar-bot".');
+
+  // Señal de regresión para CI (GitHub Actions): con PROBAR_FAIL_ON_RED=1, si algún
+  // escenario tuvo un chequeoAutomatico en rojo o un error, salimos con código != 0
+  // para que el workflow falle y avise. En local (sin el flag) no cambia nada: siempre
+  // sale 0 y te quedás leyendo el informe.
+  if (process.env.PROBAR_FAIL_ON_RED === '1') {
+    const fallidos = escenarios.filter(
+      (e) => e.error || (e.chequeoAutomatico ?? []).some((c) => !c.ok),
+    );
+    if (fallidos.length) {
+      console.log(`\n❌ ${fallidos.length} escenario(s) con chequeo en rojo o error: ${fallidos.map((e) => e.nombre).join(', ')}`);
+      process.exitCode = 1;
+    } else {
+      console.log('\n✅ Todos los chequeos automáticos en verde.');
+    }
+  }
 }
 
 main().catch((error) => {
