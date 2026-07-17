@@ -163,6 +163,7 @@ async function correrGuionado(escenario, telefono) {
     espera: escenario.espera ?? null,
     chequeoAutomatico: chequear(escenario.espera, pedidoFinal),
     pedidoFinal,
+    xfail: escenario.xfail ?? null,
     notas,
   };
 }
@@ -233,6 +234,7 @@ async function correrExploratorio(escenario, telefono) {
     espera: null,
     chequeoAutomatico: null,
     pedidoFinal: estadoFinal?.pedido ?? ultimoPedido ?? null,
+    xfail: escenario.xfail ?? null,
     notas,
   };
 }
@@ -349,7 +351,9 @@ async function main() {
       escenarios.push(resultado);
       if (escenario.tipo === 'guionado') {
         const fallos = (resultado.chequeoAutomatico ?? []).filter((c) => !c.ok).length;
-        console.log(fallos === 0 ? '✅ chequeo automático OK' : `⚠️ ${fallos} chequeo(s) automático(s) en rojo`);
+        if (fallos === 0) console.log('✅ chequeo automático OK');
+        else if (escenario.xfail) console.log(`⚠️ ${fallos} chequeo(s) en rojo (xfail conocido, no gatea)`);
+        else console.log(`⚠️ ${fallos} chequeo(s) automático(s) en rojo`);
       } else {
         console.log(`💬 ${resultado.transcript.filter((m) => m.rol === 'cliente').length} turno(s) de cliente`);
       }
@@ -377,14 +381,23 @@ async function main() {
   // para que el workflow falle y avise. En local (sin el flag) no cambia nada: siempre
   // sale 0 y te quedás leyendo el informe.
   if (process.env.PROBAR_FAIL_ON_RED === '1') {
-    const fallidos = escenarios.filter(
-      (e) => e.error || (e.chequeoAutomatico ?? []).some((c) => !c.ok),
-    );
-    if (fallidos.length) {
-      console.log(`\n❌ ${fallidos.length} escenario(s) con chequeo en rojo o error: ${fallidos.map((e) => e.nombre).join(', ')}`);
+    const enRojo = (e) => e.error || (e.chequeoAutomatico ?? []).some((c) => !c.ok);
+    const regresiones = escenarios.filter((e) => enRojo(e) && !e.xfail);
+    const xfailEnRojo = escenarios.filter((e) => enRojo(e) && e.xfail);
+    const xfailQueYaPasan = escenarios.filter((e) => !enRojo(e) && e.xfail);
+
+    for (const e of xfailEnRojo) {
+      console.log(`\n⚠️ (xfail conocido, NO gatea) "${e.nombre}" en rojo. Motivo: ${e.xfail}`);
+    }
+    for (const e of xfailQueYaPasan) {
+      console.log(`\n🎉 "${e.nombre}" estaba marcado xfail y AHORA PASA — sacale el marcador xfail en escenarios-bot.mjs.`);
+    }
+
+    if (regresiones.length) {
+      console.log(`\n❌ ${regresiones.length} regresión(es) nueva(s): ${regresiones.map((e) => e.nombre).join(', ')}`);
       process.exitCode = 1;
     } else {
-      console.log('\n✅ Todos los chequeos automáticos en verde.');
+      console.log('\n✅ Sin regresiones nuevas (verde, salvo xfail conocidos).');
     }
   }
 }

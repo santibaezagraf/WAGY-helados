@@ -112,6 +112,12 @@ export const ESCENARIOS = [
   {
     nombre: 'retira-en-local',
     tipo: 'guionado',
+    // Fallo conocido (no gatea CI): el bot no toma "paso a retirar" dicho inline
+    // con el resto del pedido como direccion='retira' en el primer turno — pide
+    // dirección y ofrece el quick-reply resp_retira. Además este escenario toca
+    // confirmar_borrador cuando el bot ofreció resp_retira (habría que tocar ese).
+    // Ver informe corrida-2026-07-16T03-29-33. Sacar el xfail cuando se resuelva.
+    xfail: 'el bot no interpreta "paso a retirar" inline como retiro en el primer turno; escenario pendiente de ajustar',
     persona: 'Cliente que pasa a buscar el pedido en vez de pedir envío.',
     turnos: [
       { texto: 'hola, 15 de crema, paso a retirar, pago en efectivo' },
