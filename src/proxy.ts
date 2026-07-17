@@ -15,6 +15,11 @@ function esRutaPublica(pathname: string): boolean {
         "/api/procesar-pendientes",
         "/api/reenviar-resumenes",
         "/api/gestionar-borradores",
+        // /api/dev/*: endpoints SOLO de desarrollo, ya bloqueados en producción por
+        // su propia guarda NODE_ENV (devuelven 403). Se eximen del gate de sesión
+        // para que el harness de testeo (next dev, sin cookie) pueda usarlos; en
+        // prod siguen siendo inaccesibles.
+        "/api/dev",
     ];
     if (API_PUBLICAS.some((ruta) => pathname === ruta || pathname.startsWith(ruta + "/"))) {
         return true;
