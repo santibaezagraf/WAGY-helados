@@ -1,10 +1,15 @@
-# Testeo nocturno del bot (suite guionada) contra la Supabase de STAGING.
+# Testeo nocturno del bot contra la Supabase de STAGING.
 #
 # Corre en la nube de GitHub (tu PC puede estar apagada), todas las noches, y
 # levanta un `next dev` con BOT_TEST_MODE=1 para ejercitar el bot real SIN enviar
-# WhatsApp. Los guionados se autopuntúan (chequeoAutomatico): si alguno sale en
-# rojo, el workflow FALLA y GitHub te manda un mail. Los transcripts quedan como
-# artifact descargable para que después Claude Code los juzgue si hace falta.
+# WhatsApp. Dos suites:
+#   - GUIONADOS: se autopuntúan (chequeoAutomatico). Si alguno sale en rojo (y no
+#     es un xfail conocido), el workflow FALLA y GitHub te manda un mail. Es el
+#     watchdog de regresión.
+#   - EXPLORATORIOS: un cliente-agente LLM lleva el bot al límite. NO gatean el
+#     workflow (no tienen oráculo); solo generan transcripts.
+# Todos los transcripts quedan como artifact descargable para que Claude Code los
+# juzgue a demanda (le pasás el artifact y te arma el informe ✅/⚠️/❓).
 #
 # ── Secrets a cargar (repo → Settings → Secrets and variables → Actions) ──
 #   STAGING_SUPABASE_URL                 = https://oqrufwtuwvogdfhojips.supabase.co
@@ -26,16 +31,14 @@ on:
 jobs:
   guionados:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       BOT_TEST_MODE: '1'
-      PROBAR_SOLO_GUIONADOS: '1'
       PROBAR_DELAY_MS: '6000'
-      PROBAR_FAIL_ON_RED: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -54,7 +57,7 @@ jobs:
             || { echo "::error::NEXT_PUBLIC_SUPABASE_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
           echo "OK: modo test + staging."
 
-      - name: Levantar server + correr guionados
+      - name: Levantar server + correr guionados y exploratorios
         run: |
           npm run dev > devserver.log 2>&1 &
           DEV_PID=$!
@@ -76,12 +79,20 @@ jobs:
             echo "::error::El dev server no respondió a tiempo"; cat devserver.log; kill $DEV_PID 2>/dev/null; exit 1
           fi
 
-          # Correr los guionados. Con PROBAR_FAIL_ON_RED=1 sale != 0 si hay chequeos rojos.
           set +e
-          node scripts/probar-bot.mjs
-          RESULT=$?
+          # 1) GUIONADOS — gatean el CI: con PROBAR_FAIL_ON_RED=1 salen != 0 si hay
+          #    una regresión (chequeo en rojo que no sea xfail) → workflow rojo → mail.
+          PROBAR_SOLO_GUIONADOS=1 PROBAR_FAIL_ON_RED=1 node scripts/probar-bot.mjs
+          RES_GUIONADOS=$?
+
+          # 2) EXPLORATORIOS — NO gatean. Llevan el bot al límite (cliente-agente LLM)
+          #    y solo generan transcripts para que Claude Code los juzgue a demanda.
+          #    Su exit code se ignora a propósito (no tienen oráculo).
+          PROBAR_SOLO_EXPLORATORIOS=1 PROBAR_MAX_TURNOS=6 node scripts/probar-bot.mjs || true
+
           kill $DEV_PID 2>/dev/null
-          exit $RESULT
+          # El estado del workflow lo define SOLO la suite guionada (regresión).
+          exit $RES_GUIONADOS
 
       - name: Subir transcripts (para juicio con Claude Code)
         if: always()
