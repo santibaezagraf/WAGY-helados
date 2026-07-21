@@ -5,11 +5,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { createClient } from "@/lib/supabase-client"
-import { Send, Bot, User, Loader2, AlertCircle, FileText, MapPin, Download, Pencil, ClipboardCheck } from "lucide-react"
+import { Send, Bot, User, Loader2, AlertCircle, FileText, MapPin, Download, Pencil, ClipboardCheck, Ban, ShieldCheck, RotateCcw, CheckCircle2 } from "lucide-react"
 import {
   getHistorialChat,
   getEstadoAtencion,
   getPedidoActivoChat,
+  getEstadoModeracion,
+  bloquearNumeroAccion,
+  desbloquearNumeroAccion,
+  resetearRateLimitAccion,
   enviarMensajeManualAccion,
   enviarResumenManualAccion,
   finalizarAtencion,
@@ -19,6 +23,7 @@ import {
 } from "@/lib/actions/mensajes"
 import { EditOrderModal } from "@/components/pedidos/edit-order-modal"
 import type { Pedido } from "@/types/pedidos"
+import { setChatAbierto, setTomaActiva } from "@/lib/chat-abierto-store"
 
 interface ChatModalProps {
   open: boolean
@@ -152,6 +157,10 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
   const [enviando, setEnviando] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [atencionActiva, setAtencionActiva] = React.useState(false)
+  // Moderación manual del número: bloqueo persistente + reset del rate-limit.
+  const [bloqueado, setBloqueado] = React.useState(false)
+  const [moderando, setModerando] = React.useState(false)
+  const [aviso, setAviso] = React.useState<string | null>(null)
   // Pedido vigente (borrador/cocina/esperando_cancelacion) del teléfono, para
   // el panel de acceso rápido: editarlo o mandarle el resumen de confirmación.
   const [pedidoActivo, setPedidoActivo] = React.useState<Pedido | null>(null)
@@ -189,14 +198,16 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
 
     setCargando(true)
     setError(null)
+    setAviso(null)
     // Abrir el chat cuenta como "ya lo vi": limpiamos el aviso de requiere_atencion.
     marcarAtendido(telefono).catch(() => {})
-    Promise.all([getHistorialChat(telefono), getEstadoAtencion(telefono), getPedidoActivoChat(telefono)])
-      .then(([historial, estado, pedido]) => {
+    Promise.all([getHistorialChat(telefono), getEstadoAtencion(telefono), getPedidoActivoChat(telefono), getEstadoModeracion(telefono)])
+      .then(([historial, estado, pedido, moderacion]) => {
         if (cancelado) return
         setMensajes(historial)
         setAtencionActiva(estado.activa)
         setPedidoActivo(pedido)
+        setBloqueado(moderacion.bloqueado)
       })
       .catch((e) => {
         if (!cancelado) setError(e instanceof Error ? e.message : "No se pudo cargar el chat")
@@ -266,6 +277,18 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
     return () => clearInterval(t)
   }, [open])
 
+  // Marca este teléfono como "chat abierto" mientras el modal está montado y
+  // abierto. Lo lee el componente de notificaciones para NO disparar un toast
+  // por un mensaje que ya estás mirando en vivo. La limpieza en el cleanup
+  // cubre tanto el cierre como el desmontaje del componente.
+  React.useEffect(() => {
+    if (!open) return
+    setChatAbierto(telefono)
+    return () => {
+      setChatAbierto(null)
+    }
+  }, [open, telefono])
+
   // Autoscroll al último mensaje.
   React.useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -282,6 +305,9 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
       if (ok) {
         setTexto("")
         setAtencionActiva(true) // el envío activa la toma humana
+        // También lo empujamos al store client-side para que las notificaciones
+        // sepan de la toma sin depender del round-trip Realtime de atencion_humana.
+        setTomaActiva(telefono, true)
         // Agregamos la burbuja con la fila ya persistida (dedup por id por si
         // Realtime también trae el eco). No dependemos de que Realtime devuelva
         // el insert propio del operador.
@@ -316,6 +342,7 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
         // El resumen salió y el control volvió al bot (la burbuja llega por
         // Realtime; la toma humana se desactivó server-side).
         setAtencionActiva(false)
+        setTomaActiva(telefono, false)
       } else {
         setError(motivo ?? "No se pudo enviar el resumen.")
       }
@@ -331,26 +358,65 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
     try {
       await finalizarAtencion(telefono)
       setAtencionActiva(false)
+      setTomaActiva(telefono, false)
     } catch (e) {
       setError(e instanceof Error ? e.message : "No se pudo devolver al bot")
     }
   }, [telefono])
 
-  // Cerrar el modal con la toma humana activa = devolver al bot. La toma SOLO se
-  // activa al enviar un mensaje (no al abrir el chat), así que cerrar sin haber
-  // escrito nada no dispara nada. Si la cerrás después de atender, no hace falta
-  // que te acuerdes de clickear "Devolver al bot": el cierre ya lo hace.
+  // Bloquear / desbloquear el número (el bot lo ignora por completo mientras
+  // esté bloqueado; el operador igual puede escribirle a mano).
+  const handleToggleBloqueo = React.useCallback(async () => {
+    if (moderando) return
+    setModerando(true)
+    setError(null)
+    setAviso(null)
+    try {
+      if (bloqueado) {
+        await desbloquearNumeroAccion(telefono)
+        setBloqueado(false)
+        setAviso("Número desbloqueado — el bot vuelve a responderle.")
+      } else {
+        await bloquearNumeroAccion(telefono)
+        setBloqueado(true)
+        setAviso("Número bloqueado — el bot lo ignora hasta que lo desbloquees.")
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "No se pudo cambiar el bloqueo")
+    } finally {
+      setModerando(false)
+    }
+  }, [bloqueado, moderando, telefono])
+
+  // Resetear el rate-limit anti-DoS: un cliente legítimo que quedó frenado por
+  // mandar muchos mensajes vuelve a poder escribirle al bot al instante.
+  const handleResetLimite = React.useCallback(async () => {
+    if (moderando) return
+    setModerando(true)
+    setError(null)
+    setAviso(null)
+    try {
+      await resetearRateLimitAccion(telefono)
+      setAviso("Límite reseteado — el cliente puede volver a escribirle al bot.")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "No se pudo resetear el límite")
+    } finally {
+      setModerando(false)
+    }
+  }, [moderando, telefono])
+
+  // Cerrar el modal NO devuelve la conversación al bot: un operador puede estar
+  // en el medio de una consulta que el bot no sabe manejar (ej: "mitad efectivo
+  // mitad transferencia", "en billetes de cuánto vas a pagar?") y una respuesta
+  // demorada del cliente cerraría el chat prematuramente. La toma humana termina
+  // solo con el botón explícito "Devolver al bot", con el envío del resumen
+  // manual, o por auto-expiración (VENTANA_TOMA_MS = 8h de inactividad).
+  // Mientras tanto, las notificaciones del header avisan si el cliente escribe.
   const handleOpenChange = React.useCallback(
     (isOpen: boolean) => {
-      if (!isOpen && atencionActiva) {
-        // Fire-and-forget: no bloqueamos el cierre del modal por la I/O.
-        finalizarAtencion(telefono).catch((e) => {
-          console.error('No se pudo devolver al bot al cerrar el chat:', e)
-        })
-      }
       onOpenChange(isOpen)
     },
-    [atencionActiva, telefono, onOpenChange],
+    [onOpenChange],
   )
 
   return (
@@ -365,12 +431,58 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
           <span className="text-xs text-white/80">{telefono}</span>
         </DialogHeader>
 
+        {/* Barra de moderación: bloquear/desbloquear el número y resetear el
+            rate-limit anti-DoS. El bloqueo afecta SOLO al bot (el operador puede
+            seguir escribiendo a mano). */}
+        <div className="flex items-center justify-between gap-2 border-b bg-slate-50 px-4 py-1.5">
+          <span className="text-[11px] text-slate-400">
+            {bloqueado ? "🚫 Bloqueado — el bot no le responde" : "Moderación"}
+          </span>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 gap-1 px-2 text-[11px] text-slate-500 hover:text-slate-700"
+              onClick={handleResetLimite}
+              disabled={moderando}
+              title="Resetear el límite anti-spam: el cliente vuelve a poder escribirle al bot de inmediato (sin esperar 1 h)"
+            >
+              <RotateCcw className="h-3 w-3" /> Resetear límite
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={`h-6 gap-1 px-2 text-[11px] ${
+                bloqueado
+                  ? "text-emerald-700 hover:text-emerald-800"
+                  : "text-red-600 hover:text-red-700"
+              }`}
+              onClick={handleToggleBloqueo}
+              disabled={moderando}
+              title={
+                bloqueado
+                  ? "Quitar el bloqueo: el bot vuelve a responderle"
+                  : "Bloquear: el bot ignora por completo a este número (0 tokens, sin respuesta)"
+              }
+            >
+              {moderando ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : bloqueado ? (
+                <ShieldCheck className="h-3 w-3" />
+              ) : (
+                <Ban className="h-3 w-3" />
+              )}{" "}
+              {bloqueado ? "Desbloquear" : "Bloquear"}
+            </Button>
+          </div>
+        </div>
+
         {/* Banner de toma humana */}
         {atencionActiva && (
           <div className="flex items-center justify-between gap-2 bg-amber-50 border-b border-amber-200 px-4 py-2">
             <span className="text-xs text-amber-800 flex items-center gap-1.5">
               <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
-              Atención humana activa — el bot vuelve solo al cerrar el chat
+              Atención humana activa — cerrar el chat NO devuelve al bot
             </span>
             <Button
               variant="outline"
@@ -492,6 +604,14 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
           <div className="flex items-start gap-2 bg-red-50 border-t border-red-200 px-4 py-2 text-xs text-red-700">
             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
             <span>{error}</span>
+          </div>
+        )}
+
+        {/* Aviso de acción de moderación exitosa */}
+        {aviso && (
+          <div className="flex items-start gap-2 bg-emerald-50 border-t border-emerald-200 px-4 py-2 text-xs text-emerald-700">
+            <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+            <span>{aviso}</span>
           </div>
         )}
 

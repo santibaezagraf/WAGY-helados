@@ -17,11 +17,23 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { ChatModal } from "@/components/pedidos/chat-modal"
+import { NotificacionesEntrantes } from "@/components/ui/notificaciones-entrantes"
 import type { Conversacion } from "@/lib/conversaciones-utils"
 
 // Tipos de mensaje que el bot no resuelve y que disparan el aviso "requiere
 // intervención humana". Debe coincidir con la lógica del webhook.
 const TIPOS_REQUIEREN_HUMANO = new Set(["image", "audio", "video", "document", "sticker", "location"])
+
+// Un mensaje entrante marca la conversación como pendiente cuando:
+//  - es un media/ubicación (el bot no lo entiende), o
+//  - es texto pero llegó con `procesado=true`: el webhook lo silenció porque hay
+//    una toma humana activa o un gate por mensajes de operador reciente. Estos
+//    son los que hoy pasaban desapercibidos hasta que se abría el chat.
+function marcaPendiente(fila: { rol?: string; tipo?: string; procesado?: boolean }): boolean {
+  if (fila.rol !== "cliente") return false
+  if (fila.tipo && TIPOS_REQUIEREN_HUMANO.has(fila.tipo)) return true
+  return fila.procesado === true
+}
 
 interface HeaderProps {
   /** Conversaciones recientes (cualquier teléfono con actividad), con flag de
@@ -55,10 +67,15 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "mensajes_chat" },
         (payload) => {
-          const fila = payload.new as { rol?: string; tipo?: string; telefono?: string | null }
+          const fila = payload.new as {
+            rol?: string
+            tipo?: string
+            telefono?: string | null
+            procesado?: boolean
+          }
           if (!fila.telefono) return
           const tel = fila.telefono
-          const esPendiente = fila.rol === "cliente" && !!fila.tipo && TIPOS_REQUIEREN_HUMANO.has(fila.tipo)
+          const esPendiente = marcaPendiente(fila)
           setConversaciones((prev) => {
             const previa = prev.find((c) => c.telefono === tel)
             const resto = prev.filter((c) => c.telefono !== tel)
@@ -66,6 +83,37 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
               { telefono: tel, requiereAtencion: esPendiente || previa?.requiereAtencion || false },
               ...resto,
             ]
+          })
+        },
+      )
+      // En vivo también: cuando el bot delega a un humano (consulta_negocio o
+      // pregunta_negocio embebida en un mensaje con más intenciones), marca
+      // `requiere_atencion=true` en atencion_humana. Sin escuchar esta tabla el
+      // badge del header solo lo tomaba en el reload inicial. El flag se limpia
+      // (requiere_atencion=false) al abrir el chat o cuando el operador escribe,
+      // así que reflejamos ambas transiciones para mantener el badge en sync.
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "atencion_humana" },
+        (payload) => {
+          const fila = payload.new as {
+            telefono?: string
+            requiere_atencion?: boolean
+          } | null
+          if (!fila?.telefono) return
+          const tel = fila.telefono
+          const requiere = fila.requiere_atencion === true
+          setConversaciones((prev) => {
+            const previa = prev.find((c) => c.telefono === tel)
+            // Si el teléfono no está en la lista y hay que marcarlo, lo sumamos
+            // al frente; si ya está, solo actualizamos su flag in-place (no lo
+            // movemos: no llegó un mensaje nuevo, solo cambió el estado).
+            if (!previa) {
+              return requiere ? [{ telefono: tel, requiereAtencion: true }, ...prev] : prev
+            }
+            return prev.map((c) =>
+              c.telefono === tel ? { ...c, requiereAtencion: requiere } : c,
+            )
           })
         },
       )
@@ -194,6 +242,11 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
           telefono={chatTelefono}
         />
       )}
+
+      {/* Toasts globales de notificaciones entrantes (mensajes de cliente con
+          toma humana activa y chat cerrado). Al clickearlos, abren el chat de
+          ese teléfono. */}
+      <NotificacionesEntrantes onAbrirChat={abrirChat} />
     </>
   )
 }
