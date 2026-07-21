@@ -15,6 +15,57 @@ const supabaseAdmin = createClient<Database>(
 
 const groq = createGroq();
 
+// Cadena de modelos para la extracción. El PRIMARIO es el único que se testea en
+// el nightly (por eso el harness y /api/dev/test-ia lo dejan hardcodeado). Los
+// demás son FALLBACK solo de producción: si el primario se queda sin cuota
+// (429 / TPD), seguimos con el siguiente en vez de contestar "no te entendí".
+// Todos bancan structured output y tienen cubeta TPD SEPARADA en Groq, así que
+// si se agotó gpt-oss-20b es muy probable que el siguiente siga disponible.
+const MODELOS_EXTRACCION = [
+  'openai/gpt-oss-20b',
+  'openai/gpt-oss-120b',
+  'moonshotai/kimi-k2-instruct',
+] as const;
+
+// ¿El error del SDK es un rate limit (429)? Es la señal de "modelo sin cuota" que
+// dispara el fallback. Miramos statusCode (lo expone APICallError del AI SDK) y,
+// como red, el texto del mensaje por si el error llega envuelto de otra forma.
+export function esRateLimit(error: unknown): boolean {
+  const status = (error as { statusCode?: number } | null)?.statusCode;
+  if (status === 429) return true;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /rate limit|tokens per day|\bTPD\b|\b429\b/i.test(msg);
+}
+
+/**
+ * ¿El `pregunta_negocio` que devolvió el modelo es una pregunta REAL a delegar?
+ * El modelo a veces stringifica el null como el TEXTO "null" (o "none"/"undefined"),
+ * mismo no-determinismo que el "false" string — y eso disparaba una delegación a
+ * humano fantasma. Tratamos esos placeholders y el vacío como AUSENCIA de pregunta.
+ * Pura y exportada para test.
+ */
+export function esPreguntaNegocioReal(valor: string | null | undefined): boolean {
+  if (!valor) return false;
+  const v = valor.trim().toLowerCase();
+  return v !== '' && v !== 'null' && v !== 'none' && v !== 'undefined' && v !== 'n/a';
+}
+
+/**
+ * Normaliza el `metodo_pago` que devuelve el modelo a exactamente
+ * 'efectivo' | 'transferencia' | null. El prompt ya pide una de esas dos
+ * palabras (mapeando sinónimos: "cash", "mp", "en billete", …), así que esto es
+ * la red determinista: descarta el placeholder "null" string (mismo no-determinismo
+ * que [[esPreguntaNegocioReal]]) y cualquier valor inesperado, para que no se
+ * cuele un pago inválido tipo "Pago: null" en el resumen. Pura y exportada para test.
+ */
+export function normalizarMetodoPago(valor: string | null | undefined): 'efectivo' | 'transferencia' | null {
+  if (!valor) return null;
+  const v = valor.trim().toLowerCase();
+  if (v === 'efectivo') return 'efectivo';
+  if (v === 'transferencia') return 'transferencia';
+  return null;
+}
+
 /**
  * Marca todos los mensajes del cliente como "descartados" (descartado=true).
  * Se llama cuando una conversación se cierra (cancelación confirmada,
@@ -57,6 +108,7 @@ export const IntencionEnum = z.enum([
   'confirmar',
   'confirmar_cancelacion',
   'rechazar_cancelacion',
+  'reactivar',
   'saludo',
   'modificar_sin_datos',
   'consultar_precios',
@@ -85,6 +137,12 @@ export const PedidoIASchema = z.object({
   obs_general: z.string().nullable().describe('Detalles de preparación SIN tipo específico (ej: "sin coco", "todos sin azúcar", "bien fríos"). NO pongas acá sabores que ya son de agua o de crema. null si no aplica.'),
   obs_general_operacion: z.enum(['reemplazar', 'agregar', 'mantener', 'limpiar']).describe('Mismas reglas que obs_agua_operacion, para los detalles generales.'),
   metodo_pago: z.string().nullable().describe('"efectivo", "transferencia" o null.'),
+  // Señal ORTOGONAL a `intencion`: el modelo la llena SIEMPRE que haya una
+  // pregunta real de negocio, aunque además clasifique el mensaje como
+  // datos_pedido/confirmar/etc. Es lo que permite delegar la pregunta a un
+  // humano sin perder el pedido (antes, con un solo enum, la pregunta mezclada
+  // con datos se descartaba en silencio).
+  pregunta_negocio: z.string().nullable().describe('La pregunta o planteo REAL de negocio que trae el mensaje (horarios, si llegan/cobertura de una zona, cuánto demora la entrega, qué sabores hay disponibles, stock, promos, venta mayorista, un reclamo/problema con un pedido, facturación). Copiala textual acá SIEMPRE que exista, aunque el mensaje además traiga cantidades/dirección/pago y la intención sea "datos_pedido". null si no hay una pregunta de negocio real (bromas, off-topic o mensajes sin sentido NO cuentan).'),
 });
 
 /**
@@ -200,6 +258,9 @@ function pedidoDesdeShortCircuit(
     observaciones: pedidoActivo?.observaciones ?? null,
     observaciones_detalle: leerSlots(pedidoActivo),
     metodo_pago: null,
+    // Los mensajes que atrapa el short-circuit (saludo/confirmar/cancelar) nunca
+    // son una consulta de negocio, así que nunca hay pregunta que delegar.
+    pregunta_negocio: null,
     datos_completos: false,
   };
 }
@@ -370,6 +431,37 @@ export function pareceDireccion(texto: string | null): boolean {
 }
 
 /**
+ * ¿El texto del cliente expresa que pasa a RETIRAR (retiro en el local) en vez
+ * de pedir envío a domicilio? Red determinista que respalda —no reemplaza— al
+ * modelo, igual que `pareceDireccion`: si el cliente lo dice pero el modelo no
+ * puso el sentinela "retira" en `direccion`, lo seteamos nosotros. Tolera
+ * tildes, mayúsculas y las variantes/conjugaciones reales ("retiro", "paso a
+ * retirar", "lo paso a buscar", "lo busco", "paso por el local").
+ *
+ * Se aplica SOLO cuando no quedó una dirección de envío válida, así una frase
+ * ambigua tipo "Corrientes 1234, retiro" prioriza la calle real.
+ */
+export function mencionaRetiro(texto: string | null): boolean {
+  if (!texto) return false;
+  const n = texto
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, ''); // sin tildes
+
+  // Verbo/sustantivo "retirar/retiro" en sus formas comunes: retiro, retira,
+  // retirar, retirarlo, retiramos, retirá, retiré, retiro en el local...
+  if (/\bretir(o|a|e|ar|as|amos|an|á|é|ó)/.test(n)) return true;
+
+  // "paso/pasamos/voy/vamos/vengo a buscar(lo)" y "lo/los busco".
+  if (/\b(paso|pasamos|pasa|voy|vamos|vengo|venimos|pasar)\b[^.]{0,20}\bbuscar/.test(n)) return true;
+  if (/\b(lo|los|la|las)\s+busco\b/.test(n)) return true;
+
+  // "paso por el local/negocio/sucursal".
+  if (/\bpas(o|amos|a)\s+por\s+(el\s+|la\s+)?(local|negocio|sucursal)\b/.test(n)) return true;
+
+  return false;
+}
+
+/**
  * Qué responder cuando el pedido en armado está incompleto. La regla: si falta
  * UN solo dato y es una elección cerrada, se pide con botones (pago) o con un
  * botón de atajo (retiro cuando falta la dirección); si faltan varios, lista de
@@ -380,21 +472,34 @@ export type RespuestaDatosFaltantes =
   | { tipo: 'boton_retira' }
   | { tipo: 'texto'; mensaje: string };
 
+// Variantes del saludo de "arranquemos tu pedido" (cuando faltan los 3 datos).
+// Se rota según un `seed` determinista para no repetir el MISMO texto palabra
+// por palabra ante mensajes off-topic consecutivos, que se sentía robótico
+// (#4 del informe). La variante 0 es la histórica (los tests con seed por
+// defecto la esperan). El comportamiento de fondo no cambia: sigue siendo el
+// mismo pedido de los 3 datos, solo varía el saludo de arriba.
+const BIENVENIDAS_DATOS_FALTANTES = [
+  "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:",
+  "¡Buenas! 🍦 Contame qué querés y te lo armo. Necesito:",
+  "¡Hola! 😋 Dale, armamos tu pedido. Pasame:",
+];
+
 export function elegirRespuestaDatosFaltantes(
   faltaCantidad: boolean,
   faltaDireccion: boolean,
   faltaPago: boolean,
+  seed = 0,
 ): RespuestaDatosFaltantes {
   if (!faltaCantidad && !faltaDireccion && faltaPago) return { tipo: 'botones_pago' };
   if (!faltaCantidad && faltaDireccion && !faltaPago) return { tipo: 'boton_retira' };
 
   const datosFaltantes: string[] = [];
-  if (faltaCantidad) datosFaltantes.push("Cantidades de helado");
+  if (faltaCantidad) datosFaltantes.push("Cantidades de helado (agua/crema)");
   if (faltaDireccion) datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
   if (faltaPago) datosFaltantes.push("Forma de pago (efectivo o transferencia)");
 
   const encabezado = datosFaltantes.length === 3
-    ? "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:"
+    ? BIENVENIDAS_DATOS_FALTANTES[Math.abs(seed) % BIENVENIDAS_DATOS_FALTANTES.length]
     : "Para armar tu pedido me falta:";
   return { tipo: 'texto', mensaje: [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n') };
 }
@@ -446,8 +551,17 @@ export function estaDespachado(p: { estado?: string | null; enviado?: boolean | 
  * Construye el SYSTEM_PROMPT que se le pasa a Groq, dependiendo de si hay
  * un pedido activo y en qué estado está. Exportado para que el endpoint de
  * dev pueda reproducir el mismo contexto que el flujo real.
+ *
+ * `opciones.hayPedidoCanceladoReciente`: cuando NO hay pedido activo pero el
+ * cliente canceló uno hace poco, habilitamos la intención "reactivar" en el
+ * prompt de pedido nuevo, para que un "no, quiero el pedido" recupere el
+ * cancelado con sus datos en vez de arrancar de cero.
  */
-export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): string {
+export function buildSystemPrompt(
+  pedidoActivo: PedidoActivoContext | null,
+  opciones?: { hayPedidoCanceladoReciente?: boolean },
+): string {
+  const hayPedidoCanceladoReciente = Boolean(opciones?.hayPedidoCanceladoReciente);
   const pedidoEnviado = Boolean(pedidoActivo && estaDespachado(pedidoActivo));
   const tieneBorrador = pedidoActivo && pedidoActivo.estado === 'borrador';
   const yaExisteEnCocina = pedidoActivo && pedidoActivo.estado === 'pendiente' && !pedidoEnviado;
@@ -495,8 +609,10 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
       - "datos_pedido": el cliente trae info concreta del pedido (cantidades, sabores, dirección, pago), incluso para modificar uno existente. Default cuando no aplique ninguna otra.
       `}
 
+      CAMPO "pregunta_negocio" (INDEPENDIENTE de la intención): si el mensaje incluye una pregunta o planteo REAL de negocio (horarios, si llegan/cobertura de una zona, cuánto demora la entrega, qué sabores hay disponibles, stock, promos, venta mayorista, un reclamo o problema con un pedido, facturación), copiá esa pregunta textual en "pregunta_negocio" — SIEMPRE, aunque además elijas "datos_pedido"/"confirmar"/etc. porque el mensaje trae datos del pedido. Dejala en null si no hay una pregunta de negocio real (bromas, off-topic o mensajes sin sentido NO son consulta de negocio).
+
       2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
-      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}".
+      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}". Si el cliente dice que pasa a RETIRAR / lo pasa a buscar / retira en el local (cualquier conjugación: "retiro", "paso a retirar", "lo busco"), poné direccion="retira" (sentinela), aunque lo diga junto con otros datos.
       - "aclaracion" + "aclaracion_operacion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde". NO fusiones vos el texto: solo extraé el dato de ESTE mensaje y elegí la operación; el sistema combina con lo actual (${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}).
         * "agregar": el cliente suma un detalle NUEVO sobre un objeto/atributo que NO estaba descrito. Devolvé SOLO el detalle nuevo en "aclaracion" (el sistema lo concatena con coma). Ej: actual "la casa es verde" + mensaje "con marco naranja" → aclaracion="con marco naranja", aclaracion_operacion="agregar" (color de casa y marco son cosas distintas). Otro: actual "depto 6" + mensaje "piso 3" → aclaracion="piso 3", aclaracion_operacion="agregar".
         * "reemplazar": el cliente CONTRADICE un detalle del actual. OJO: contradecir NO requiere que diga "no". Si vuelve a describir el MISMO objeto/atributo (el portón, la casa, la puerta, el piso, el color) con otro valor, ES una contradicción → reemplazar, no agregar. Devolvé el texto ya corregido COMPLETO en "aclaracion", reemplazando el valor viejo de ese atributo y conservando los demás detalles. Ej explícito: actual "casa marron, de 2 pisos" + mensaje "no, es verde" → aclaracion="casa verde, de 2 pisos". Ej implícito: actual "porton rojo, puerta gris" + mensaje "porton gris" → aclaracion="porton gris, puerta gris" (el portón ya estaba descrito como rojo; se pisa ese valor, la puerta se mantiene), aclaracion_operacion="reemplazar".
@@ -513,7 +629,7 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
         * "reemplazar": valor FIJO, SIN "más"/"menos". Ej: "que sean 50", "cambialo a 20", "ahora 30 de crema". También el desglose ya sumado ("que los de agua sean 20 de frutilla y 40 de menta" → 60).
         * "mantener": no menciona ese tipo en el mensaje. Valor = 0.
         Contraste clave (cada tipo es independiente): "25 más de agua" = sumar 25 | "25 de agua" = reemplazar 25 | "5 menos de crema" = restar 5.
-        POR UNIDAD, NUNCA POR PESO: los helados se venden por unidad, no por kilo/gramo. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua"), NO conviertas ni inventes un número: dejá esa cantidad en "mantener" (el sistema vuelve a pedir las unidades).
+        POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en "mantener" (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede sin definir.
 
       IMPORTANTE: Devolvé TODOS los campos del schema. "intencion" es una sola opción del enum, no un booleano.
     `;
@@ -525,18 +641,21 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
     CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
 
     1. INTENCIÓN DEL MENSAJE (campo "intencion", elegí UNA opción):
-    Valores válidos en este contexto: "cancelar", "saludo", "consultar_precios", "consulta_negocio", "datos_pedido".
-    - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).
+    Valores válidos en este contexto: "cancelar", ${hayPedidoCanceladoReciente ? `"reactivar", ` : ''}"saludo", "consultar_precios", "consulta_negocio", "datos_pedido".
+    - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).${hayPedidoCanceladoReciente ? `
+    - "reactivar": el cliente acaba de cancelar un pedido y se ARREPIENTE: quiere recuperar ese mismo pedido tal cual estaba, SIN aportar datos nuevos (ej: "no, no lo canceles", "en realidad sí lo quiero", "reactivalo", "volvé a activar el pedido", "quiero el pedido que cancelé"). Si en cambio arranca un pedido NUEVO con datos concretos (cantidades/dirección/pago distintos), usá "datos_pedido".` : ''}
     - "saludo": el mensaje es ÚNICAMENTE un saludo (ej: "hola", "buenas"), sin datos del pedido.
     - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin dar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen los helados?"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
     - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, un reclamo o problema con un pedido anterior, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos de un pedido, usá "datos_pedido".
     - "datos_pedido": el cliente trae info del pedido (cantidades, sabores, dirección, pago). Default cuando no aplique otra.
 
+    CAMPO "pregunta_negocio" (INDEPENDIENTE de la intención): si el mensaje incluye una pregunta o planteo REAL de negocio (horarios, si llegan/cobertura de una zona, cuánto demora la entrega, qué sabores hay disponibles, stock, promos, venta mayorista, un reclamo o problema con un pedido, facturación), copiá esa pregunta textual en "pregunta_negocio" — SIEMPRE, aunque además elijas "datos_pedido" porque el mensaje trae datos del pedido. Dejala en null si no hay una pregunta de negocio real (bromas, off-topic o mensajes sin sentido NO son consulta de negocio).
+
     2. REGLAS DE EXTRACCIÓN:
-    - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si NO menciona direccion ni retiro, pon null.
+    - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si el cliente dice que pasa a RETIRAR / lo pasa a buscar / retira en el local (cualquier conjugación: "retiro", "paso a retirar", "lo busco"), poné direccion="retira" (sentinela). Si NO menciona ni dirección ni retiro, pon null.
     - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
     - "aclaracion_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay aclaración previa que combinar).
-    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10). POR UNIDAD, NUNCA POR PESO: los helados se venden por unidad, no por kilo/gramo. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua"), NO conviertas ni inventes un número: dejá esa cantidad en 0 (el sistema vuelve a pedir las unidades).
+    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10). POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en 0 (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede en 0.
     - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
     - SABORES (campos "obs_agua" / "obs_crema" / "obs_general"): poné los sabores en el slot del tipo, SIN el prefijo "los de agua/crema". NO confundas el tipo de helado con un sabor.
       * "obs_agua": sabores de los de agua (ej. "frutilla y menta", "5 de frutilla y 5 de menta"). "obs_crema": ídem crema. "obs_general": sabores/detalles sin tipo ("sin coco", "de dulce de leche").
@@ -566,6 +685,13 @@ export function buildSystemPrompt(pedidoActivo: PedidoActivoContext | null): str
 // que la última wake-up siempre vea su propio mensaje como "viejo" y procese.
 const DEFER_THRESHOLD_MS = 5000;
 
+// Ventana para "deshacer" una cancelación: si el cliente canceló hace menos que
+// esto y se arrepiente ("no, quiero el pedido"), reabrimos el pedido cancelado
+// con sus datos en vez de arrancar de cero. Medida desde updated_at (≈ el
+// momento de la cancelación). Corta a los 30 min: pasado eso, un "quiero el
+// pedido" es un pedido nuevo, no un arrepentimiento inmediato.
+const VENTANA_REACTIVAR_MS = 30 * 60 * 1000;
+
 /**
  * Envía el mensaje que pide el/los dato(s) que faltan para completar un pedido.
  * Cuando falta UN solo dato y es una elección cerrada (pago / dirección), lo
@@ -585,14 +711,23 @@ export async function pedirDatosFaltantes(
   faltaCantidad: boolean,
   faltaDireccion: boolean,
   faltaPago: boolean,
+  saludo?: string,
+  seed = 0,
 ): Promise<boolean> {
   console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}`);
 
   // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
-  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago);
+  // `seed` rota el saludo cuando faltan los 3 datos (ver elegirRespuestaDatosFaltantes),
+  // para no repetir el mismo texto ante mensajes off-topic seguidos.
+  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed);
+  // Cuando entramos por la rama "saludo con borrador parcial", el caller
+  // prepende un "¡Hola! 👋 …" al cuerpo así el cliente ve UNA sola burbuja en
+  // vez de dos seguidas (saludo + pedido de datos). Vale para las tres formas
+  // (texto libre, botones de pago, botón de retiro).
+  const prefijo = saludo ? `${saludo}\n\n` : '';
 
   if (respuesta.tipo === 'botones_pago') {
-    return enviarMensajeConBotones(numeroCliente, "¿Cómo lo pagás? 💰", [
+    return enviarMensajeConBotones(numeroCliente, `${prefijo}¿Cómo lo pagás? 💰`, [
       { id: 'resp_pago_efectivo', title: 'Efectivo' },
       { id: 'resp_pago_transferencia', title: 'Transferencia' },
     ]);
@@ -604,12 +739,12 @@ export async function pedirDatosFaltantes(
     // lo tenga que escribir.
     return enviarMensajeConBotones(
       numeroCliente,
-      "¿A qué dirección te lo llevamos? Mandame calle y número (ej: *Mitre 950*) 🛵",
+      `${prefijo}¿A qué dirección te lo llevamos? Mandame calle y número (ej: *Mitre 950*) 🛵`,
       [{ id: 'resp_retira', title: 'Paso a retirar' }],
     );
   }
 
-  return enviarMensajeWhatsApp(numeroCliente, respuesta.mensaje);
+  return enviarMensajeWhatsApp(numeroCliente, `${prefijo}${respuesta.mensaje}`);
 }
 
 /**
@@ -791,10 +926,13 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   // copiado al cadete pero con estado todavía en 'pendiente' cae acá y lo
   // reconocemos igual como despachado.
   let ultimoPedidoEnviado: { id: number; estado: string; created_at: string } | null = null;
+  // Pedido cancelado hace poco (dentro de VENTANA_REACTIVAR_MS): si el cliente
+  // se arrepiente, lo reabrimos con sus datos en vez de perder cantidad/pago.
+  let ultimoPedidoCancelado: { id: number; created_at: string } | null = null;
   if (!pedidoActivo) {
     const { data: ultimoPedido } = await supabaseAdmin
       .from('pedidos')
-      .select('id, estado, enviado, created_at')
+      .select('id, estado, enviado, created_at, updated_at')
       .eq('telefono', numeroCliente)
       .gte('created_at', hace12Horas)
       .order('created_at', { ascending: false })
@@ -804,6 +942,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     if (ultimoPedido && estaDespachado(ultimoPedido)) {
       ultimoPedidoEnviado = ultimoPedido;
       console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) ya está despachado (estado=${ultimoPedido.estado}, enviado=${ultimoPedido.enviado}). Lo uso para respuestas contextuales.`);
+    } else if (ultimoPedido && ultimoPedido.estado === 'cancelado') {
+      // ¿Se canceló hace poco? updated_at ≈ el momento de la cancelación
+      // (fallback a created_at por si la columna viniera null).
+      const marcaCancelacion = ultimoPedido.updated_at ?? ultimoPedido.created_at;
+      const msDesdeCancelacion = Date.now() - new Date(marcaCancelacion).getTime();
+      if (msDesdeCancelacion < VENTANA_REACTIVAR_MS) {
+        ultimoPedidoCancelado = ultimoPedido;
+        console.log(`↩️ El último pedido del cliente (id ${ultimoPedido.id}) se canceló hace ${Math.round(msDesdeCancelacion / 1000)}s; habilito reactivar.`);
+      } else {
+        console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está cancelado pero hace rato (${Math.round(msDesdeCancelacion / 60000)} min); no habilito reactivar.`);
+      }
     } else if (ultimoPedido) {
       console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado ${ultimoPedido.estado} (enviado=${ultimoPedido.enviado}); no aplica respuesta contextual de despacho.`);
     }
@@ -917,7 +1066,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   console.log(`- Ya existe en cocina? ${yaExisteEnCocina}`);
   console.log(`- Está esperando confirmación de cancelación? ${esperandoCancelacion}`);
 
-  const SYSTEM_PROMPT = buildSystemPrompt(pedidoActivo);
+  const SYSTEM_PROMPT = buildSystemPrompt(pedidoActivo, {
+    hayPedidoCanceladoReciente: Boolean(ultimoPedidoCancelado),
+  });
 
   // 5. LLAMADA A GROQ con structured output validado por Zod.
   //    El AI SDK marca `json_validate_failed` como no-retryable (es un 400),
@@ -926,6 +1077,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   const MAX_ATTEMPTS = 3;
   let pedido: PedidoIA | null = null;
   let lastError: unknown = null;
+  let modeloIdx = 0; // índice en MODELOS_EXTRACCION; avanza ante un 429 (fallback)
+  let attempt = 0; // reintentos por validación DENTRO del modelo actual
 
   // 4b. SHORT-CIRCUIT: si el batch es un único mensaje inequívoco dado el
   //     estado del pedido (ej. "sí" en esperando_cancelacion, "hola" con
@@ -942,10 +1095,15 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     }
   }
 
-  for (let attempt = 1; pedido === null && attempt <= MAX_ATTEMPTS; attempt++) {
+  // Recorremos la cadena de modelos. Dentro de cada modelo reintentamos hasta
+  // MAX_ATTEMPTS por errores de VALIDACIÓN (non-determinismo). Ante un 429 (rate
+  // limit / TPD) no reintentamos el mismo modelo: saltamos al siguiente.
+  while (pedido === null && modeloIdx < MODELOS_EXTRACCION.length) {
+    const modelo = MODELOS_EXTRACCION[modeloIdx];
+    attempt++;
     try {
       const { object } = await generateObject({
-        model: groq('openai/gpt-oss-20b'),
+        model: groq(modelo),
         system: SYSTEM_PROMPT,
         prompt: `Conversación reciente (el último turno del bot da contexto al mensaje del cliente):\n${historialParaIA}`,
         schema: PedidoIASchema,
@@ -998,6 +1156,13 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       const observacionesFinal = reconstruirObservaciones(slotsFinales);
       console.log(`🍨 Observaciones: ${JSON.stringify(slotsActuales)} -> ${JSON.stringify(slotsFinales)} => "${observacionesFinal ?? ''}"`);
 
+      // Red determinista para metodo_pago: el modelo a veces devuelve el TEXTO
+      // "null" (u otro placeholder) en vez del null de JSON; sin coerción, ese
+      // "null" se colaba como un pago válido ("Pago: null" en el resumen). Solo
+      // dejamos pasar 'efectivo'/'transferencia'; el resto cae a null y el flujo
+      // vuelve a pedir la forma de pago.
+      const metodoPagoFinal = normalizarMetodoPago(object.metodo_pago);
+
       pedido = {
         ...object,
         cantidad_agua: cantidadAguaFinal,
@@ -1005,26 +1170,61 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         aclaracion: aclaracionFinal,
         observaciones: observacionesFinal,
         observaciones_detalle: slotsFinales,
+        metodo_pago: metodoPagoFinal,
         datos_completos: Boolean(
-          object.direccion && object.metodo_pago && (cantidadAguaFinal > 0 || cantidadCremaFinal > 0)
+          object.direccion && metodoPagoFinal && (cantidadAguaFinal > 0 || cantidadCremaFinal > 0)
         ),
       };
 
-      console.log(`✅ Objeto IA extraído (intento ${attempt}/${MAX_ATTEMPTS}):`, pedido);
+      console.log(`✅ Objeto IA extraído (modelo ${modelo}, intento ${attempt}/${MAX_ATTEMPTS}):`, pedido);
       break;
     } catch (iaError) {
       lastError = iaError;
-      console.warn(`⚠️ Intento ${attempt}/${MAX_ATTEMPTS} falló:`, iaError instanceof Error ? iaError.message : iaError);
+      // 429 = se agotó la cuota de ESTE modelo (rate limit / TPD). No tiene
+      // sentido reintentarlo: saltamos al siguiente de la cadena (que tiene su
+      // propia cubeta) para no dejar al cliente sin respuesta.
+      if (esRateLimit(iaError)) {
+        console.warn(`🚧 Rate limit (429) en "${modelo}". Fallback al siguiente modelo de la cadena.`);
+        modeloIdx++;
+        attempt = 0;
+        continue;
+      }
+      // Error de validación (non-determinismo del modelo): reintentamos el mismo
+      // modelo hasta MAX_ATTEMPTS y, agotados, nos rendimos (comportamiento de
+      // siempre; el fallback es solo para cuota, no para mala suerte de parseo).
+      console.warn(`⚠️ Intento ${attempt}/${MAX_ATTEMPTS} con "${modelo}" falló:`, iaError instanceof Error ? iaError.message : iaError);
+      if (attempt >= MAX_ATTEMPTS) break;
     }
   }
 
   if (!pedido) {
-    console.error("❌ Falló la extracción structured tras todos los reintentos:", lastError);
+    console.error("❌ Falló la extracción structured tras toda la cadena de modelos:", lastError);
     await enviarMensajeWhatsApp(numeroCliente, "Disculpá, no te entendí 😅 ¿Me lo repetís? Por ejemplo: *20 de agua y 10 de crema, Mitre 950, efectivo* 🙏");
     return;
   }
 
   try {
+
+    // CONSULTA DE NEGOCIO EMBEBIDA (versión completa): el modelo copia en
+    // `pregunta_negocio` toda pregunta real de negocio, INCLUSO cuando el
+    // mensaje además trae datos del pedido (intención datos_pedido/confirmar/
+    // etc.). La delegamos a un humano — flag `requiere_atencion` + aviso al
+    // cliente — y DEJAMOS SEGUIR el flujo normal, así el pedido igual se
+    // procesa (antes esa pregunta se descartaba en silencio, o peor: si el
+    // pedido no parseaba, no pasaba nada). La intención `consulta_negocio`
+    // (pregunta PURA) tiene su propio handler abajo que ya delega y corta, así
+    // que la excluimos acá para no avisar dos veces.
+    const hayPreguntaNegocio = esPreguntaNegocioReal(pedido.pregunta_negocio);
+    if (hayPreguntaNegocio && pedido.intencion !== 'consulta_negocio') {
+      console.log(`🙋 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") junto a intención "${pedido.intencion}". Delego a un humano y sigo el flujo del pedido.`);
+      await marcarRequiereAtencion(numeroCliente);
+      await enviarMensajeWhatsApp(
+        numeroCliente,
+        'Buena pregunta 🙌 Sobre eso te responde una persona del equipo en un momento 🙏',
+      );
+      // NO retornamos: si el mensaje trae datos del pedido, el flujo de armado
+      // de abajo los procesa igual (resumen / pedir lo que falta).
+    }
 
     // CONSULTA DE PRECIOS: intención informativa, independiente del pedido.
     // La resolvemos antes de tocar dirección/cantidades para que un "¿cuánto
@@ -1086,6 +1286,21 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     if (pedido.direccion && !pareceDireccion(pedido.direccion)) {
       console.log(`📍 La dirección "${pedido.direccion}" no pasó la validación de formato (no parece calle+altura). La descarto.`);
       pedido.direccion = null;
+    }
+
+    // #2 — RED DE RETIRO (determinista, respalda al modelo): si NO quedó una
+    // dirección de envío válida pero el cliente dijo que pasa a retirar (en
+    // cualquier conjugación/variante), ponemos el sentinela "retira". Corre
+    // DESPUÉS del guard de formato (así "Corrientes 1234, retiro" prioriza la
+    // calle real que ya quedó en `direccion`) y ANTES de la inyección histórica
+    // (un retiro no debe rellenarse con la dirección guardada). Usa el texto
+    // crudo del batch del cliente, no la extracción del modelo.
+    if (!pedido.direccion) {
+      const textoClienteCrudo = mensajesClaim.map(m => m.texto ?? '').join(' ');
+      if (mencionaRetiro(textoClienteCrudo)) {
+        console.log('🛵 Retiro detectado en el mensaje del cliente. Seteo direccion="retira".');
+        pedido.direccion = 'retira';
+      }
     }
 
     // IMPORTANTE: el override de saludo y el cálculo de cambios reales corren
@@ -1291,6 +1506,48 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       return;
     }
 
+    // #3 — REACTIVAR: el cliente canceló hace poco y se arrepintió ("no, quiero
+    // el pedido"). En vez de arrancar de cero (perdiendo cantidad/pago), reabrimos
+    // el pedido cancelado con SUS datos y lo devolvemos a borrador. La intención
+    // solo la ofrece el prompt cuando hay un cancelado reciente (ultimoPedidoCancelado),
+    // así que acá basta con verificar que siga existiendo (guard contra races).
+    if (pedido.intencion === 'reactivar') {
+      if (ultimoPedidoCancelado) {
+        const { data: reabierto } = await supabaseAdmin
+          .from('pedidos')
+          .update({ estado: 'borrador' })
+          .eq('id', ultimoPedidoCancelado.id)
+          .eq('telefono', numeroCliente)
+          .eq('estado', 'cancelado') // guard: sigue cancelado (no lo tocó otro proceso)
+          .neq('enviado', true)
+          .select('*')
+          .maybeSingle();
+
+        if (reabierto) {
+          console.log(`↩️ Pedido ${reabierto.id} reactivado: vuelve a borrador con sus datos.`);
+          if (esBorradorCompleto(reabierto)) {
+            await enviarMensajeWhatsApp(numeroCliente, "¡Listo! Reactivé tu pedido 🙌 Te paso el resumen de nuevo:");
+            await enviarResumenYPedirConfirmacion(numeroCliente, reabierto, false);
+          } else {
+            // Se había cancelado un borrador parcial: lo retomamos y pedimos lo que falta.
+            await enviarMensajeWhatsApp(numeroCliente, "¡Listo! Retomo tu pedido 🙌 Me falta un dato para cerrarlo:");
+            await pedirDatosFaltantes(
+              numeroCliente,
+              !(reabierto.cantidad_agua > 0 || reabierto.cantidad_crema > 0),
+              !reabierto.direccion,
+              !reabierto.metodo_pago,
+            );
+          }
+          return;
+        }
+        console.log(`⚠️ No se pudo reactivar el pedido ${ultimoPedidoCancelado.id} (ya no estaba cancelado). Sigo como pedido nuevo.`);
+      }
+      // Sin pedido cancelado reciente (o se perdió la carrera): no hay nada que
+      // reabrir. Invitamos a armar uno nuevo en vez de dejar al cliente colgado.
+      await enviarMensajeWhatsApp(numeroCliente, "No tengo un pedido reciente para reactivar 🤔 Si querés, armamos uno nuevo: mandame cantidades, dirección y forma de pago 🍦");
+      return;
+    }
+
     // Modificación de un pedido ya despachado (sin pedidoActivo): el pedido ya
     // salió, no se puede tocar. Mismo criterio que la cancelación de un
     // despachado. "Despachado" incluye enviado=true con estado='pendiente' (el
@@ -1335,9 +1592,16 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           }
         } else {
           // Borrador parcial: todavía no hay nada que confirmar (ofrecer
-          // "confirmar" acá haría 0 filas). Saludamos y re-pedimos lo que falta.
-          await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tengo tu pedido en armado, me falta un dato para cerrarlo:");
-          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+          // "confirmar" acá haría 0 filas). Saludamos y re-pedimos lo que
+          // falta en una sola burbuja (el saludo va prependido al cuerpo del
+          // pedido de datos, sea texto libre, botones de pago o botón de retiro).
+          await pedirDatosFaltantes(
+            numeroCliente,
+            faltaCantidad,
+            faltaDireccion,
+            faltaPago,
+            "¡Hola! 👋 Tengo tu pedido en armado, me falta un dato para cerrarlo.",
+          );
         }
       } else if (esperandoCancelacion) {
         await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido está por cancelarse. ¿Confirmás? *SÍ* o *NO*");
@@ -1508,7 +1772,11 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         }
       }
 
-      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+      // Seed determinista para variar el saludo cuando faltan los 3 datos (caso
+      // típico de un mensaje off-topic/sin sentido): mensajes distintos → largo
+      // distinto → variante distinta, así no se repite palabra por palabra.
+      const seedSaludo = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
+      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, seedSaludo);
       return;
     }
 

@@ -1,6 +1,32 @@
 import { describe, it, expect } from 'vitest';
-import { mimeAExtension, mensajeConfirmacion, construirResumenPedido } from './whatsapp';
+import { mimeAExtension, mensajeConfirmacion, construirResumenPedido, esErrorTimeoutPropio } from './whatsapp';
 import { PAGO_TRANSFERENCIA, ENTREGA, formatearPesos } from './precios-publico';
+
+// Clasificación del error de un fetch a Meta: solo el timeout propio (AbortError)
+// es "posible entrega ya hecha" y por eso NO se reintenta (reintentar duplicaría,
+// la Cloud API no tiene idempotencia en outbound). El resto sí es reintentable.
+describe('esErrorTimeoutPropio', () => {
+  it('reconoce el AbortError de nuestro AbortController (por name)', () => {
+    // Node/undici lanza un DOMException con name 'AbortError' y este mensaje.
+    const abort = new Error('This operation was aborted');
+    abort.name = 'AbortError';
+    expect(esErrorTimeoutPropio(abort)).toBe(true);
+  });
+
+  it('NO trata como timeout un fallo de conexión (fetch failed / DNS / ECONNREFUSED)', () => {
+    // Esos llegan como TypeError 'fetch failed' → la request no salió → reintentable.
+    expect(esErrorTimeoutPropio(new TypeError('fetch failed'))).toBe(false);
+    const dns = new Error('getaddrinfo ENOTFOUND graph.facebook.com');
+    expect(esErrorTimeoutPropio(dns)).toBe(false);
+  });
+
+  it('es defensiva ante no-errores', () => {
+    expect(esErrorTimeoutPropio(null)).toBe(false);
+    expect(esErrorTimeoutPropio(undefined)).toBe(false);
+    expect(esErrorTimeoutPropio('AbortError')).toBe(false); // string suelto, no Error
+    expect(esErrorTimeoutPropio({ name: 'AbortError' })).toBe(false); // objeto plano, no instanceof Error
+  });
+});
 
 // Función pura: mapeo mime -> extensión para el nombre del archivo en Storage.
 // (El resto de whatsapp.ts es red/Storage y no se testea acá.)

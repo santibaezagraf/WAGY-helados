@@ -31,13 +31,35 @@ async function persistirMensajeBot(telefono: string, texto: string) {
   }
 }
 
-// Timeout propio por intento: más corto que el connect-timeout de 10s de undici,
-// así un blip de red corta rápido y reintenta en vez de colgar el worker.
+// Timeout propio por intento hacia Meta. Si dispara (AbortError) NO reintentamos:
+// el abort ocurre DESPUÉS de mandar la request, así que Meta pudo haberla
+// entregado (la Cloud API no tiene idempotencia en outbound) y reintentar
+// duplicaría el mensaje. Ver esErrorTimeoutPropio + postAMeta. Generoso a
+// propósito (Meta suele responder en 1-3s); no conviene subirlo mucho porque el
+// worker corre dentro del budget de la función serverless.
 const META_TIMEOUT_MS = 10000;
-// 1 intento + 2 reintentos. Cubre cortes transitorios de pocos segundos hacia
-// Meta (el caso típico: el cliente quedaba sin recibir el resumen porque el
-// `fetch` falló una vez y el error se tragaba en silencio).
+// 1 intento + 2 reintentos. Solo aplica a fallos de CONEXIÓN (fetch failed / DNS
+// / ECONNREFUSED, donde la request no llegó) y a 5xx (Meta respondió que no la
+// procesó): ahí reintentar es seguro. El caso típico que motivó el retry: el
+// cliente quedaba sin recibir el resumen porque el `fetch` falló una vez y el
+// error se tragaba en silencio. Los timeouts propios NO entran acá.
 const META_MAX_INTENTOS = 3;
+
+/**
+ * ¿La excepción de un fetch a Meta es nuestro propio timeout (AbortController)?
+ *
+ * Determina la política de reintento y por eso está separada y testeada. Un
+ * AbortError significa que la request salió y estábamos esperando la respuesta
+ * cuando cortamos: Meta pudo haber procesado y ENTREGADO el mensaje igual. Como
+ * la Cloud API no ofrece idempotencia en outbound, reintentar ahí DUPLICA el
+ * mensaje al cliente (fue el bug de "¿Querés cancelar el pedido?" x2). El resto
+ * de las excepciones del catch (TypeError 'fetch failed' por DNS/ECONNREFUSED/
+ * reset previo a la respuesta) significan que la request no llegó a destino →
+ * reintentar es seguro. Pura y exportada para test.
+ */
+export function esErrorTimeoutPropio(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Modo test (BOT_TEST_MODE='1'): intercepta TODA la salida hacia Meta.
@@ -117,7 +139,20 @@ async function postAMeta(body: object, descripcion: string): Promise<boolean> {
       }
       console.warn(`Meta respondió ${response.status} en ${descripcion} (intento ${intento}/${META_MAX_INTENTOS}):`, detalle);
     } catch (error) {
-      // fetch failed / AbortError (timeout) / DNS, etc. → reintentable.
+      // Timeout propio (AbortError): la request ya salió y Meta pudo haberla
+      // ENTREGADO. Sin idempotencia en outbound, reintentar duplicaría el
+      // mensaje al cliente. Cortamos y asumimos entregado (true) en vez de
+      // reintentar (duplicaría) o devolver false (dejaría los botones sin armar
+      // → tap del cliente sin respuesta). Es optimista: si Meta NO entregó, se
+      // pierde ese mensaje, pero los flujos críticos tienen red de contención
+      // (recordatorio/auto-rechazo de borradores, reenvío de resúmenes, corte
+      // por silencio en esperando_cancelacion).
+      if (esErrorTimeoutPropio(error)) {
+        console.warn(`⏱️ Timeout esperando a Meta en ${descripcion}: no reintento (posible entrega ya hecha; reintentar duplicaría).`);
+        return true;
+      }
+      // Fallo de conexión (fetch failed / DNS / ECONNREFUSED): la request no
+      // llegó a destino → reintentar es seguro.
       console.warn(`Fallo la conexión con Meta en ${descripcion} (intento ${intento}/${META_MAX_INTENTOS}):`, error instanceof Error ? error.message : error);
     }
 

@@ -7,10 +7,14 @@ import {
   leerSlots,
   reconstruirObservaciones,
   pareceDireccion,
+  mencionaRetiro,
   normalizarTextoShortCircuit,
   intentarShortCircuit,
   elegirRespuestaDatosFaltantes,
   estaDespachado,
+  esRateLimit,
+  esPreguntaNegocioReal,
+  normalizarMetodoPago,
   type PedidoActivoContext,
 } from './procesar';
 
@@ -190,6 +194,78 @@ describe('pareceDireccion', () => {
   });
 });
 
+describe('mencionaRetiro', () => {
+  it('detecta "paso a retirar" inline con el resto del pedido', () => {
+    expect(mencionaRetiro('15 de crema, paso a retirar, pago en efectivo')).toBe(true);
+  });
+  it('detecta la conjugación "retiro"', () => {
+    expect(mencionaRetiro('1234, retiro, efectivo')).toBe(true);
+  });
+  it('detecta "retira" y "retirar" sueltos', () => {
+    expect(mencionaRetiro('retira')).toBe(true);
+    expect(mencionaRetiro('lo voy a retirar yo')).toBe(true);
+  });
+  it('detecta "lo paso a buscar" / "lo busco"', () => {
+    expect(mencionaRetiro('mejor lo paso a buscar')).toBe(true);
+    expect(mencionaRetiro('no, lo busco yo')).toBe(true);
+  });
+  it('detecta "paso por el local"', () => {
+    expect(mencionaRetiro('paso por el local a la tarde')).toBe(true);
+  });
+  it('tolera tildes y mayúsculas', () => {
+    expect(mencionaRetiro('RETIRÁ')).toBe(true);
+  });
+  it('no dispara con una dirección de envío normal', () => {
+    expect(mencionaRetiro('mandámelos a Mitre 951')).toBe(false);
+    expect(mencionaRetiro('10 de crema a San Martín 456, efectivo')).toBe(false);
+  });
+  it('no dispara con null / vacío', () => {
+    expect(mencionaRetiro(null)).toBe(false);
+    expect(mencionaRetiro('')).toBe(false);
+  });
+});
+
+describe('esPreguntaNegocioReal', () => {
+  it('una pregunta real cuenta', () => {
+    expect(esPreguntaNegocioReal('¿a qué hora entregan?')).toBe(true);
+  });
+  it('el string "null" que a veces devuelve el modelo NO cuenta (evita delegación fantasma)', () => {
+    expect(esPreguntaNegocioReal('null')).toBe(false);
+    expect(esPreguntaNegocioReal('NULL')).toBe(false);
+    expect(esPreguntaNegocioReal(' null ')).toBe(false);
+  });
+  it('otros placeholders del modelo tampoco cuentan', () => {
+    expect(esPreguntaNegocioReal('none')).toBe(false);
+    expect(esPreguntaNegocioReal('undefined')).toBe(false);
+    expect(esPreguntaNegocioReal('N/A')).toBe(false);
+  });
+  it('null / vacío / whitespace no cuentan', () => {
+    expect(esPreguntaNegocioReal(null)).toBe(false);
+    expect(esPreguntaNegocioReal(undefined)).toBe(false);
+    expect(esPreguntaNegocioReal('')).toBe(false);
+    expect(esPreguntaNegocioReal('   ')).toBe(false);
+  });
+});
+
+describe('normalizarMetodoPago', () => {
+  it('acepta los dos válidos (tolerando mayúsculas/espacios)', () => {
+    expect(normalizarMetodoPago('efectivo')).toBe('efectivo');
+    expect(normalizarMetodoPago('transferencia')).toBe('transferencia');
+    expect(normalizarMetodoPago(' Efectivo ')).toBe('efectivo');
+    expect(normalizarMetodoPago('TRANSFERENCIA')).toBe('transferencia');
+  });
+  it('el string "null" del modelo NO es un pago válido (no se cuela como "Pago: null")', () => {
+    expect(normalizarMetodoPago('null')).toBeNull();
+    expect(normalizarMetodoPago('none')).toBeNull();
+  });
+  it('null / vacío / valor inesperado caen a null', () => {
+    expect(normalizarMetodoPago(null)).toBeNull();
+    expect(normalizarMetodoPago(undefined)).toBeNull();
+    expect(normalizarMetodoPago('')).toBeNull();
+    expect(normalizarMetodoPago('mp')).toBeNull();
+  });
+});
+
 describe('normalizarTextoShortCircuit', () => {
   it('saca tildes y pasa a minúsculas', () => {
     expect(normalizarTextoShortCircuit('SÍ')).toBe('si');
@@ -263,7 +339,7 @@ describe('elegirRespuestaDatosFaltantes', () => {
     expect(elegirRespuestaDatosFaltantes(true, true, false).tipo).toBe('texto');
   });
 
-  it('faltan los tres → encabezado de bienvenida', () => {
+  it('faltan los tres → encabezado de bienvenida (seed por defecto = variante histórica)', () => {
     const r = elegirRespuestaDatosFaltantes(true, true, true);
     expect(r.tipo).toBe('texto');
     if (r.tipo === 'texto') {
@@ -271,6 +347,28 @@ describe('elegirRespuestaDatosFaltantes', () => {
       expect(r.mensaje).toContain('Cantidades de helado');
       expect(r.mensaje).toContain('Dirección de envío');
       expect(r.mensaje).toContain('Forma de pago');
+    }
+  });
+
+  it('faltan los tres → el saludo varía con el seed, pero los 3 ítems no (#4)', () => {
+    const encabezado = (seed: number) => {
+      const r = elegirRespuestaDatosFaltantes(true, true, true, seed);
+      // Primera línea = saludo; el resto son los bullets.
+      return r.tipo === 'texto' ? r.mensaje.split('\n')[0] : '';
+    };
+    // Seeds que caen en variantes distintas dan saludos distintos.
+    expect(encabezado(0)).not.toBe(encabezado(1));
+    expect(encabezado(1)).not.toBe(encabezado(2));
+    // Mismo seed → mismo saludo (determinista, sin Math.random).
+    expect(encabezado(5)).toBe(encabezado(5));
+    // Sea cual sea el saludo, los 3 datos siempre están.
+    for (const seed of [0, 1, 2, 7, 13]) {
+      const r = elegirRespuestaDatosFaltantes(true, true, true, seed);
+      if (r.tipo === 'texto') {
+        expect(r.mensaje).toContain('Cantidades de helado');
+        expect(r.mensaje).toContain('Dirección de envío');
+        expect(r.mensaje).toContain('Forma de pago');
+      }
     }
   });
 });
@@ -308,5 +406,32 @@ describe('estaDespachado', () => {
 
   it('campos ausentes → no despachado', () => {
     expect(estaDespachado({})).toBe(false);
+  });
+});
+
+// Detección del 429 que dispara el fallback de modelo. Es la señal de "modelo
+// sin cuota"; un falso negativo dejaría al cliente sin respuesta en vez de saltar
+// al siguiente modelo, así que cubrimos las dos formas del error (statusCode y
+// texto crudo, como el que devuelve Groq al agotar el TPD).
+describe('esRateLimit', () => {
+  it('detecta por statusCode 429 (APICallError del SDK)', () => {
+    expect(esRateLimit({ statusCode: 429, message: 'lo que sea' })).toBe(true);
+  });
+  it('detecta el mensaje crudo de TPD de Groq aunque no venga statusCode', () => {
+    const err = new Error(
+      'Rate limit reached for model `openai/gpt-oss-20b` ... on tokens per day (TPD): Limit 200000, Used 199159',
+    );
+    expect(esRateLimit(err)).toBe(true);
+  });
+  it('detecta "429" suelto en el mensaje', () => {
+    expect(esRateLimit(new Error('request failed with status 429'))).toBe(true);
+  });
+  it('un error de validación (400) NO es rate limit → se reintenta el mismo modelo', () => {
+    expect(esRateLimit({ statusCode: 400, message: 'json_validate_failed' })).toBe(false);
+  });
+  it('un error cualquiera sin señales de cuota no es rate limit', () => {
+    expect(esRateLimit(new Error('ECONNRESET'))).toBe(false);
+    expect(esRateLimit(null)).toBe(false);
+    expect(esRateLimit(undefined)).toBe(false);
   });
 });
