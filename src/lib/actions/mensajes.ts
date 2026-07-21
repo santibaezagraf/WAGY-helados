@@ -9,9 +9,14 @@ import { enviarMensajeManual, enviarResumenYPedirConfirmacion } from '@/lib/what
 import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
 import {
   activarAtencionHumana,
+  bloquearNumero,
   desactivarAtencionHumana,
+  desbloquearNumero,
   estadoAtencion,
+  estaBloqueado,
   limpiarRequiereAtencion,
+  resetearRateLimit,
+  telefonosConTomaActiva,
   telefonosRequierenAtencion,
 } from '@/lib/bot/atencion-humana'
 import { construirConversaciones, type Conversacion } from '@/lib/conversaciones-utils'
@@ -121,6 +126,17 @@ export async function getTelefonosRequierenAtencion(): Promise<string[]> {
 }
 
 /**
+ * Lista de teléfonos con TOMA HUMANA ACTIVA y vigente. Estado inicial del
+ * componente de notificaciones del header: sirve para decidir si un mensaje
+ * entrante que llega por Realtime tiene que disparar un toast (mensaje del
+ * cliente con un operador manejando la conversación, chat cerrado).
+ */
+export async function getTelefonosConTomaActiva(): Promise<string[]> {
+  await exigirUsuario()
+  return telefonosConTomaActiva()
+}
+
+/**
  * Conversaciones recientes (cualquier teléfono con actividad en las últimas
  * HORAS_HISTORIAL), ordenadas por recencia y deduplicadas. Es el directorio que
  * alimenta el menú de chats del header: a diferencia del flag requiere_atencion,
@@ -205,6 +221,36 @@ export async function getEstadoAtencion(telefono: string): Promise<{ activa: boo
 export async function finalizarAtencion(telefono: string): Promise<void> {
   await exigirUsuario()
   await desactivarAtencionHumana(telefono)
+}
+
+// ── Moderación manual del número (desde el modal de chat) ───────────────────
+
+/** Estado de moderación para el modal: ¿el número está bloqueado? */
+export async function getEstadoModeracion(telefono: string): Promise<{ bloqueado: boolean }> {
+  await exigirUsuario()
+  return { bloqueado: await estaBloqueado(telefono) }
+}
+
+/** Bloquea manualmente el número: el bot lo ignora por completo hasta desbloquear. */
+export async function bloquearNumeroAccion(telefono: string): Promise<void> {
+  await exigirUsuario()
+  await bloquearNumero(telefono)
+}
+
+/** Quita el bloqueo manual (el bot vuelve a responderle). */
+export async function desbloquearNumeroAccion(telefono: string): Promise<void> {
+  await exigirUsuario()
+  await desbloquearNumero(telefono)
+}
+
+/**
+ * Resetea el rate-limit anti-DoS del número: un cliente legítimo que quedó
+ * frenado por mandar muchos mensajes vuelve a poder escribirle al bot al
+ * instante, sin esperar a que la ventana de 1h se vacíe sola.
+ */
+export async function resetearRateLimitAccion(telefono: string): Promise<void> {
+  await exigirUsuario()
+  await resetearRateLimit(telefono)
 }
 
 /**

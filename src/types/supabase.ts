@@ -17,6 +17,8 @@ export type Database = {
       atencion_humana: {
         Row: {
           activa: boolean
+          bloqueado: boolean
+          rate_limit_reset_at: string | null
           requiere_atencion: boolean
           requiere_atencion_at: string | null
           telefono: string
@@ -24,6 +26,8 @@ export type Database = {
         }
         Insert: {
           activa?: boolean
+          bloqueado?: boolean
+          rate_limit_reset_at?: string | null
           requiere_atencion?: boolean
           requiere_atencion_at?: string | null
           telefono: string
@@ -31,6 +35,8 @@ export type Database = {
         }
         Update: {
           activa?: boolean
+          bloqueado?: boolean
+          rate_limit_reset_at?: string | null
           requiere_atencion?: boolean
           requiere_atencion_at?: string | null
           telefono?: string

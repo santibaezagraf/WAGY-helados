@@ -4,7 +4,8 @@ import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
 import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS } from '@/lib/bot/botones';
 import { enviarMensajeWhatsApp, descargarYGuardarMedia } from '@/lib/whatsapp';
-import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
+import { atencionHumanaActiva, estaBloqueado, intervencionHumanaReciente, marcarRequiereAtencion, tocarAtencionHumana } from '@/lib/bot/atencion-humana';
+import { estaRateLimiteado, RATE_LIMIT_MAX } from '@/lib/bot/rate-limit';
 import { verificarFirmaMeta } from '@/lib/firma-meta';
 
 // 1. GET: Meta usa esto una sola vez para verificar que la URL es tuya
@@ -121,6 +122,15 @@ export async function POST(request: Request) {
     const numeroCliente = normalizarNumero(message.from);
     const waMessageId: string | undefined = message.id;
 
+    // Bloqueo manual (gate global, antes de ramificar por tipo): si el staff
+    // bloqueó este número, lo ignoramos por completo — cualquier tipo de mensaje,
+    // 0 tokens, sin descargar media, sin respuesta. Guardamos una fila mínima
+    // (procesado=true) para que el número siga visible en el panel y se pueda
+    // desbloquear desde el chat. Se levanta con `desbloquearNumero`.
+    if (await estaBloqueado(numeroCliente)) {
+      return await manejarBloqueado(message, numeroCliente, waMessageId);
+    }
+
     if (message.type === 'interactive') {
       return await manejarInteractivo(message, numeroCliente, waMessageId);
     }
@@ -151,6 +161,39 @@ export async function POST(request: Request) {
     // Devolvemos 200 igual para que Meta no nos bloquee
     return NextResponse.json({ status: 'error_interno' }, { status: 200 });
   }
+}
+
+/**
+ * Número bloqueado manualmente por el staff. No procesamos NADA (0 tokens, sin
+ * descargar media, sin respuesta, sin avisar a un humano): solo guardamos una
+ * fila mínima `procesado=true` para dejar registro y mantener el número visible
+ * en el panel de conversaciones (así se lo puede desbloquear desde el chat).
+ */
+async function manejarBloqueado(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  message: any,
+  numeroCliente: string,
+  waMessageId: string | undefined,
+) {
+  console.warn(`🚫 Número bloqueado ${numeroCliente} (tipo: ${message.type}). Ignorado sin procesar.`);
+
+  const { error } = await supabaseAdmin
+    .from('mensajes_chat')
+    .insert([{
+      telefono: numeroCliente,
+      texto: message.text?.body ?? null,
+      tipo: message.type === 'text' ? 'text' : message.type,
+      wa_message_id: waMessageId,
+      procesado: true,
+    }]);
+
+  // 23505 = reintento de Meta; cualquier otro error solo lo logueamos (guardar es
+  // best-effort: el punto del bloqueo es no responder, no el registro).
+  if (error && error.code !== '23505') {
+    console.error('Error al guardar mensaje de número bloqueado:', error);
+  }
+
+  return NextResponse.json({ status: 'bloqueado' }, { status: 200 });
 }
 
 async function manejarTexto(
@@ -190,6 +233,14 @@ async function manejarTexto(
   // El bot no responde; en cambio avisamos al operador (requiere_atencion).
   const operadorReciente = !enTomaHumana && await intervencionHumanaReciente(numeroCliente);
 
+  // Rate-limit anti-DoS: si este número ya mandó demasiados mensajes en la última
+  // hora, no lo procesamos con el LLM (protege el presupuesto de tokens de Groq de
+  // un flood sostenido). Guardamos el mensaje igual (visible para el staff) pero
+  // sin agendar el wake-up. Solo aplica si no hay ya un humano en la conversación:
+  // esos casos ya cortan el LLM por su cuenta y el operador decide.
+  const rateLimiteado =
+    !enTomaHumana && !operadorReciente && (await estaRateLimiteado(numeroCliente));
+
   // 1. Insert con idempotencia: si Meta reintenta, el unique index en
   //    wa_message_id devuelve 23505 y cortamos sin volver a procesar.
   const { error: insertError } = await supabaseAdmin
@@ -198,7 +249,7 @@ async function manejarTexto(
       telefono: numeroCliente,
       texto: textoMensaje,
       wa_message_id: waMessageId,
-      procesado: enTomaHumana || operadorReciente,
+      procesado: enTomaHumana || operadorReciente || rateLimiteado,
     }]);
 
   if (insertError) {
@@ -211,6 +262,10 @@ async function manejarTexto(
   }
 
   if (enTomaHumana) {
+    // Refrescamos updated_at para que la ventana de auto-expiración (8h) se
+    // mida desde la última actividad de la conversación, no solo desde el
+    // último envío del operador.
+    await tocarAtencionHumana(numeroCliente);
     console.log(`🙋 Toma humana activa para ${numeroCliente}. Mensaje guardado sin agendar al bot.`);
     return NextResponse.json({ status: 'atencion_humana' }, { status: 200 });
   }
@@ -219,6 +274,16 @@ async function manejarTexto(
     console.log(`🙋 Último saliente fue de un operador hace <6h para ${numeroCliente}. El bot no responde; se avisa al operador.`);
     await marcarRequiereAtencion(numeroCliente);
     return NextResponse.json({ status: 'intervencion_humana_reciente' }, { status: 200 });
+  }
+
+  if (rateLimiteado) {
+    // Guardado (procesado=true, ya visible en el dashboard), sin gastar tokens.
+    // No le contestamos nada al número: responderle a un flood solo amplifica el
+    // DoS. Marcamos requiere_atencion para que un humano decida si es un cliente
+    // legítimo muy insistente o un abuso.
+    console.warn(`🚦 Rate-limit: ${numeroCliente} superó ${RATE_LIMIT_MAX} mensajes/hora. Guardado sin agendar al bot; se avisa al staff.`);
+    await marcarRequiereAtencion(numeroCliente);
+    return NextResponse.json({ status: 'rate_limited' }, { status: 200 });
   }
 
   // 2. Agendar el wake-up en QStash. Cada mensaje agenda el suyo. El primer
@@ -343,7 +408,9 @@ async function manejarUbicacion(
   // Con un operador en la conversación no interferimos; si no, pedimos la
   // dirección escrita para que el flujo normal la tome sin intervención humana.
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
-  if (!enTomaHumana) {
+  if (enTomaHumana) {
+    await tocarAtencionHumana(numeroCliente);
+  } else {
     if (await intervencionHumanaReciente(numeroCliente)) {
       // Un operador habló hace poco: el pin es para él, no para el bot.
       await marcarRequiereAtencion(numeroCliente);
@@ -365,7 +432,11 @@ async function manejarUbicacion(
  */
 async function avisarSiHaceFaltaHumano(numeroCliente: string) {
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
-  if (!enTomaHumana) {
+  if (enTomaHumana) {
+    // La conversación ya está en manos humanas: solo refrescamos la ventana
+    // de auto-expiración para que la actividad del cliente cuente.
+    await tocarAtencionHumana(numeroCliente);
+  } else {
     await marcarRequiereAtencion(numeroCliente);
     // Si un operador habló hace poco (gate por mensajes), ya está "en" la
     // conversación: avisamos en el dashboard pero no prometemos atención con
