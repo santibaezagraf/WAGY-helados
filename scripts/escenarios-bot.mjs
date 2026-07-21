@@ -112,12 +112,9 @@ export const ESCENARIOS = [
   {
     nombre: 'retira-en-local',
     tipo: 'guionado',
-    // Fallo conocido (no gatea CI): el bot no toma "paso a retirar" dicho inline
-    // con el resto del pedido como direccion='retira' en el primer turno — pide
-    // dirección y ofrece el quick-reply resp_retira. Además este escenario toca
-    // confirmar_borrador cuando el bot ofreció resp_retira (habría que tocar ese).
-    // Ver informe corrida-2026-07-16T03-29-33. Sacar el xfail cuando se resuelva.
-    xfail: 'el bot no interpreta "paso a retirar" inline como retiro en el primer turno; escenario pendiente de ajustar',
+    // La red determinista mencionaRetiro (procesar.ts) mapea "paso a retirar"
+    // inline al sentinela direccion="retira" aunque el modelo no lo haga, así el
+    // borrador queda completo en el primer turno y el resumen sale con botones.
     persona: 'Cliente que pasa a buscar el pedido en vez de pedir envío.',
     turnos: [
       { texto: 'hola, 15 de crema, paso a retirar, pago en efectivo' },
@@ -175,6 +172,35 @@ export const ESCENARIOS = [
   },
 
   {
+    nombre: 'descancelar-reabre-pedido',
+    tipo: 'guionado',
+    // #3 del informe: tras confirmar una cancelación, si el cliente se arrepiente
+    // enseguida, el bot reabre el pedido cancelado con SUS datos (intent
+    // "reactivar", habilitado solo cuando hay un cancelado reciente) en vez de
+    // arrancar de cero perdiendo cantidad/pago.
+    persona: 'Cliente que cancela y enseguida se arrepiente y quiere el pedido de vuelta.',
+    turnos: [
+      { texto: 'hola, 8 de crema a Rivadavia 456, efectivo' },
+      { boton: 'confirmar_borrador' },
+      { texto: 'che, cancelá el pedido' },
+      { boton: 'confirmar_cancelacion' },
+      { texto: 'no, pará, en realidad sí lo quiero' },
+      { boton: 'confirmar_borrador' },
+    ],
+    espera: {
+      estadoFinal: 'pendiente',
+      cantidad_crema: 8,
+      direccionContiene: 'Rivadavia 456',
+      metodo_pago: 'efectivo',
+      criterios: [
+        'Tras el click de confirmar cancelación el pedido queda cancelado.',
+        'Cuando el cliente se arrepiente ("en realidad sí lo quiero"), el bot REABRE el pedido cancelado con sus datos (8 de crema, Rivadavia 456, efectivo) en vez de arrancar de cero: NO vuelve a pedir cantidad ni pago.',
+        'Reenvía el resumen con botones y, al confirmar, queda en pendiente con los datos originales.',
+      ],
+    },
+  },
+
+  {
     nombre: 'mensaje-partido',
     tipo: 'guionado',
     persona: 'Cliente que escribe en varias burbujas seguidas antes de que el bot conteste.',
@@ -189,6 +215,28 @@ export const ESCENARIOS = [
       criterios: [
         'El bot procesa las 4 burbujas como un solo turno (debounce + claim) y arma UN borrador completo.',
         'No responde 4 veces ni crea pedidos duplicados; manda un único resumen con botones.',
+      ],
+    },
+  },
+
+  {
+    nombre: 'pedido-mas-pregunta-guionado',
+    tipo: 'guionado',
+    // Versión completa de A: la pregunta de negocio se copia en `pregunta_negocio`
+    // (ortogonal a la intención) y se delega a un humano SIEMPRE, aunque el pedido
+    // se arme igual. Antes la pregunta mezclada con datos se descartaba en silencio.
+    persona: 'Cliente que arma un pedido completo y en el mismo mensaje pregunta algo del negocio.',
+    turnos: [
+      { texto: 'quiero 10 de crema para Mitre 951, pago efectivo. ¿hasta qué hora entregan hoy?' },
+    ],
+    espera: {
+      estadoFinal: 'borrador',
+      cantidad_crema: 10,
+      direccionContiene: 'Mitre 951',
+      metodo_pago: 'efectivo',
+      criterios: [
+        'El bot arma el borrador completo (10 de crema, Mitre 951, efectivo) y manda el resumen con botones de confirmación.',
+        'ADEMÁS delega la pregunta de negocio ("hasta qué hora entregan") a un humano: avisa que le responde una persona del equipo. La pregunta NO se descarta en silencio.',
       ],
     },
   },

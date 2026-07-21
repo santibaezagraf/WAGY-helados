@@ -24,8 +24,10 @@ name: nightly-bot-test
 
 on:
   schedule:
-    # 05:07 UTC = 02:07 ART (UTC-3). GitHub Actions usa siempre UTC.
-    - cron: '7 5 * * *'
+    # Sábado 15:00 UTC = 12:00 ART (UTC-3), mediodía. GitHub Actions usa siempre UTC.
+    # Se corre el sábado a propósito: el local no abre ese día, así que el nightly
+    # puede quemar su parte del TPD de Groq sin competir con tráfico real de clientes.
+    - cron: '0 15 * * 6'
   workflow_dispatch: {}   # permite dispararlo a mano desde la pestaña Actions
 
 jobs:
@@ -39,6 +41,11 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       BOT_TEST_MODE: '1'
       PROBAR_DELAY_MS: '6000'
+      # El cliente-agente de los exploratorios NO es el sistema bajo prueba (solo
+      # improvisa mensajes de cliente con generateText), así que corre en OTRO modelo
+      # Groq para no gastar el bucket TPD de gpt-oss-20b, que queda entero para el
+      # bot real. El bot bajo prueba sigue siendo gpt-oss-20b (hardcodeado en procesar.ts).
+      PROBAR_MODELO_CLIENTE: 'llama-3.3-70b-versatile'
     steps:
       - uses: actions/checkout@v4
 

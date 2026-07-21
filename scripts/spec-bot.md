@@ -33,20 +33,20 @@ como ramas.
   El bot trata como "despachado" también a `enviado=true` aunque el estado siga
   en `pendiente` (`estaDespachado`).
 - **esperando_cancelacion**: el bot preguntó "¿seguro?" y espera sí/no.
-- **cancelado**: cancelado (por el cliente o auto-rechazo del cron).
+- **cancelado**: cancelado (por el cliente o auto-rechazo del cron). Si el cliente se arrepiente **dentro de los ~30 min** de cancelar ("no, quiero el pedido"), el bot lo **reactiva** (vuelve a `borrador` con sus datos originales) en vez de arrancar uno nuevo desde cero.
 
 ## Comportamientos esperados (el "debería")
 
 1. **Pedido completo de una** → borrador completo + resumen con botones. Confirmar → pendiente + mensaje de confirmación con tiempo estimado.
 2. **Datos por partes** → pide SOLO lo que falta, sin perder lo ya dicho (merge determinístico contra la DB). No manda resumen hasta completar.
 3. **Cantidades como operación**: "sumale 10" es delta (suma), "que sean 25" es reemplazo. El bot no debe confundir delta con total.
-4. **Dirección**: exige calle + número, o "retira" para retiro en local. Un texto que no parece dirección (p.ej. "depto 6" solo) no debe entrar como dirección.
+4. **Dirección**: exige calle + número, o "retira" para retiro en local. Un texto que no parece dirección (p.ej. "depto 6" solo) no debe entrar como dirección. Las variantes/conjugaciones de retirar ("retiro", "paso a retirar", "lo paso a buscar", "lo busco", "paso por el local") se mapean al sentinela `retira` aunque vengan inline con el resto del pedido (red determinista `mencionaRetiro`, que se aplica solo si no quedó una dirección de envío válida).
 5. **Método de pago**: efectivo o transferencia. Con transferencia, la **confirmación** (no el resumen) incluye el alias y pide comprobante.
-6. **Cancelación**: "cancelar" → pide confirmación con botones, NO cancela de una. Sí → cancelado. Si en vez de sí/no manda cambios concretos → **rechazo implícito**: vuelve a borrador con los cambios aplicados y reenvía el resumen.
+6. **Cancelación**: "cancelar" → pide confirmación con botones, NO cancela de una. Sí → cancelado. Si en vez de sí/no manda cambios concretos → **rechazo implícito**: vuelve a borrador con los cambios aplicados y reenvía el resumen. **Deshacer una cancelación**: si el cliente se arrepiente enseguida (≤30 min) de un pedido ya cancelado ("no, quiero el pedido"), el bot lo **reactiva** con sus datos originales (no pierde cantidad/pago ni arranca de cero).
 7. **Mensaje partido** (varias burbujas): se procesan como UN turno (debounce + claim). Un solo resumen, sin pedidos duplicados, sin responder N veces.
 8. **Sobre pedido despachado**: se rechaza modificar/cancelar ("ya está en camino").
 9. **Un solo click por ronda de botones**: tocar ambos botones de un par no dispara dos acciones contradictorias.
-10. **Consulta de negocio real** (horarios, zonas, sabores disponibles, stock, promos, mayorista, reclamos) que el bot no puede responder → **delegación a humano**: marca `requiere_atencion` y responde "te atiende una persona", SIN tocar el pedido activo.
+10. **Consulta de negocio real** (horarios, zonas, sabores disponibles, stock, promos, mayorista, reclamos) que el bot no puede responder → **delegación a humano**: marca `requiere_atencion` y responde "te atiende una persona", SIN tocar el pedido activo. Esto vale **también cuando la pregunta viene mezclada con datos de pedido**: el modelo copia la pregunta en el campo ortogonal `pregunta_negocio`, el bot delega esa pregunta a un humano **y además procesa el pedido** (resumen o pide lo que falta). La pregunta ya NO se descarta en silencio.
 11. **Media** (foto/audio/video) → delega a humano. **Ubicación** (pin) → NO delega: pide la dirección escrita.
 
 ## Señales de "❓ NO CONTEMPLADO" (lo más valioso de detectar)
@@ -56,7 +56,7 @@ resuelve por accidente (o mal). Señales:
 
 - Cae en el fallback genérico **"no te entendí / solo leo texto"** ante algo que un cliente real diría con naturalidad.
 - **Delega a humano** algo que NO es una consulta de negocio real (usar la delegación como cajón de sastre / cop-out).
-- Un mensaje **mezcla pedido + pregunta**: hoy se clasifica como `datos_pedido` y **la pregunta se descarta en silencio** (límite conocido). Si pasa, es ❓ (el cliente queda sin respuesta a algo que preguntó).
+- Un mensaje **mezcla pedido + pregunta de negocio real**: el bot debería procesar el pedido **Y** delegar la pregunta a un humano (campo `pregunta_negocio`). Si la pregunta se **descarta en silencio** (el cliente queda sin respuesta) o, peor, el pedido tampoco se procesa (cae al saludo genérico), es ❓.
 - El pedido queda **trabado** en un estado (p.ej. `esperando_cancelacion` sin salida, borrador que nunca completa).
 - **Loop**: el bot repite el mismo pedido de dato o el mismo resumen sin avanzar.
 - **Pérdida de datos**: una cantidad/dirección/sabor dicha antes desaparece tras un turno siguiente.

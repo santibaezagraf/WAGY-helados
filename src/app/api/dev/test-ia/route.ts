@@ -64,16 +64,21 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { mensaje, pedidoActivo } = body as {
+  const { mensaje, pedidoActivo, hayPedidoCanceladoReciente } = body as {
     mensaje?: string;
     pedidoActivo?: PedidoActivoContext;
+    // Habilita la intención "reactivar" en el prompt de pedido nuevo, igual que
+    // el flujo real cuando el cliente canceló hace poco. Solo aplica sin pedidoActivo.
+    hayPedidoCanceladoReciente?: boolean;
   };
 
   if (!mensaje || typeof mensaje !== 'string') {
     return NextResponse.json({ error: 'falta "mensaje" en el body' }, { status: 400 });
   }
 
-  const systemPrompt = buildSystemPrompt(pedidoActivo ?? null);
+  const systemPrompt = buildSystemPrompt(pedidoActivo ?? null, {
+    hayPedidoCanceladoReciente: Boolean(hayPedidoCanceladoReciente),
+  });
 
   const start = Date.now();
   try {

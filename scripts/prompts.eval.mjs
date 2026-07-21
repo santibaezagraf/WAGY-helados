@@ -98,6 +98,22 @@ const CASOS = [
     pedidoActivo: borrador({ cantidad_agua: 30 }),
     espera: { cantidad_agua: 30 },
   },
+  {
+    // "porción con 2 bolas" NO es 2 unidades de crema (caso real del log): una
+    // porción servida no es la unidad agua/crema que se vende. La cantidad queda
+    // en 0 y se piden las unidades; el sabor sí se guarda.
+    nombre: 'cantidad: porción con bolas en pedido nuevo no inventa cantidad',
+    mensaje: 'quiero una porción de chocolate con 2 bolas',
+    espera: { cantidad_crema: 0, cantidad_agua: 0 },
+  },
+  {
+    // Mismo caso pero sobre un borrador activo (prompt de modificación, que era
+    // el más "ávido" en mapear "2 bolas" → 2): la cantidad cargada no se toca.
+    nombre: 'cantidad: porción con bolas sobre borrador mantiene la cantidad',
+    mensaje: 'una porción de chocolate con 2 bolas',
+    pedidoActivo: borrador({ cantidad_crema: 0 }),
+    espera: { cantidad_crema: 0 },
+  },
 
   // ---- PEDIDO EN ARMADO EN PARTES (multiturno) ----
   // Regresión real: el cliente daba la cantidad en un mensaje y el pago en otro.
@@ -255,17 +271,34 @@ const CASOS = [
   {
     nombre: 'consulta_negocio: pregunta off-topic NO delega',
     mensaje: 'quién ganó el partido de anoche?',
-    espera: { intencion: 'datos_pedido' },
+    // pregunta_negocio null: off-topic NO es consulta de negocio → no delega.
+    espera: { intencion: 'datos_pedido', pregunta_negocio: null },
   },
   {
     nombre: 'consulta_negocio: mensaje sin sentido NO delega',
     mensaje: 'asdf jkl qwerty',
-    espera: { intencion: 'datos_pedido' },
+    espera: { intencion: 'datos_pedido', pregunta_negocio: null },
   },
   {
-    nombre: 'consulta_negocio: pregunta + datos del pedido es datos_pedido',
+    // Versión completa de A: la intención sigue siendo datos_pedido (se procesa
+    // el pedido), pero la pregunta de negocio se extrae en pregunta_negocio para
+    // que el flujo la delegue a un humano en vez de descartarla en silencio.
+    nombre: 'consulta_negocio: pregunta + datos del pedido → datos_pedido + pregunta_negocio',
     mensaje: 'quiero 20 de agua, hasta qué hora entregan?',
-    espera: { intencion: 'datos_pedido', cantidad_agua: 20 },
+    espera: { intencion: 'datos_pedido', cantidad_agua: 20, pregunta_negocio: /hora|entrega/i },
+  },
+  {
+    // Pedido completo de una + pregunta: se extrae todo y ADEMÁS la pregunta.
+    nombre: 'consulta_negocio: pedido completo + pregunta extrae ambos',
+    mensaje: 'quiero 10 de crema para Mitre 951, efectivo, ¿llegan hasta el centro?',
+    espera: { intencion: 'datos_pedido', cantidad_crema: 10, metodo_pago: 'efectivo', pregunta_negocio: /centro|lleg|zona/i },
+  },
+  {
+    // Negativo clave del diseño "always delegate": un pedido normal SIN pregunta
+    // no debe setear pregunta_negocio (si no, pingaría a un humano de gusto).
+    nombre: 'consulta_negocio: pedido normal sin pregunta no setea pregunta_negocio',
+    mensaje: 'quiero 10 de crema para Mitre 951, efectivo',
+    espera: { intencion: 'datos_pedido', cantidad_crema: 10, pregunta_negocio: null },
   },
   {
     nombre: 'consulta_negocio: precios sigue siendo consultar_precios, no consulta_negocio',
@@ -311,6 +344,29 @@ const CASOS = [
     espera: { intencion: 'rechazar_cancelacion' },
   },
 
+  // ---- REACTIVAR (deshacer una cancelación reciente) ----
+  // Sin pedido activo pero con uno cancelado hace poco (canceladoReciente=true),
+  // el prompt ofrece "reactivar". Un arrepentimiento lo dispara; un pedido nuevo
+  // con datos NO (arranca de cero). Sin el flag, "reactivar" no existe.
+  {
+    nombre: 'reactivar: arrepentimiento tras cancelar es reactivar',
+    mensaje: 'no, pará, en realidad sí lo quiero',
+    canceladoReciente: true,
+    espera: { intencion: 'reactivar' },
+  },
+  {
+    nombre: 'reactivar: "no lo canceles" es reactivar',
+    mensaje: 'no no, no lo canceles, quiero el pedido',
+    canceladoReciente: true,
+    espera: { intencion: 'reactivar' },
+  },
+  {
+    nombre: 'reactivar: un pedido nuevo con datos NO es reactivar',
+    mensaje: 'quiero 12 de agua a San Martín 200, efectivo',
+    canceladoReciente: true,
+    espera: { intencion: 'datos_pedido', cantidad_agua: 12 },
+  },
+
   // ---- PEDIDO NUEVO (desde cero) ----
   {
     nombre: 'nuevo: pedido completo en un mensaje',
@@ -354,14 +410,30 @@ function aplanar(resultado) {
     cantidad_crema: comp.cantidad_crema,
     aclaracion: comp.aclaracion,
     observaciones: comp.observaciones,
+    // Señal ortogonal (versión completa de A): la pregunta de negocio se extrae
+    // aunque la intención sea datos_pedido. El flujo la delega a un humano.
+    // Normalizamos igual que esPreguntaNegocioReal en el flujo: el modelo a veces
+    // devuelve el TEXTO "null"/"none"/… en vez del null de JSON, y eso NO cuenta.
+    pregunta_negocio: preguntaNegocioReal(raw.pregunta_negocio) ? raw.pregunta_negocio : null,
   };
+}
+
+// Espejo de esPreguntaNegocioReal (procesar.ts) para el .mjs standalone.
+function preguntaNegocioReal(valor) {
+  if (!valor || typeof valor !== 'string') return false;
+  const v = valor.trim().toLowerCase();
+  return v !== '' && v !== 'null' && v !== 'none' && v !== 'undefined' && v !== 'n/a';
 }
 
 async function llamarEndpoint(caso) {
   const res = await fetch(`${BASE_URL}/api/dev/test-ia`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mensaje: caso.mensaje, pedidoActivo: caso.pedidoActivo }),
+    body: JSON.stringify({
+      mensaje: caso.mensaje,
+      pedidoActivo: caso.pedidoActivo,
+      hayPedidoCanceladoReciente: caso.canceladoReciente,
+    }),
   });
   return res.json();
 }
