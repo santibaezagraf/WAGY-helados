@@ -8,6 +8,8 @@ import {
   reconstruirObservaciones,
   pareceDireccion,
   mencionaRetiro,
+  mencionaCantidadEnUnidadNoSoportada,
+  mencionaMetodoPagoNoSoportado,
   normalizarTextoShortCircuit,
   intentarShortCircuit,
   elegirRespuestaDatosFaltantes,
@@ -370,6 +372,120 @@ describe('elegirRespuestaDatosFaltantes', () => {
         expect(r.mensaje).toContain('Forma de pago');
       }
     }
+  });
+});
+
+// Cuando el cliente expresa la cantidad en una unidad no soportada
+// (kilo/pote/porción/bola/cucurucho), el mensaje genérico "me falta cantidad"
+// entra en loop porque el cliente cree que ya la dio. El flag cambia el texto.
+describe('elegirRespuestaDatosFaltantes con cantidadEnUnidadNoSoportada', () => {
+  it('falta solo cantidad + unidad no soportada → mensaje aclaratorio, no bullet list', () => {
+    const r = elegirRespuestaDatosFaltantes(true, false, false, 0, true);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('por unidad');
+      expect(r.mensaje).toContain('kilo');
+      expect(r.mensaje).not.toContain('Para armar tu pedido me falta:');
+    }
+  });
+
+  it('faltan varios + unidad no soportada → bullet de cantidad explicativo', () => {
+    const r = elegirRespuestaDatosFaltantes(true, false, true, 0, true);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('Para armar tu pedido me falta:');
+      expect(r.mensaje).toContain('por unidad');
+      expect(r.mensaje).toContain('Forma de pago');
+      // El bullet viejo genérico ya no aplica cuando la señal está activa.
+      expect(r.mensaje).not.toContain('Cantidades de helado (agua/crema)');
+    }
+  });
+
+  it('flag=true pero NO falta la cantidad → sin cambios (solo botones de pago)', () => {
+    // Escenario improbable pero cubre que el flag es defensivo, no autoritario.
+    expect(elegirRespuestaDatosFaltantes(false, false, true, 0, true))
+      .toEqual({ tipo: 'botones_pago' });
+  });
+});
+
+describe('mencionaCantidadEnUnidadNoSoportada', () => {
+  it('detecta kilos y variantes', () => {
+    expect(mencionaCantidadEnUnidadNoSoportada('un kilo de chocolate')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('2 kilos de crema')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('medio kilo')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('500 gramos')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('500 gr o similar')).toBe(false); // "gr" solo es ambiguo, no lo tomamos
+    expect(mencionaCantidadEnUnidadNoSoportada('quiero 1 kg')).toBe(true);
+  });
+
+  it('detecta unidades servidas (pote/porción/bola/cucurucho)', () => {
+    expect(mencionaCantidadEnUnidadNoSoportada('un pote de chocolate')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('dos potes de crema')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('una porción con 2 bolas')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('porciones grandes')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('3 bolas de vainilla')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('una bolita más')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('un cucurucho de dulce de leche')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('2 cucuruchos')).toBe(true);
+  });
+
+  it('tolera tildes y mayúsculas', () => {
+    expect(mencionaCantidadEnUnidadNoSoportada('una PORCIÓN')).toBe(true);
+    expect(mencionaCantidadEnUnidadNoSoportada('Un Kilo')).toBe(true);
+  });
+
+  it('no falso-positivea sobre pedidos normales por unidad', () => {
+    expect(mencionaCantidadEnUnidadNoSoportada('quiero 10 de agua y 5 de crema')).toBe(false);
+    expect(mencionaCantidadEnUnidadNoSoportada('20 helados de frutilla')).toBe(false);
+    expect(mencionaCantidadEnUnidadNoSoportada('Rivadavia 456, efectivo')).toBe(false);
+    expect(mencionaCantidadEnUnidadNoSoportada('')).toBe(false);
+    expect(mencionaCantidadEnUnidadNoSoportada(null)).toBe(false);
+  });
+});
+
+describe('mencionaMetodoPagoNoSoportado', () => {
+  it('detecta tarjeta, débito, crédito y variantes', () => {
+    expect(mencionaMetodoPagoNoSoportado('pago con tarjeta')).toBe(true);
+    expect(mencionaMetodoPagoNoSoportado('tengo débito')).toBe(true);
+    expect(mencionaMetodoPagoNoSoportado('con crédito')).toBe(true);
+    expect(mencionaMetodoPagoNoSoportado('tienen posnet?')).toBe(true);
+    expect(mencionaMetodoPagoNoSoportado('puedo por Rapipago?')).toBe(true);
+    expect(mencionaMetodoPagoNoSoportado('pago fácil')).toBe(true);
+  });
+
+  it('tolera tildes y mayúsculas', () => {
+    expect(mencionaMetodoPagoNoSoportado('TARJETA DE DÉBITO')).toBe(true);
+    expect(mencionaMetodoPagoNoSoportado('Crédito')).toBe(true);
+  });
+
+  it('no falso-positivea sobre métodos válidos', () => {
+    expect(mencionaMetodoPagoNoSoportado('efectivo')).toBe(false);
+    expect(mencionaMetodoPagoNoSoportado('transferencia')).toBe(false);
+    expect(mencionaMetodoPagoNoSoportado('mercado pago')).toBe(false);
+    expect(mencionaMetodoPagoNoSoportado('10 de agua')).toBe(false);
+    expect(mencionaMetodoPagoNoSoportado('')).toBe(false);
+    expect(mencionaMetodoPagoNoSoportado(null)).toBe(false);
+  });
+});
+
+describe('elegirRespuestaDatosFaltantes con pagoNoSoportado', () => {
+  it('falta solo pago + método no soportado → texto aclaratorio, no botones', () => {
+    const r = elegirRespuestaDatosFaltantes(false, false, true, 0, false, true);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('efectivo');
+      expect(r.mensaje).toContain('transferencia');
+    }
+  });
+
+  it('falta solo pago SIN método no soportado → botones normales', () => {
+    expect(elegirRespuestaDatosFaltantes(false, false, true, 0, false, false))
+      .toEqual({ tipo: 'botones_pago' });
+  });
+
+  it('flag=true pero NO falta el pago → sin efecto', () => {
+    expect(elegirRespuestaDatosFaltantes(false, true, false, 0, false, true))
+      .toEqual({ tipo: 'boton_retira' });
   });
 });
 

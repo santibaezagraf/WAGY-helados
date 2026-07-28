@@ -490,12 +490,39 @@ export function elegirRespuestaDatosFaltantes(
   faltaDireccion: boolean,
   faltaPago: boolean,
   seed = 0,
+  cantidadEnUnidadNoSoportada = false,
+  pagoNoSoportado = false,
 ): RespuestaDatosFaltantes {
+  // Falta solo el pago y el cliente mencionó un método no soportado →
+  // aclaramos explícitamente en vez de ofrecer los botones sin contexto.
+  if (!faltaCantidad && !faltaDireccion && faltaPago && pagoNoSoportado) {
+    return {
+      tipo: 'texto',
+      mensaje: "Por ahora solo aceptamos *efectivo* o *transferencia* 🙏 ¿Cuál preferís?",
+    };
+  }
   if (!faltaCantidad && !faltaDireccion && faltaPago) return { tipo: 'botones_pago' };
   if (!faltaCantidad && faltaDireccion && !faltaPago) return { tipo: 'boton_retira' };
 
+  // Cuando SOLO falta la cantidad y el cliente ya la expresó en una unidad no
+  // soportada (kilo/pote/porción/bola/cucurucho), el "me falta la cantidad"
+  // genérico entra en loop porque el cliente cree que ya la dio. Le
+  // explicamos por qué no cuenta y le pedimos unidades explícitas.
+  if (faltaCantidad && !faltaDireccion && !faltaPago && cantidadEnUnidadNoSoportada) {
+    return {
+      tipo: 'texto',
+      mensaje: "Los helados los vendemos por unidad (de agua o de crema), no por kilo/pote/porción 🍦 ¿Cuántas unidades querés? (ej: *10 de agua y 5 de crema*)",
+    };
+  }
+
   const datosFaltantes: string[] = [];
-  if (faltaCantidad) datosFaltantes.push("Cantidades de helado (agua/crema)");
+  if (faltaCantidad) {
+    datosFaltantes.push(
+      cantidadEnUnidadNoSoportada
+        ? "Cantidad de helados por unidad (los vendemos por unidad, no por kilo/pote) — ¿cuántos en total?"
+        : "Cantidades de helado (agua/crema)"
+    );
+  }
   if (faltaDireccion) datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
   if (faltaPago) datosFaltantes.push("Forma de pago (efectivo o transferencia)");
 
@@ -503,6 +530,47 @@ export function elegirRespuestaDatosFaltantes(
     ? BIENVENIDAS_DATOS_FALTANTES[Math.abs(seed) % BIENVENIDAS_DATOS_FALTANTES.length]
     : "Para armar tu pedido me falta:";
   return { tipo: 'texto', mensaje: [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n') };
+}
+
+/**
+ * Guard determinista: ¿el cliente mencionó un método de pago que no aceptamos?
+ * (tarjeta, débito, crédito, mercado pago como "tarjeta de MP", Rapipago, etc.)
+ * Cuando el modelo correctamente devuelve metodo_pago=null y el flow pide
+ * "¿cómo lo pagás?" sin explicar, el cliente cree que no lo escucharon.
+ * Corre sobre el texto CRUDO del batch, no sobre la extracción del modelo.
+ */
+export function mencionaMetodoPagoNoSoportado(texto: string | null): boolean {
+  if (!texto) return false;
+  const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return (
+    /\btarjeta\b/.test(n) ||
+    /\bdebito\b/.test(n) ||
+    /\bcredito\b/.test(n) ||
+    /\bposnet\b/.test(n) ||
+    /\brapipago\b/.test(n) ||
+    /\bpago\s*facil\b/.test(n)
+  );
+}
+
+/**
+ * Guard determinista (respalda al modelo): ¿el cliente expresó la cantidad en
+ * una unidad que no vendemos? kilos/gramos, potes, porciones, bolas servidas,
+ * cucuruchos. El prompt ya le dice al modelo que no convierta esos a unidades
+ * (deja cantidad en 0), pero sin esta señal el flow responde con el "me falta
+ * cantidad" genérico y el cliente entra en loop porque cree que ya la dio.
+ * Corre sobre el texto CRUDO del batch, no sobre la extracción del modelo.
+ */
+export function mencionaCantidadEnUnidadNoSoportada(texto: string | null): boolean {
+  if (!texto) return false;
+  const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return (
+    /\b(kilos?|kilogramos?|kg)\b/.test(n) ||
+    /\bgramos?\b/.test(n) ||
+    /\bpotes?\b/.test(n) ||
+    /\bporcion(es)?\b/.test(n) ||
+    /\bbol(a|as|ita|itas)\b/.test(n) ||
+    /\bcucuruchos?\b/.test(n)
+  );
 }
 
 /**
@@ -714,13 +782,15 @@ export async function pedirDatosFaltantes(
   faltaPago: boolean,
   saludo?: string,
   seed = 0,
+  cantidadEnUnidadNoSoportada = false,
+  pagoNoSoportado = false,
 ): Promise<boolean> {
-  console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}`);
+  console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}, unidadNoSoportada=${cantidadEnUnidadNoSoportada}, pagoNoSoportado=${pagoNoSoportado}`);
 
   // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
   // `seed` rota el saludo cuando faltan los 3 datos (ver elegirRespuestaDatosFaltantes),
   // para no repetir el mismo texto ante mensajes off-topic seguidos.
-  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed);
+  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed, cantidadEnUnidadNoSoportada, pagoNoSoportado);
   // Cuando entramos por la rama "saludo con borrador parcial", el caller
   // prepende un "¡Hola! 👋 …" al cuerpo así el cliente ve UNA sola burbuja en
   // vez de dos seguidas (saludo + pedido de datos). Vale para las tres formas
@@ -1394,6 +1464,14 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     const faltaPago = !pagoFinal;
     const pedidoCompleto = !faltaCantidad && !faltaDireccion && !faltaPago;
 
+    // Guard determinista: si el cliente expresó la cantidad en kilo/pote/porción,
+    // el modelo la dejó en 0 (por diseño del prompt) y sin esta señal pedirDatos
+    // Faltantes respondería con el "me falta cantidad" genérico → loop porque el
+    // cliente cree que ya la dio. Reutilizamos el texto crudo del batch de arriba.
+    const textoBatch = mensajesClaim.map(m => m.texto ?? '').join(' ');
+    const cantidadEnUnidadNoSoportada = faltaCantidad && mencionaCantidadEnUnidadNoSoportada(textoBatch);
+    const pagoNoSoportado = faltaPago && mencionaMetodoPagoNoSoportado(textoBatch);
+
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
     //
     // Todos los UPDATE de estos flujos van con guard atómico:
@@ -1433,7 +1511,25 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           .maybeSingle();
 
         if (rechazados) {
-          await enviarResumenYPedirConfirmacion(numeroCliente, rechazados, false);
+          // Mismo invariante que el resto de los envíos de resumen: si el
+          // borrador reabierto está incompleto (rechazar_cancelacion no aporta
+          // datos nuevos, así que la completitud es la de ANTES de la
+          // cancelación), pedimos el dato faltante en vez de mandar un resumen
+          // vacío con botón "Confirmar" (que dispararía un pedido roto a cocina).
+          if (esBorradorCompleto(rechazados)) {
+            await enviarResumenYPedirConfirmacion(numeroCliente, rechazados, false);
+          } else {
+            await pedirDatosFaltantes(
+              numeroCliente,
+              !((rechazados.cantidad_agua ?? 0) > 0 || (rechazados.cantidad_crema ?? 0) > 0),
+              !rechazados.direccion,
+              !rechazados.metodo_pago,
+              undefined,
+              0,
+              cantidadEnUnidadNoSoportada,
+              pagoNoSoportado,
+            );
+          }
         } else {
           console.log(`⚠️ El pedido ${pedidoActivo.id} ya no está en 'esperando_cancelacion'. Algo cambió en paralelo.`);
           await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
@@ -1467,7 +1563,24 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           .maybeSingle();
 
         if (actualizado) {
-          await enviarResumenYPedirConfirmacion(numeroCliente, actualizado, true);
+          // Igual que en rechazar_cancelacion: el rechazo implícito puede llegar
+          // con datos que igual dejen el borrador incompleto (ej: cliente que
+          // rechaza la cancelación aportando solo un sabor, sin cantidad). Sin
+          // este guard el resumen sale con campos vacíos y botón "Confirmar".
+          if (esBorradorCompleto(actualizado)) {
+            await enviarResumenYPedirConfirmacion(numeroCliente, actualizado, true);
+          } else {
+            await pedirDatosFaltantes(
+              numeroCliente,
+              !((actualizado.cantidad_agua ?? 0) > 0 || (actualizado.cantidad_crema ?? 0) > 0),
+              !actualizado.direccion,
+              !actualizado.metodo_pago,
+              undefined,
+              0,
+              cantidadEnUnidadNoSoportada,
+              pagoNoSoportado,
+            );
+          }
         } else {
           console.log(`⚠️ El pedido ${pedidoActivo.id} ya no está en 'esperando_cancelacion'. Algo cambió en paralelo.`);
           await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
@@ -1542,6 +1655,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               !(reabierto.cantidad_agua > 0 || reabierto.cantidad_crema > 0),
               !reabierto.direccion,
               !reabierto.metodo_pago,
+              undefined,
+              0,
+              cantidadEnUnidadNoSoportada,
+              pagoNoSoportado,
             );
           }
           return;
@@ -1607,6 +1724,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             faltaDireccion,
             faltaPago,
             "¡Hola! 👋 Tengo tu pedido en armado, me falta un dato para cerrarlo.",
+            0,
+            cantidadEnUnidadNoSoportada,
+            pagoNoSoportado,
           );
         }
       } else if (esperandoCancelacion) {
@@ -1638,7 +1758,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       if (pedido.intencion === 'confirmar' && !hayCambiosReales) {
         if (!pedidoCompleto) {
           console.log("⚠️ El cliente confirmó pero el borrador todavía está incompleto. Pido lo que falta.");
-          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
           return;
         }
         const { data: finalData } = await supabaseAdmin.from('pedidos').update({ estado: 'pendiente' }).eq('id', pedidoActivo.id).select('*').single();
@@ -1680,7 +1800,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             await enviarResumenYPedirConfirmacion(numeroCliente, updatedData, true);
           } else {
             console.log("📝 El borrador sigue incompleto tras el merge. Pido lo que falta.");
-            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
           }
         }
         return;
@@ -1715,7 +1835,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         // Un pedido en cocina ya tenía datos completos; si un merge lo dejó
         // "incompleto" es por algo puntual del mensaje. No degradamos su estado
         // ni persistimos placeholders: solo pedimos el dato que falte.
-        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago);
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
         return;
       }
 
@@ -1767,6 +1887,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               !(fusionado.cantidad_agua > 0 || fusionado.cantidad_crema > 0),
               !fusionado.direccion,
               !fusionado.metodo_pago,
+              undefined,
+              0,
+              cantidadEnUnidadNoSoportada,
+              pagoNoSoportado,
             );
             return;
           }
@@ -1782,7 +1906,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // típico de un mensaje off-topic/sin sentido): mensajes distintos → largo
       // distinto → variante distinta, así no se repite palabra por palabra.
       const seedSaludo = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
-      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, seedSaludo);
+      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, seedSaludo, cantidadEnUnidadNoSoportada, pagoNoSoportado);
       return;
     }
 
