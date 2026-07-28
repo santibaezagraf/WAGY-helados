@@ -18,22 +18,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { ChatModal } from "@/components/pedidos/chat-modal"
 import { NotificacionesEntrantes } from "@/components/ui/notificaciones-entrantes"
-import type { Conversacion } from "@/lib/conversaciones-utils"
-
-// Tipos de mensaje que el bot no resuelve y que disparan el aviso "requiere
-// intervención humana". Debe coincidir con la lógica del webhook.
-const TIPOS_REQUIEREN_HUMANO = new Set(["image", "audio", "video", "document", "sticker", "location"])
-
-// Un mensaje entrante marca la conversación como pendiente cuando:
-//  - es un media/ubicación (el bot no lo entiende), o
-//  - es texto pero llegó con `procesado=true`: el webhook lo silenció porque hay
-//    una toma humana activa o un gate por mensajes de operador reciente. Estos
-//    son los que hoy pasaban desapercibidos hasta que se abría el chat.
-function marcaPendiente(fila: { rol?: string; tipo?: string; procesado?: boolean }): boolean {
-  if (fila.rol !== "cliente") return false
-  if (fila.tipo && TIPOS_REQUIEREN_HUMANO.has(fila.tipo)) return true
-  return fila.procesado === true
-}
+import { AlertaModelo } from "@/components/ui/alerta-modelo"
+import { marcaPendiente, type Conversacion } from "@/lib/conversaciones-utils"
 
 interface HeaderProps {
   /** Conversaciones recientes (cualquier teléfono con actividad), con flag de
@@ -190,6 +176,13 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
                       </DropdownMenuItem>
                     ))
                   )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => router.push("/conversaciones")}
+                    className="justify-center text-xs font-medium text-cyan-700"
+                  >
+                    Ver todas las conversaciones
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
               <Button
@@ -221,6 +214,9 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
           </div>
         </div>
       </header>
+
+      {/* Aviso de ops: el bot cayó al modelo de fallback (429/TPD del primario). */}
+      <AlertaModelo />
 
       <PriceListModal
         open={priceListModalOpen}
