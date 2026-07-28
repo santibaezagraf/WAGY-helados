@@ -1,9 +1,10 @@
 "use client"
 
 import * as React from "react"
-import { Search, MessageCircle, Loader2, ChevronLeft, ChevronRight, Ban, ShieldCheck, UserCog } from "lucide-react"
+import { Search, MessageCircle, Loader2, ChevronLeft, ChevronRight, Ban, ShieldCheck, UserCog, ArrowLeft } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import Link from "next/link"
 import { createClient } from "@/lib/supabase-client"
 import { ChatPanel } from "@/components/pedidos/chat-panel"
 import {
@@ -197,6 +198,13 @@ export function ConversacionesInbox({ inicial }: { inicial: PaginaInbox }) {
       >
         <div className="shrink-0 border-b border-slate-100 px-3 py-3">
           <div className="mb-3 flex items-center gap-2">
+            <Link
+              href="/"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
+              title="Volver a pedidos"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </Link>
             <MessageCircle className="h-5 w-5 text-cyan-600" />
             <h1 className="text-lg font-bold text-slate-800">Conversaciones</h1>
           </div>

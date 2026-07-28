@@ -6,7 +6,8 @@ import { PriceListModal } from "@/components/pedidos/price-list-modal"
 import { AddGastoModal } from "@/components/gastos/add-gasto-modal"
 import * as React from "react"
 import { Tags, BarChart3, Receipt, MessageCircle } from "lucide-react"
-import { useRouter } from "next/navigation"
+import { useRouter, usePathname } from "next/navigation"
+import Link from "next/link"
 import { createClient } from "@/lib/supabase-client"
 import {
   DropdownMenu,
@@ -37,6 +38,8 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
   // Teléfono del chat abierto desde el menú (sin pedido asociado).
   const [chatTelefono, setChatTelefono] = React.useState<string | null>(null)
   const router = useRouter()
+  const pathname = usePathname()
+  const esRutaConVolver = pathname !== "/" && pathname !== "/login" && pathname !== "/precios"
 
   // Re-sincronizamos con el servidor cuando cambia (navegación/revalidación).
   React.useEffect(() => {
@@ -126,12 +129,21 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
       <header className="shrink-0 bg-cyan-600 border-b-2 border-cyan-300 shadow-sm">
         <div className="px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between gap-3 py-2">
-            <div className="flex items-center gap-2">
-              <Logo size="sm" />
-              <h1 className="text-lg sm:text-xl font-bold text-slate-800">
-                WAGY Helados
-              </h1>
-            </div>
+            {esRutaConVolver ? (
+              <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+                <Logo size="sm" />
+                <h1 className="text-lg sm:text-xl font-bold text-slate-800">
+                  WAGY Helados
+                </h1>
+              </Link>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Logo size="sm" />
+                <h1 className="text-lg sm:text-xl font-bold text-slate-800">
+                  WAGY Helados
+                </h1>
+              </div>
+            )}
 
             <div className="flex items-center gap-2">
               <DropdownMenu>
