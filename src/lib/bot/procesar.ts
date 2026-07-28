@@ -6,6 +6,7 @@ import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
 import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
 import { esBorradorCompleto } from '@/lib/bot/borradores';
+import { registrarAlertaFallback, siguienteModelo } from '@/lib/bot/alertas';
 import { obtenerListaPreciosPublica, formatearPreciosWhatsApp } from '@/lib/precios-publico';
 
 const supabaseAdmin = createClient<Database>(
@@ -1184,7 +1185,12 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // sentido reintentarlo: saltamos al siguiente de la cadena (que tiene su
       // propia cubeta) para no dejar al cliente sin respuesta.
       if (esRateLimit(iaError)) {
-        console.warn(`🚧 Rate limit (429) en "${modelo}". Fallback al siguiente modelo de la cadena.`);
+        const fallback = siguienteModelo(modeloIdx, MODELOS_EXTRACCION);
+        console.warn(`🚧 Rate limit (429) en "${modelo}". Fallback a "${fallback ?? '(cadena agotada)'}".`);
+        // Telemetría de ops: registramos el salto para que el dashboard avise que
+        // el primario está caído. Fail-open y no bloqueante — un fallo acá no
+        // debe frenar la respuesta al cliente (que ya está en camino degradado).
+        void registrarAlertaFallback(modelo, fallback, numeroCliente);
         modeloIdx++;
         attempt = 0;
         continue;
