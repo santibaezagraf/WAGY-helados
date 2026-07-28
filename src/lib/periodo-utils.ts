@@ -5,66 +5,65 @@
  * una fecha (`ancla`). El navegador permite moverse hacia atrás/adelante de a un
  * período, con tope en el período actual (nunca hay pedidos a futuro).
  *
- * Todo se calcula en hora local — igual que el resto del dashboard — para que el
- * borde del día/semana/mes coincida con lo que ve el staff. Las mismas funciones
- * corren en el servidor (resolver desde/hasta a ISO) y en el cliente (etiqueta,
- * tope y navegación), así ambos lados coinciden.
+ * Todo el calendario se calcula en la zona horaria de Argentina (vía `zona-horaria`),
+ * NO en la hora local del runtime. Las mismas funciones corren en el servidor
+ * (resolver desde/hasta a ISO en `page.tsx`) y en el cliente (etiqueta, tope y
+ * navegación), y ahora ambos lados coinciden aunque el servidor esté en UTC.
  */
+
+import {
+    partesAR,
+    instanteAR,
+    inicioDelDiaAR,
+    inicioSemanaAR,
+    inicioMesAR,
+    sumarDiasAR,
+    sumarMesesAR,
+    claveDiaAR,
+    fechaISOAR,
+    formatearFechaAR,
+} from './zona-horaria'
 
 export type Periodo = 'dia' | 'semana' | 'mes' | 'todos'
 
-/** ISO de día (`YYYY-MM-DD`) → Date a medianoche local. Vacío/invalido → hoy. */
+/** ISO de día (`YYYY-MM-DD`) → Date a medianoche AR. Vacío/invalido → hoy (AR). */
 export function parseAncla(ancla: string | null | undefined, ahora: Date = new Date()): Date {
     if (ancla) {
         const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ancla)
         if (m) {
-            const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-            d.setHours(0, 0, 0, 0)
-            return d
+            return instanteAR(Number(m[1]), Number(m[2]), Number(m[3]))
         }
     }
-    const d = new Date(ahora)
-    d.setHours(0, 0, 0, 0)
-    return d
+    return inicioDelDiaAR(ahora)
 }
 
-/** Date → `YYYY-MM-DD` en hora local (para guardar en la URL). */
+/** Date → `YYYY-MM-DD` en hora AR (para guardar en la URL). */
 export function formatAncla(fecha: Date): string {
-    const y = fecha.getFullYear()
-    const m = String(fecha.getMonth() + 1).padStart(2, '0')
-    const d = String(fecha.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
+    return fechaISOAR(fecha)
 }
 
-/** Inicio (inclusivo) del período que contiene `fecha`. */
+/** Inicio (inclusivo) del período que contiene `fecha`, en calendario AR. */
 export function inicioPeriodo(periodo: Periodo, fecha: Date): Date {
-    const d = new Date(fecha)
-    d.setHours(0, 0, 0, 0)
-    if (periodo === 'semana') {
-        d.setDate(d.getDate() - d.getDay()) // domingo como inicio de semana
-    } else if (periodo === 'mes') {
-        return new Date(d.getFullYear(), d.getMonth(), 1)
-    }
-    return d
+    if (periodo === 'semana') return inicioSemanaAR(fecha)
+    if (periodo === 'mes') return inicioMesAR(fecha)
+    return inicioDelDiaAR(fecha)
 }
 
 /** Fin (exclusivo) del período que contiene `fecha` = inicio del siguiente. */
 export function finPeriodo(periodo: Periodo, fecha: Date): Date {
     const ini = inicioPeriodo(periodo, fecha)
-    const f = new Date(ini)
-    if (periodo === 'dia') f.setDate(f.getDate() + 1)
-    else if (periodo === 'semana') f.setDate(f.getDate() + 7)
-    else if (periodo === 'mes') f.setMonth(f.getMonth() + 1)
-    return f
+    if (periodo === 'dia') return sumarDiasAR(ini, 1)
+    if (periodo === 'semana') return sumarDiasAR(ini, 7)
+    if (periodo === 'mes') return sumarMesesAR(ini, 1)
+    return ini
 }
 
-/** Corre el ancla un período hacia atrás (dir=-1) o adelante (dir=1). */
+/** Corre el ancla un período hacia atrás (dir=-1) o adelante (dir=1), en calendario AR. */
 export function desplazarAncla(periodo: Periodo, fecha: Date, dir: -1 | 1): Date {
-    const d = new Date(fecha)
-    if (periodo === 'dia') d.setDate(d.getDate() + dir)
-    else if (periodo === 'semana') d.setDate(d.getDate() + 7 * dir)
-    else if (periodo === 'mes') d.setMonth(d.getMonth() + dir)
-    return d
+    if (periodo === 'dia') return sumarDiasAR(fecha, dir)
+    if (periodo === 'semana') return sumarDiasAR(fecha, 7 * dir)
+    if (periodo === 'mes') return sumarMesesAR(fecha, dir)
+    return fecha
 }
 
 /** True si el período anclado en `fecha` contiene a `ahora` (es el período actual). */
@@ -81,12 +80,10 @@ export function etiquetaPeriodo(periodo: Periodo, fecha: Date, ahora: Date = new
 
     if (periodo === 'dia') {
         if (esPeriodoActual('dia', fecha, ahora)) return 'Hoy'
-        const ayer = new Date(ahora)
-        ayer.setHours(0, 0, 0, 0)
-        ayer.setDate(ayer.getDate() - 1)
-        if (ini.getTime() === ayer.getTime()) return 'Ayer'
-        const mismoAnio = ini.getFullYear() === ahora.getFullYear()
-        return ini.toLocaleDateString('es-AR', {
+        const ayer = sumarDiasAR(inicioDelDiaAR(ahora), -1)
+        if (claveDiaAR(ini) === claveDiaAR(ayer)) return 'Ayer'
+        const mismoAnio = partesAR(ini).anio === partesAR(ahora).anio
+        return formatearFechaAR(ini, {
             day: 'numeric',
             month: 'short',
             ...(mismoAnio ? {} : { year: 'numeric' }),
@@ -95,13 +92,12 @@ export function etiquetaPeriodo(periodo: Periodo, fecha: Date, ahora: Date = new
 
     if (periodo === 'semana') {
         if (esPeriodoActual('semana', fecha, ahora)) return 'Esta semana'
-        const finIncl = finPeriodo('semana', fecha)
-        finIncl.setDate(finIncl.getDate() - 1)
+        const finIncl = sumarDiasAR(finPeriodo('semana', fecha), -1)
         const opts = { day: 'numeric', month: 'short' } as const
-        return `${ini.toLocaleDateString('es-AR', opts)} – ${finIncl.toLocaleDateString('es-AR', opts)}`
+        return `${formatearFechaAR(ini, opts)} – ${formatearFechaAR(finIncl, opts)}`
     }
 
     // mes
     if (esPeriodoActual('mes', fecha, ahora)) return 'Este mes'
-    return ini.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+    return formatearFechaAR(ini, { month: 'long', year: 'numeric' })
 }

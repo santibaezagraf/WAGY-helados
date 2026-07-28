@@ -28,7 +28,7 @@ export async function ObtenerGastos(fechaInicio: Date, fechaFin: Date): Promise<
         .select("id, monto")
         .eq("activo", true)
         .gte("created_at", fechaInicio.toISOString())
-        .lte("created_at", fechaFin.toISOString())
+        .lt("created_at", fechaFin.toISOString())
 
     if (error) throw new Error(`Error al obtener gastos: ${error.message}`)
 
