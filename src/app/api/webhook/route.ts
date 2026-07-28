@@ -266,6 +266,11 @@ async function manejarTexto(
     // mida desde la última actividad de la conversación, no solo desde el
     // último envío del operador.
     await tocarAtencionHumana(numeroCliente);
+    // Y marcamos "requiere_atencion" para que el chat quede resaltado (punto
+    // amarillo + pestaña Pendientes) hasta que el operador lo abra: sin esto,
+    // un mensaje entrante durante la toma solo llegaba por Realtime al toast
+    // pero pasaba desapercibido en el listado ("mensaje sin leer" estilo WA).
+    await marcarRequiereAtencion(numeroCliente);
     console.log(`🙋 Toma humana activa para ${numeroCliente}. Mensaje guardado sin agendar al bot.`);
     return NextResponse.json({ status: 'atencion_humana' }, { status: 200 });
   }
@@ -410,6 +415,9 @@ async function manejarUbicacion(
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
   if (enTomaHumana) {
     await tocarAtencionHumana(numeroCliente);
+    // Marcamos como no leído en el listado (mismo criterio que texto/media
+    // bajo toma humana).
+    await marcarRequiereAtencion(numeroCliente);
   } else {
     if (await intervencionHumanaReciente(numeroCliente)) {
       // Un operador habló hace poco: el pin es para él, no para el bot.
@@ -433,9 +441,12 @@ async function manejarUbicacion(
 async function avisarSiHaceFaltaHumano(numeroCliente: string) {
   const enTomaHumana = await atencionHumanaActiva(numeroCliente);
   if (enTomaHumana) {
-    // La conversación ya está en manos humanas: solo refrescamos la ventana
-    // de auto-expiración para que la actividad del cliente cuente.
+    // La conversación ya está en manos humanas: refrescamos la ventana de
+    // auto-expiración para que la actividad del cliente cuente, y marcamos el
+    // chat como no-leído en el listado (mismo criterio que texto/ubicación bajo
+    // toma humana: hay algo nuevo del cliente que el operador aún no vio).
     await tocarAtencionHumana(numeroCliente);
+    await marcarRequiereAtencion(numeroCliente);
   } else {
     await marcarRequiereAtencion(numeroCliente);
     // Si un operador habló hace poco (gate por mensajes), ya está "en" la
