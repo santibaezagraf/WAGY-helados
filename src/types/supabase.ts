@@ -14,6 +14,33 @@ export type Database = {
   }
   public: {
     Tables: {
+      alertas_modelo: {
+        Row: {
+          created_at: string
+          id: number
+          modelo_agotado: string
+          modelo_fallback: string | null
+          resuelto: boolean
+          telefono: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: never
+          modelo_agotado: string
+          modelo_fallback?: string | null
+          resuelto?: boolean
+          telefono?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: never
+          modelo_agotado?: string
+          modelo_fallback?: string | null
+          resuelto?: boolean
+          telefono?: string | null
+        }
+        Relationships: []
+      }
       atencion_humana: {
         Row: {
           activa: boolean
@@ -261,7 +288,20 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      conversaciones_inbox: {
+        Row: {
+          bloqueado: boolean | null
+          requiere_atencion: boolean | null
+          telefono: string | null
+          toma_activa: boolean | null
+          ultimo_at: string | null
+          ultimo_media_caption: string | null
+          ultimo_rol: string | null
+          ultimo_texto: string | null
+          ultimo_tipo: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       auto_confirmar_pedidos_expirados: { Args: never; Returns: undefined }
