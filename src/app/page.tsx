@@ -95,9 +95,9 @@ export default async function Home({
         .map((c) => c.telefono)
 
     return (
-        <div className="flex h-screen flex-col overflow-hidden">
+        <div className="flex min-h-screen flex-col">
             <Header conversacionesIniciales={conversaciones} />
-            <main className="flex flex-1 min-h-0 flex-col px-3 py-3 sm:px-5 lg:px-6 bg-slate-50">
+            <main className="flex flex-1 flex-col px-3 py-3 sm:px-5 lg:px-6 bg-slate-50">
                 <DataTable
                     data={pedidos || []}
                     pageIndex={page - 1}

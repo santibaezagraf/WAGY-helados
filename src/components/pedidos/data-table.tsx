@@ -255,6 +255,22 @@ export function DataTable({
     lastSelectedRowIdRef.current = null
   }, [ filters, pageIndex, pageSize])
 
+  // Mide el <header> real y publica la altura en --wagy-header-h para que el
+  // bloque "pantalla completa" ocupe exactamente viewport - header - padding
+  // del main, sin depender de un valor hardcodeado que cambia por breakpoint.
+  React.useEffect(() => {
+    const el = document.querySelector("header")
+    if (!el) return
+    const measure = () => {
+      const h = el.getBoundingClientRect().height
+      document.documentElement.style.setProperty("--wagy-header-h", `${h}px`)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   const table = useReactTable({
     data: data,
     columns,
@@ -310,7 +326,12 @@ export function DataTable({
   }, [table])
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 gap-2">
+    <div className="flex flex-col gap-2">
+      {/* Bloque "pantalla completa": selección + filtros + tabla + paginación
+          ocupan siempre al menos el viewport (menos header y padding del main),
+          así el editor de mensajes se posiciona por debajo y no le come alto a
+          la tabla al abrirse. */}
+      <div className="flex flex-col gap-2 min-h-[calc(100dvh-var(--wagy-header-h,4rem)-1.5rem)]">
       {selectedRowsCount > 0 && (
         <div className="shrink-0">
           <SelectionBar
@@ -449,13 +470,16 @@ export function DataTable({
             Siguiente
           </Button>
 
-          
+
         </div>
       </div>
+      </div>
+      {/* /bloque pantalla completa */}
 
-      {/* Editor de mensajes de WhatsApp — acotado para no romper el layout fijo */}
+      {/* Editor de mensajes de WhatsApp — vive fuera del bloque de viewport,
+          así al abrirse aparece debajo (el propio editor hace scrollIntoView) */}
       {mostrarEditorWpp && mensajesWpp.length > 0 && (
-        <div className="shrink-0 max-h-[40vh] overflow-auto">
+        <div>
           <MessageEditor
             mensajes={mensajesWpp}
             onClose={() => setMostrarEditorWpp(false)}
