@@ -28,7 +28,17 @@ on:
     # Se corre el sábado a propósito: el local no abre ese día, así que el nightly
     # puede quemar su parte del TPD de Groq sin competir con tráfico real de clientes.
     - cron: '0 15 * * 6'
-  workflow_dispatch: {}   # permite dispararlo a mano desde la pestaña Actions
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Qué suite correr'
+        required: false
+        default: 'todos'
+        type: choice
+        options:
+          - todos
+          - solo-guionados
+          - solo-exploratorios
 
 jobs:
   guionados:
@@ -64,7 +74,9 @@ jobs:
             || { echo "::error::NEXT_PUBLIC_SUPABASE_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
           echo "OK: modo test + staging."
 
-      - name: Levantar server + correr guionados y exploratorios
+      - name: Levantar server + correr suites
+        env:
+          SUITE: ${{ inputs.suite || 'todos' }}
         run: |
           npm run dev > devserver.log 2>&1 &
           DEV_PID=$!
@@ -87,18 +99,20 @@ jobs:
           fi
 
           set +e
-          # 1) GUIONADOS — gatean el CI: con PROBAR_FAIL_ON_RED=1 salen != 0 si hay
-          #    una regresión (chequeo en rojo que no sea xfail) → workflow rojo → mail.
-          PROBAR_SOLO_GUIONADOS=1 PROBAR_FAIL_ON_RED=1 node scripts/probar-bot.mjs
-          RES_GUIONADOS=$?
+          RES_GUIONADOS=0
 
-          # 2) EXPLORATORIOS — NO gatean. Llevan el bot al límite (cliente-agente LLM)
-          #    y solo generan transcripts para que Claude Code los juzgue a demanda.
-          #    Su exit code se ignora a propósito (no tienen oráculo).
-          PROBAR_SOLO_EXPLORATORIOS=1 PROBAR_MAX_TURNOS=6 node scripts/probar-bot.mjs || true
+          # 1) GUIONADOS — gatean el CI (salvo solo-exploratorios).
+          if [ "$SUITE" != "solo-exploratorios" ]; then
+            PROBAR_SOLO_GUIONADOS=1 PROBAR_FAIL_ON_RED=1 node scripts/probar-bot.mjs
+            RES_GUIONADOS=$?
+          fi
+
+          # 2) EXPLORATORIOS — NO gatean (salvo solo-guionados).
+          if [ "$SUITE" != "solo-guionados" ]; then
+            PROBAR_SOLO_EXPLORATORIOS=1 PROBAR_MAX_TURNOS=6 node scripts/probar-bot.mjs || true
+          fi
 
           kill $DEV_PID 2>/dev/null
-          # El estado del workflow lo define SOLO la suite guionada (regresión).
           exit $RES_GUIONADOS
 
       - name: Subir transcripts (para juicio con Claude Code)
