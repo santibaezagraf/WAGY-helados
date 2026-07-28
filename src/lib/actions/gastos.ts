@@ -20,15 +20,16 @@ export async function IngresarGasto(
     return { success: true }
 }
 
-export async function ObtenerGastos(fechaInicio: Date, fechaFin: Date): Promise<{ id: number, monto: number }[]> {
+export async function ObtenerGastos(fechaInicio: Date, fechaFin: Date): Promise<{ id: number, monto: number, created_at: string }[]> {
     const supabase = await createClient()
 
     const { data, error } = await supabase
         .from("gastos")
-        .select("id, monto")
+        .select("id, monto, created_at")
         .eq("activo", true)
         .gte("created_at", fechaInicio.toISOString())
         .lt("created_at", fechaFin.toISOString())
+        .order("created_at", { ascending: false })
 
     if (error) throw new Error(`Error al obtener gastos: ${error.message}`)
 

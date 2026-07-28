@@ -11,6 +11,7 @@ import {
   inicioSemanaAR,
   inicioMesAR,
   sumarDiasAR,
+  sumarMesesAR,
   claveDiaAR,
   fechaISOAR,
   instanteAR,
@@ -28,6 +29,8 @@ interface DateRangeSelectorProps {
 
 const MS_POR_DIA = 24 * 60 * 60 * 1000
 
+type Modo = "libre" | "semanal" | "mensual"
+
 function formatearFechaInput(date: Date) {
   return fechaISOAR(date)
 }
@@ -42,12 +45,19 @@ function formatoCorto(date: Date) {
   return formatearFechaAR(date, {
     day: "numeric",
     month: "short",
-    year: "numeric",
   })
 }
 
 function mismoDia(a: Date, b: Date) {
   return claveDiaAR(a) === claveDiaAR(b)
+}
+
+function finDeSemanaAR(inicioSemana: Date): Date {
+  return sumarDiasAR(inicioSemana, 6)
+}
+
+function finDeMesAR(inicioMes: Date): Date {
+  return sumarDiasAR(sumarMesesAR(inicioMes, 1), -1)
 }
 
 export const DateRangeSelector = React.memo(function DateRangeSelector({
@@ -60,12 +70,12 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
   const [inicioInput, setInicioInput] = React.useState(() => formatearFechaInput(inicioSemanaAR(new Date())))
   const [finInput, setFinInput] = React.useState(() => formatearFechaInput(new Date()))
   const [error, setError] = React.useState<string>("")
+  const [modo, setModo] = React.useState<Modo>("semanal")
 
   const hoyStr = React.useMemo(() => formatearFechaInput(hoy), [hoy])
 
   const notificarCambio = React.useCallback(
     (nuevoInicio: Date, nuevoFin: Date) => {
-      // fin exclusivo = 00:00 AR del día siguiente al último día del rango.
       onDateRangeChange(inicioDelDiaAR(nuevoInicio), inicioDiaSiguienteAR(nuevoFin))
     },
     [onDateRangeChange]
@@ -73,12 +83,11 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
 
   React.useEffect(() => {
     notificarCambio(inicio, fin)
-    // Solo en el primer render — cambios posteriores se disparan en los handlers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const aplicarRango = React.useCallback(
-    (nuevoInicio: Date, nuevoFin: Date) => {
+    (nuevoInicio: Date, nuevoFin: Date, nuevoModo: Modo = "libre") => {
       const ini = inicioDelDiaAR(nuevoInicio)
       const fi = inicioDelDiaAR(nuevoFin)
       setInicio(ini)
@@ -86,6 +95,7 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
       setInicioInput(formatearFechaInput(ini))
       setFinInput(formatearFechaInput(fi))
       setError("")
+      setModo(nuevoModo)
       notificarCambio(ini, fi)
     },
     [notificarCambio]
@@ -105,6 +115,7 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
     }
     setError("")
     setInicio(nuevoInicio)
+    setModo("libre")
     notificarCambio(nuevoInicio, fin)
   }, [fin, hoy, notificarCambio])
 
@@ -122,6 +133,7 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
     }
     setError("")
     setFin(nuevoFin)
+    setModo("libre")
     notificarCambio(inicio, nuevoFin)
   }, [inicio, hoy, notificarCambio])
 
@@ -131,20 +143,48 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
   }, [inicio, fin])
 
   const handlePrev = React.useCallback(() => {
-    aplicarRango(sumarDiasAR(inicio, -spanDias), sumarDiasAR(fin, -spanDias))
-  }, [inicio, fin, spanDias, aplicarRango])
+    if (modo === "semanal") {
+      const prevInicio = sumarDiasAR(inicioSemanaAR(inicio), -7)
+      const prevFin = finDeSemanaAR(prevInicio)
+      aplicarRango(prevInicio, prevFin, "semanal")
+    } else if (modo === "mensual") {
+      const prevInicio = sumarMesesAR(inicioMesAR(inicio), -1)
+      const prevFin = finDeMesAR(prevInicio)
+      aplicarRango(prevInicio, prevFin, "mensual")
+    } else {
+      aplicarRango(sumarDiasAR(inicio, -spanDias), sumarDiasAR(fin, -spanDias), "libre")
+    }
+  }, [inicio, fin, spanDias, modo, aplicarRango])
 
   const handleNext = React.useCallback(() => {
-    const nuevoInicio = sumarDiasAR(inicio, spanDias)
-    let nuevoFin = sumarDiasAR(fin, spanDias)
-    if (nuevoFin > hoy) nuevoFin = hoy
+    let nuevoInicio: Date
+    let nuevoFin: Date
+
+    if (modo === "semanal") {
+      nuevoInicio = sumarDiasAR(inicioSemanaAR(inicio), 7)
+      nuevoFin = finDeSemanaAR(nuevoInicio)
+    } else if (modo === "mensual") {
+      nuevoInicio = sumarMesesAR(inicioMesAR(inicio), 1)
+      nuevoFin = finDeMesAR(nuevoInicio)
+    } else {
+      nuevoInicio = sumarDiasAR(inicio, spanDias)
+      nuevoFin = sumarDiasAR(fin, spanDias)
+    }
+
     if (nuevoInicio > hoy) return
-    aplicarRango(nuevoInicio, nuevoFin)
-  }, [inicio, fin, spanDias, hoy, aplicarRango])
+    if (nuevoFin > hoy) nuevoFin = hoy
+    aplicarRango(nuevoInicio, nuevoFin, modo)
+  }, [inicio, fin, spanDias, hoy, modo, aplicarRango])
 
   const nextDeshabilitado = React.useMemo(() => {
+    if (modo === "semanal") {
+      return sumarDiasAR(inicioSemanaAR(inicio), 7) > hoy
+    }
+    if (modo === "mensual") {
+      return sumarMesesAR(inicioMesAR(inicio), 1) > hoy
+    }
     return sumarDiasAR(inicio, spanDias) > hoy
-  }, [inicio, spanDias, hoy])
+  }, [inicio, spanDias, hoy, modo])
 
   const presetHoy = React.useCallback(() => aplicarRango(hoy, hoy), [hoy, aplicarRango])
   const presetAyer = React.useCallback(() => {
@@ -152,13 +192,13 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
     aplicarRango(ayer, ayer)
   }, [hoy, aplicarRango])
   const presetSemana = React.useCallback(() => {
-    aplicarRango(inicioSemanaAR(hoy), hoy)
+    aplicarRango(inicioSemanaAR(hoy), hoy, "semanal")
   }, [hoy, aplicarRango])
   const presetUltimos7 = React.useCallback(() => {
     aplicarRango(sumarDiasAR(hoy, -6), hoy)
   }, [hoy, aplicarRango])
   const presetMes = React.useCallback(() => {
-    aplicarRango(inicioMesAR(hoy), hoy)
+    aplicarRango(inicioMesAR(hoy), hoy, "mensual")
   }, [hoy, aplicarRango])
   const presetUltimos30 = React.useCallback(() => {
     aplicarRango(sumarDiasAR(hoy, -29), hoy)
@@ -205,12 +245,12 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
       </div>
 
       <div className="flex items-center justify-between gap-1">
-        <Button variant="outline" size="icon" onClick={handlePrev} className="h-8 w-8">
+        <Button variant="outline" size="icon" onClick={handlePrev} className="h-8 w-8 shrink-0">
           <ChevronLeft className="h-4 w-4" />
         </Button>
 
-        <div className="flex-1 text-center">
-          <Badge variant="secondary" className="text-sm font-medium px-3 py-1">
+        <div className="min-w-0 flex-1 text-center">
+          <Badge variant="secondary" className="max-w-full truncate text-sm font-medium px-3 py-1">
             {textoRango}
             <span className="ml-2 text-xs text-gray-500">
               ({spanDias} {spanDias === 1 ? "día" : "días"})
@@ -223,7 +263,7 @@ export const DateRangeSelector = React.memo(function DateRangeSelector({
           size="icon"
           onClick={handleNext}
           disabled={nextDeshabilitado}
-          className="h-8 w-8"
+          className="h-8 w-8 shrink-0"
         >
           <ChevronRight className="h-4 w-4" />
         </Button>

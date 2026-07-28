@@ -1,11 +1,11 @@
 "use client"
 
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import Link from "next/link"
 import { obtenerBalance, Balance } from "@/lib/actions/balances"
 import { EliminarGasto, ObtenerGastos } from "@/lib/actions/gastos"
 import { DateRangeSelector } from "@/components/balances/date-range-selector"
-import { inicioDelDiaAR, sumarDiasAR, claveDiaAR, formatearFechaAR } from "@/lib/zona-horaria"
+import { inicioDelDiaAR, sumarDiasAR, claveDiaAR, formatearFechaAR, formatearHoraAR } from "@/lib/zona-horaria"
 import { Button } from "@/components/ui/button"
 import { Header } from "@/components/ui/header"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
@@ -114,13 +114,13 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 export default function BalancesPage() {
-  const router = useRouter()
+
   const [balance, setBalance] = React.useState<Balance | null>(null)
-  const [gastos, setGastos] = React.useState<{ id: number, monto: number }[]>([])
+  const [gastos, setGastos] = React.useState<{ id: number, monto: number, created_at: string }[]>([])
   const [gastosDropdownOpen, setGastosDropdownOpen] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false)
-  const [gastoToDelete, setGastoToDelete] = React.useState<{ id: number, monto: number } | null>(null)
+  const [gastoToDelete, setGastoToDelete] = React.useState<{ id: number, monto: number, created_at: string } | null>(null)
   const [dateRange, setDateRange] = React.useState<{
     startDate: Date
     endDate: Date
@@ -176,7 +176,7 @@ export default function BalancesPage() {
   const textoRango = React.useMemo(() => {
     if (!dateRange) return ""
     const fmt = (d: Date) =>
-      formatearFechaAR(d, { day: "numeric", month: "short", year: "numeric" })
+      formatearFechaAR(d, { day: "numeric", month: "short" })
     const inicio = inicioDelDiaAR(dateRange.startDate)
     // endDate es el fin EXCLUSIVO (00:00 AR del día siguiente); el último día
     // inclusivo del rango es el día anterior.
@@ -189,26 +189,23 @@ export default function BalancesPage() {
     <div className="min-h-screen bg-gray-50">
       <Header />
 
-      <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => router.back()}
-            className="gap-2"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            Volver
-          </Button>
+      <div className="mx-auto w-full px-4 py-6 sm:px-6 sm:py-8">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Link
+              href="/"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors"
+              title="Volver a pedidos"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </Link>
+            <h1 className="text-2xl font-bold sm:text-3xl">Balance de Ventas</h1>
+          </div>
           {textoRango && (
             <div className="text-xs text-gray-500 sm:text-sm">
               Período: <span className="font-medium text-gray-700">{textoRango}</span>
             </div>
           )}
-        </div>
-
-        <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-bold sm:text-3xl">Balance de Ventas</h1>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-[minmax(280px,340px)_1fr]">
@@ -320,28 +317,36 @@ export default function BalancesPage() {
                       {gastosDropdownOpen && gastos.length > 0 && (
                         <div className="border-t border-red-200/60 bg-red-50/60 px-4 py-3">
                           <div className="grid gap-2 sm:grid-cols-2">
-                            {gastos.map((gasto) => (
-                              <div
-                                key={gasto.id}
-                                className="flex items-center justify-between rounded-md border border-red-200 bg-white px-3 py-2 text-sm"
-                              >
-                                <span className="font-medium tabular-nums text-red-900">
-                                  {formatCurrency(gasto.monto)}
-                                </span>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 w-7 p-0 text-red-600 hover:bg-red-100 hover:text-red-700"
-                                  onClick={() => {
-                                    setGastoToDelete(gasto)
-                                    setDeleteDialogOpen(true)
-                                  }}
-                                  aria-label={`Eliminar gasto de ${formatCurrency(gasto.monto)}`}
+                            {gastos.map((gasto) => {
+                              const fecha = new Date(gasto.created_at)
+                              return (
+                                <div
+                                  key={gasto.id}
+                                  className="flex items-center justify-between gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-sm"
                                 >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
-                              </div>
-                            ))}
+                                  <div className="min-w-0">
+                                    <div className="font-medium tabular-nums text-red-900">
+                                      {formatCurrency(gasto.monto)}
+                                    </div>
+                                    <div className="text-[11px] text-red-700/70">
+                                      {formatearFechaAR(fecha, { day: "numeric", month: "short" })} · {formatearHoraAR(fecha)}
+                                    </div>
+                                  </div>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 w-7 shrink-0 p-0 text-red-600 hover:bg-red-100 hover:text-red-700"
+                                    onClick={() => {
+                                      setGastoToDelete(gasto)
+                                      setDeleteDialogOpen(true)
+                                    }}
+                                    aria-label={`Eliminar gasto de ${formatCurrency(gasto.monto)}`}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              )
+                            })}
                           </div>
                         </div>
                       )}
