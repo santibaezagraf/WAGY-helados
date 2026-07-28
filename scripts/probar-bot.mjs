@@ -176,7 +176,8 @@ async function siguienteMensajeCliente(escenario, transcript) {
       .map((m) => `${m.rol === 'cliente' ? 'VOS (cliente)' : 'BOT'}: ${m.texto}`)
       .join('\n') || '(todavía no escribiste nada)';
 
-  const system = `Sos un cliente REAL escribiendo por WhatsApp a una heladería (WAGY) que toma pedidos con un bot. Escribís en español rioplatense informal (de vos), mensajes cortos y naturales, como una persona en el celular. NO actúes de asistente, NO expliques lo que hacés, NO uses comillas.
+  const system = `Sos un cliente REAL escribiendo por WhatsApp a una heladería (WAGY) que toma pedidos con un bot, no tiene local, sino que envían a domicilio o aceptan retiros en la ubicacion donde preparan los pedidos, venden únicamente helados de palito por unidad en cantidades de por lo menos 20, con 2 tipos: de crema o de agua, con varios sabores dentro de cada tipo. 
+  Escribís en español rioplatense informal (de vos), mensajes cortos y naturales, como una persona en el celular. NO actúes de asistente, NO expliques lo que hacés, NO uses comillas.
 
 Tu personaje: ${escenario.persona}
 Tu objetivo: ${escenario.objetivo}
