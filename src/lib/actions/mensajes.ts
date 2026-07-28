@@ -5,7 +5,7 @@ import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { Database } from '@/types/supabase'
 import { Pedido } from '@/types/pedidos'
 import { createClient as createUserClient } from '@/lib/supabase-server'
-import { enviarMensajeManual, enviarResumenYPedirConfirmacion } from '@/lib/whatsapp'
+import { enviarMensajeManual, enviarResumenYPedirConfirmacion, marcarLeidoWhatsapp } from '@/lib/whatsapp'
 import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
 import {
   activarAtencionHumana,
@@ -31,6 +31,14 @@ const URL_FIRMADA_SEG = 60 * 60
 // bypasseando RLS. La página ya valida la sesión, pero las server actions son
 // invocables por su cuenta, así que cada una exige usuario autenticado abajo.
 const supabaseAdmin = createServiceClient<Database>(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+)
+
+// Cliente service-role SIN el genérico <Database>: para leer la vista
+// `conversaciones_inbox`, que no está en los tipos generados (mismo criterio que
+// conversaciones.ts / atencion-humana.ts).
+const supabaseAdminSinTipar = createServiceClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
 )
@@ -63,11 +71,18 @@ async function firmarPath(path: string | null): Promise<string | null> {
   return data.signedUrl
 }
 
-// Solo cargamos el historial reciente: traer TODO el intercambio con un número
-// no escala y no aporta (una conversación de hace días no es accionable, y fuera
-// de la ventana de 24h de Meta ni siquiera se le puede escribir). 24h coincide
-// con esa ventana de mensajería libre.
+// Ventana del MENÚ de conversaciones del header (dropdown de acceso rápido):
+// distinto del historial del chat. 24h coincide con la ventana de mensajería
+// libre de Meta y mantiene el menú corto; el inbox completo (/conversaciones)
+// cubre 30 días.
 const HORAS_HISTORIAL = 24
+
+// Tamaño de página del historial del chat: traemos esta cantidad al abrir y otra
+// tanda por cada "cargar más" al scrollear hacia arriba. Antes traíamos 500 de
+// una sola vez — innecesario para el uso normal (se ve lo reciente) y caro para
+// un número con mucho volumen. La paginación por cursor (created_at) trae lo
+// viejo solo si el operador sube a buscarlo.
+const PAGINA_HISTORIAL = 50
 
 /** Aborta si no hay usuario autenticado (estas actions usan service-role). */
 async function exigirUsuario() {
@@ -76,24 +91,40 @@ async function exigirUsuario() {
   if (!user) throw new Error('No autenticado')
 }
 
-/** Historial reciente del chat de un teléfono (últimas HORAS_HISTORIAL), cronológico. */
-export async function getHistorialChat(telefono: string): Promise<MensajeChat[]> {
-  await exigirUsuario()
+export type HistorialPagina = {
+  /** Mensajes en orden cronológico (ascendente). */
+  mensajes: MensajeChat[]
+  /** true si la página se llenó → probablemente haya más mensajes viejos. */
+  hayMas: boolean
+}
 
-  const desde = new Date(Date.now() - HORAS_HISTORIAL * 60 * 60 * 1000).toISOString()
-
-  const { data, error } = await supabaseAdmin
+// Núcleo paginado SIN auth (lo comparten getDatosChat y getMensajesAntiguos):
+// trae hasta `limite` mensajes ANTERIORES a `antesDeISO` (o los más nuevos si no
+// se pasa cursor), ordenados desc y luego dados vuelta a cronológico. `hayMas` es
+// true si la página se llenó (heurística: casi seguro hay más viejos).
+async function traerHistorialPagina(
+  telefono: string,
+  antesDeISO?: string,
+  limite = PAGINA_HISTORIAL,
+): Promise<HistorialPagina> {
+  let query = supabaseAdmin
     .from('mensajes_chat')
     .select('id, rol, texto, created_at, tipo, media_path, media_mime, media_caption, media_filename, media_lat, media_lng')
     .eq('telefono', telefono)
-    .gte('created_at', desde)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
+    .limit(limite)
+  if (antesDeISO) query = query.lt('created_at', antesDeISO)
 
+  const { data, error } = await query
   if (error) throw new Error(`Error al traer el historial: ${error.message}`)
 
-  // Firmamos los paths de media en paralelo.
-  return Promise.all(
-    (data ?? []).map(async (m) => ({
+  const filas = data ?? []
+  const hayMas = filas.length === limite
+  // Firmamos los paths de media en paralelo (las filas de texto tienen
+  // media_path=null → firmarPath corta sin I/O). `.reverse()` deja el orden
+  // cronológico (ascendente) que espera el chat.
+  const mensajes = await Promise.all(
+    filas.reverse().map(async (m) => ({
       id: m.id,
       rol: m.rol,
       texto: m.texto,
@@ -107,7 +138,21 @@ export async function getHistorialChat(telefono: string): Promise<MensajeChat[]>
       media_lng: m.media_lng,
     })),
   )
+  return { mensajes, hayMas }
 }
+
+/**
+ * Mensajes ANTERIORES a un cursor (para el "cargar más" al scrollear hacia
+ * arriba en el chat). Cronológico, con `hayMas` para saber si seguir ofreciendo.
+ */
+export async function getMensajesAntiguos(
+  telefono: string,
+  antesDeISO: string,
+): Promise<HistorialPagina> {
+  await exigirUsuario()
+  return traerHistorialPagina(telefono, antesDeISO)
+}
+
 
 /**
  * Firma el path de un media que llegó por Realtime (el payload trae media_path
@@ -143,15 +188,34 @@ export async function getTelefonosConTomaActiva(): Promise<string[]> {
  * NO desaparece al abrir el chat, así que un cliente sin pedido sigue accesible.
  * Marca cuáles esperan intervención humana para resaltarlos.
  *
- * El dedupe/marcado vive en `construirConversaciones` ([conversaciones-utils.ts]);
- * acá solo traemos las filas ya ordenadas por recencia.
+ * Fuente unificada con el inbox: lee la MISMA vista `conversaciones_inbox`
+ * (dedupe por teléfono + flag `requiere_atencion` resueltos en SQL), acotada a
+ * 24h. Reemplaza el viejo scan de 500 filas + dedupe en JS + consulta aparte de
+ * requiere_atencion (3 operaciones → 1). Si la vista todavía no está creada en la
+ * base (migración sin aplicar), cae al método anterior para no romper el header.
  */
 export async function getConversacionesRecientes(): Promise<Conversacion[]> {
   await exigirUsuario()
 
   const desde = new Date(Date.now() - HORAS_HISTORIAL * 60 * 60 * 1000).toISOString()
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseAdminSinTipar
+    .from('conversaciones_inbox')
+    .select('telefono, requiere_atencion')
+    .gte('ultimo_at', desde)
+    .order('ultimo_at', { ascending: false })
+    .limit(500)
+
+  if (!error) {
+    return (data ?? []).map((r: { telefono: string; requiere_atencion: boolean }) => ({
+      telefono: r.telefono,
+      requiereAtencion: r.requiere_atencion,
+    }))
+  }
+
+  // Fallback (vista inexistente / error): método anterior sobre mensajes_chat.
+  console.warn('⚠️ conversaciones_inbox no disponible, uso fallback:', error.message)
+  const { data: crudas, error: errFallback } = await supabaseAdmin
     .from('mensajes_chat')
     .select('telefono, created_at')
     .gte('created_at', desde)
@@ -159,18 +223,45 @@ export async function getConversacionesRecientes(): Promise<Conversacion[]> {
     .order('created_at', { ascending: false })
     .limit(500)
 
-  if (error) {
-    console.error('⚠️ No se pudo traer conversaciones recientes:', error.message)
+  if (errFallback) {
+    console.error('⚠️ No se pudo traer conversaciones recientes:', errFallback.message)
     return []
   }
 
-  return construirConversaciones(data ?? [], await telefonosRequierenAtencion())
+  return construirConversaciones(crudas ?? [], await telefonosRequierenAtencion())
 }
 
-/** El operador abrió el chat → limpiamos el aviso de "requiere atención". */
+/**
+ * El operador abrió el chat: limpiamos el aviso de "requiere atención" y le
+ * mandamos a Meta el read-receipt del último mensaje del cliente (así el
+ * cliente ve las tildes azules, como en WhatsApp normal). El read receipt corre
+ * en paralelo/fire-and-forget: si Meta falla no debe frenar el abrir del chat.
+ * Meta trata "leído" como acumulativo (marca todos los anteriores del hilo), así
+ * que con el más reciente que tenga wa_message_id alcanza.
+ */
 export async function marcarAtendido(telefono: string): Promise<void> {
   await exigirUsuario()
   await limpiarRequiereAtencion(telefono)
+  // No await: fire-and-forget con log del error. No debe bloquear el abrir.
+  void marcarLeidoUltimoDelCliente(telefono).catch((e) => {
+    console.error(`⚠️ No se pudo mandar read-receipt para ${telefono}:`, e)
+  })
+}
+
+// Busca el wa_message_id del último mensaje del cliente y le manda read-receipt
+// a Meta. Sin auth (lo usa `marcarAtendido`, que ya autenticó).
+async function marcarLeidoUltimoDelCliente(telefono: string): Promise<void> {
+  const { data, error } = await supabaseAdmin
+    .from('mensajes_chat')
+    .select('wa_message_id')
+    .eq('telefono', telefono)
+    .eq('rol', 'cliente')
+    .not('wa_message_id', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error || !data?.wa_message_id) return
+  await marcarLeidoWhatsapp(data.wa_message_id)
 }
 
 /**
@@ -211,25 +302,13 @@ export async function enviarMensajeManualAccion(
   return { ok, mensaje: mensajeChat }
 }
 
-/** Estado de la toma humana para el banner del modal. */
-export async function getEstadoAtencion(telefono: string): Promise<{ activa: boolean }> {
-  await exigirUsuario()
-  return estadoAtencion(telefono)
-}
-
 /** Devolver la conversación al bot (fin de la toma humana). */
 export async function finalizarAtencion(telefono: string): Promise<void> {
   await exigirUsuario()
   await desactivarAtencionHumana(telefono)
 }
 
-// ── Moderación manual del número (desde el modal de chat) ───────────────────
-
-/** Estado de moderación para el modal: ¿el número está bloqueado? */
-export async function getEstadoModeracion(telefono: string): Promise<{ bloqueado: boolean }> {
-  await exigirUsuario()
-  return { bloqueado: await estaBloqueado(telefono) }
-}
+// ── Moderación manual del número (desde el chat) ────────────────────────────
 
 /** Bloquea manualmente el número: el bot lo ignora por completo hasta desbloquear. */
 export async function bloquearNumeroAccion(telefono: string): Promise<void> {
@@ -261,9 +340,8 @@ export async function resetearRateLimitAccion(telefono: string): Promise<void> {
  * resumen de otro pedido generaría botones apuntando a una orden que el bot
  * no reconoce como activa.
  */
-export async function getPedidoActivoChat(telefono: string): Promise<Pedido | null> {
-  await exigirUsuario()
-
+// Núcleo del lookup SIN auth: lo comparten getPedidoActivoChat y getDatosChat.
+async function traerPedidoActivo(telefono: string): Promise<Pedido | null> {
   const hace12Horas = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString()
   const { data, error } = await supabaseAdmin
     .from('pedidos')
@@ -281,6 +359,41 @@ export async function getPedidoActivoChat(telefono: string): Promise<Pedido | nu
     return null
   }
   return data
+}
+
+export async function getPedidoActivoChat(telefono: string): Promise<Pedido | null> {
+  await exigirUsuario()
+  return traerPedidoActivo(telefono)
+}
+
+/**
+ * Estado inicial COMPLETO del chat en UNA sola llamada: historial + toma humana
+ * + pedido vigente + bloqueo. Antes el panel disparaba 4 actions en paralelo y
+ * cada una revalidaba la sesión (`auth.getUser()` → 4 round-trips a Supabase
+ * Auth). Acá autenticamos una vez y hacemos las 4 lecturas en paralelo → 1 solo
+ * round-trip desde el browser y 1 solo chequeo de sesión.
+ */
+export async function getDatosChat(telefono: string): Promise<{
+  historial: MensajeChat[]
+  hayMasHistorial: boolean
+  atencionActiva: boolean
+  pedido: Pedido | null
+  bloqueado: boolean
+}> {
+  await exigirUsuario()
+  const [historial, estado, pedido, bloqueado] = await Promise.all([
+    traerHistorialPagina(telefono),
+    estadoAtencion(telefono),
+    traerPedidoActivo(telefono),
+    estaBloqueado(telefono),
+  ])
+  return {
+    historial: historial.mensajes,
+    hayMasHistorial: historial.hayMas,
+    atencionActiva: estado.activa,
+    pedido,
+    bloqueado,
+  }
 }
 
 /**

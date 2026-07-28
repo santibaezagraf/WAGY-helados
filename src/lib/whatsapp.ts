@@ -303,6 +303,23 @@ export async function marcarLeidoYEscribiendo(waMessageId: string): Promise<void
 }
 
 /**
+ * Marca un mensaje como LEÍDO en WhatsApp (tildes azules del lado del cliente),
+ * SIN el typing indicator. Se usa cuando un operador abre un chat en el
+ * dashboard: distinto del caso del bot (`marcarLeidoYEscribiendo`), acá no
+ * queremos poner "escribiendo…" porque el operador puede tardar minutos u horas
+ * en escribir — o directamente estar solo revisando. Meta trata el read receipt
+ * como "leídos todos los anteriores" en el hilo, así que con marcar el mensaje
+ * más reciente del cliente alcanza. Best-effort.
+ */
+export async function marcarLeidoWhatsapp(waMessageId: string): Promise<void> {
+  await postAMeta({
+    messaging_product: 'whatsapp',
+    status: 'read',
+    message_id: waMessageId,
+  }, 'read receipt');
+}
+
+/**
  * Texto de "pedido confirmado" con tiempo estimado y, si paga por
  * transferencia, los datos para transferir. Pura y exportada para tests.
  * Los valores editables viven en precios-publico.ts (ENTREGA / PAGO_TRANSFERENCIA).
