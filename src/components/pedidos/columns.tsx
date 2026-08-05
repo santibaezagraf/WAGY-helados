@@ -204,8 +204,26 @@ export const createColumns = (config: {
                 style: "currency",
                 currency: "ARS",
             }).format(precio)
-            return <div className="font-medium">{formatted}</div>
-
+            // Aviso: el pedido tenía precio manual y el cliente cambió las
+            // cantidades por WhatsApp. El trigger retarifó con la lista (se
+            // perdió el override); mostramos el ícono para que el operador
+            // revise y decida si vuelve a ponerlo. Se limpia al editar el
+            // pedido desde el modal (actualizarPedidoCompleto).
+            const avisoPrecio = row.original.aviso_precio_sobreescrito
+            return (
+                <div className="font-medium flex items-center gap-1.5">
+                    {formatted}
+                    {avisoPrecio && (
+                        <span
+                            className="text-amber-600"
+                            title="Este pedido tenía precio manual y se retarifó porque cambiaron las cantidades. Revisalo."
+                            aria-label="Revisar precio: cambió la cantidad y se perdió el precio manual."
+                        >
+                            ⚠️
+                        </span>
+                    )}
+                </div>
+            )
         }
     },
     {

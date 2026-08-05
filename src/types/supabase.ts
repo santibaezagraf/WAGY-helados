@@ -171,6 +171,7 @@ export type Database = {
         Row: {
           aclaracion: string | null
           auto_rechazado: boolean
+          aviso_precio_sobreescrito: boolean
           cantidad_agua: number
           cantidad_crema: number
           costo_envio: number
@@ -199,6 +200,7 @@ export type Database = {
         Insert: {
           aclaracion?: string | null
           auto_rechazado?: boolean
+          aviso_precio_sobreescrito?: boolean
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
@@ -227,6 +229,7 @@ export type Database = {
         Update: {
           aclaracion?: string | null
           auto_rechazado?: boolean
+          aviso_precio_sobreescrito?: boolean
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number

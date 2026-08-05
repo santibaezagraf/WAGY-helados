@@ -96,7 +96,9 @@ export async function actualizarPedidoCompleto(
         // (observaciones_detalle) a null. El bot, en su próximo turno, resiembra
         // 'general' desde el texto plano (ver leerSlots). Sin esto, el bot
         // mergearía contra slots viejos que ya no reflejan lo que escribió el staff.
-        .update({ ...datos, observaciones_detalle: null, ...patchConEnviadoCoherente(datos.estado) })
+        // aviso_precio_sobreescrito=false: cualquier edición explícita del
+        // operador significa que ya revisó el pedido (con precio manual o sin).
+        .update({ ...datos, observaciones_detalle: null, aviso_precio_sobreescrito: false, ...patchConEnviadoCoherente(datos.estado) })
         .eq("id", id)
 
     if (error) throw new Error(`Error al actualizar pedido: ${error.message}`)
