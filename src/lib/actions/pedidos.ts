@@ -3,22 +3,7 @@
 import { revalidatePath, updateTag } from 'next/cache'
 import { createClient } from '@/lib/supabase-server'
 import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
-
-/**
- * Mantiene el flag booleano `enviado` consistente con el `estado`:
- *  - estado='enviado'   → enviado=true
- *  - estado='cancelado' → enviado=false (sino una cancelación de un pedido
- *                         marcado previamente como enviado deja el flag pegado
- *                         y el bot lo trata como "pedido despachado reciente"
- *                         para respuestas contextuales).
- *  - otros estados      → no tocamos el flag (lo gestiona el dashboard a mano).
- */
-function patchConEnviadoCoherente(estado: string): Record<string, unknown> {
-    const patch: Record<string, unknown> = { estado }
-    if (estado === 'enviado') patch.enviado = true
-    if (estado === 'cancelado') patch.enviado = false
-    return patch
-}
+import { patchConEnviadoCoherente } from '@/lib/pedidos-estado'
 
 /**
  * Actualiza el estado de un pedido individual

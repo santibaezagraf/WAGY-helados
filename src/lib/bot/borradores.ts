@@ -86,7 +86,7 @@ export function decidirAccionBorrador(params: {
   if (silencio >= AUTO_RECHAZO_HORAS * 60 * 60 * 1000) {
     return {
       accion: 'rechazar',
-      avisarCliente: silencio < AVISO_CANCELACION_HORAS * 60 * 60 * 1000,
+      avisarCliente: params.esCompleto && (silencio < AVISO_CANCELACION_HORAS * 60 * 60 * 1000),
     };
   }
 

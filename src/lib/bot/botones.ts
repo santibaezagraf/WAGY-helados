@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarResumenYPedirConfirmacion, mensajeConfirmacion } from '@/lib/whatsapp';
 import { estaDespachado, marcarHistorialDescartado } from '@/lib/bot/procesar';
+import { patchConEnviadoCoherente } from '@/lib/pedidos-estado';
 
 const supabaseAdmin = createClient<Database>(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -276,7 +277,7 @@ async function leerEstadoPedido(numeroCliente: string, pedidoId: number) {
 async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
   const { data, error } = await supabaseAdmin
     .from('pedidos')
-    .update({ estado: 'cancelado' })
+    .update(patchConEnviadoCoherente('cancelado'))
     .eq('id', pedidoId)
     .eq('telefono', numeroCliente)
     .eq('estado', 'esperando_cancelacion')
