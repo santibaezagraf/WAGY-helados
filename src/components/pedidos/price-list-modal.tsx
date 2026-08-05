@@ -16,9 +16,19 @@ interface PriceRow {
 
 export interface PriceList {
   name: string 
+  saboresAgua: string[]
+  saboresCrema: string[]
   agua: PriceRow[]
   crema: PriceRow[]
 }
+
+interface PriceListState extends PriceList {
+  saboresAguaStr: string
+  saboresCremaStr: string
+}
+
+const defaultSaboresAgua = "Frutilla, Uva, Limón, Pico Dulce, Crema del Cielo, Caramelo Fizz"
+const defaultSaboresCrema = "Chocolate, Vainilla, Frutilla, Dulce de leche"
 
 interface PriceListModalProps {
   open: boolean
@@ -26,8 +36,12 @@ interface PriceListModalProps {
 }
 
 export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
-  const [priceList, setPriceList] = React.useState<PriceList>({
+  const [priceList, setPriceList] = React.useState<PriceListState>({
     name: "",
+    saboresAgua: [],
+    saboresCrema: [],
+    saboresAguaStr: defaultSaboresAgua,
+    saboresCremaStr: defaultSaboresCrema,
     agua: [{ id: "agua-1", fromQuantity: "", pricePerUnit: "" }],
     crema: [{ id: "crema-1", fromQuantity: "", pricePerUnit: "" }],
   })
@@ -58,6 +72,10 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
     if (!creatingPriceList) {
       setPriceList({
         name: "",
+        saboresAgua: [],
+        saboresCrema: [],
+        saboresAguaStr: defaultSaboresAgua,
+        saboresCremaStr: defaultSaboresCrema,
         agua: [{ id: "agua-1", fromQuantity: "", pricePerUnit: "" }],
         crema: [{ id: "crema-1", fromQuantity: "", pricePerUnit: "" }],
       })
@@ -134,6 +152,8 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
     // Log para demostración (aquí irían las server actions)
     console.log("Lista de precios creada:", priceList)
 
+    const parseSabores = (str: string) => str.split(',').map(s => s.trim()).filter(Boolean)
+
     try {
       await guardarListaPrecios(
       priceList.name, 
@@ -144,7 +164,9 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
       priceList.crema.map(item => ({
         fromQuantity: Number(item.fromQuantity),
         pricePerUnit: Number(item.pricePerUnit)
-      }))
+      })),
+      parseSabores(priceList.saboresAguaStr),
+      parseSabores(priceList.saboresCremaStr)
     )
   } catch (error) {
     alert("Error al crear la lista de precios: " + (error as Error).message)
@@ -154,6 +176,10 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
     // Reset y cierre
     setPriceList({
       name: "",
+      saboresAgua: [],
+      saboresCrema: [],
+      saboresAguaStr: defaultSaboresAgua,
+      saboresCremaStr: defaultSaboresCrema,
       agua: [{ id: "agua-1", fromQuantity: "", pricePerUnit: "" }],
       crema: [{ id: "crema-1", fromQuantity: "", pricePerUnit: "" }],
     })
@@ -162,12 +188,25 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
 
   const renderPriceColumn = (type: "agua" | "crema", label: string) => {
     const rows = priceList[type]
+    const saboresKey = type === "agua" ? "saboresAguaStr" : "saboresCremaStr"
 
     return (
       <div className="flex-1">
         <h3 className="font-semibold text-sm mb-3 text-slate-700">
           Helados de {label}
         </h3>
+        
+        <div className="mb-4">
+          <Label className="text-xs text-slate-600 mb-1 block">
+            Sabores (separados por coma)
+          </Label>
+          <Input
+            value={priceList[saboresKey]}
+            onChange={(e) => setPriceList(prev => ({ ...prev, [saboresKey]: e.target.value }))}
+            className="text-sm"
+          />
+        </div>
+
         <div className="space-y-2">
           {rows.map((row) => (
             <div key={row.id} className="flex gap-2 items-end">
@@ -336,6 +375,16 @@ export function PriceListModal({ open, onOpenChange }: PriceListModalProps) {
                             {activePriceList[section.key].length} regla(s)
                           </span>
                         </div>
+                        {activePriceList[section.key === "agua" ? "saboresAgua" : "saboresCrema"]?.length > 0 && (
+                          <div className="px-4 py-2 border-b border-slate-100 bg-white">
+                            <p className="text-xs text-slate-500 mb-1">Sabores:</p>
+                            <div className="flex flex-wrap gap-1">
+                              {activePriceList[section.key === "agua" ? "saboresAgua" : "saboresCrema"].map(s => (
+                                <span key={s} className="bg-slate-100 text-slate-600 text-[10px] px-2 py-0.5 rounded-full">{s}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                         <div className="divide-y divide-slate-100">
                           {activePriceList[section.key].map((row) => (
                             <div key={row.id} className="px-4 py-3 flex items-center justify-between text-sm">

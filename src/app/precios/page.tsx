@@ -5,7 +5,6 @@ import {
   formatearPesos,
   linkWhatsApp,
   CONTACTO,
-  SABORES,
   ENVIOS,
   type TierPrecio,
 } from '@/lib/precios-publico';
@@ -198,7 +197,7 @@ export default async function PreciosPage() {
                     Helados de agua
                   </div>
                   <TablaTiers tiers={lista.agua} color={AZUL} />
-                  <Sabores sabores={SABORES.agua} />
+                  <Sabores sabores={lista.saboresAgua} />
                 </section>
               )}
 
@@ -211,7 +210,7 @@ export default async function PreciosPage() {
                     Helados de crema
                   </div>
                   <TablaTiers tiers={lista.crema} color={AZUL} />
-                  <Sabores sabores={SABORES.crema} />
+                  <Sabores sabores={lista.saboresCrema} />
                 </section>
               )}
             </div>

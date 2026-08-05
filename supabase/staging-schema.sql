@@ -402,7 +402,9 @@ CREATE TABLE public.listas_precios (
     id bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     nombre text,
-    activa boolean DEFAULT false
+    activa boolean DEFAULT false,
+    sabores_agua jsonb DEFAULT '[]'::jsonb,
+    sabores_crema jsonb DEFAULT '[]'::jsonb
 );
 
 

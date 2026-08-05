@@ -58,6 +58,8 @@ export interface TierPrecio {
 
 export interface ListaPreciosPublica {
   nombre: string | null;
+  saboresAgua: string[];
+  saboresCrema: string[];
   agua: TierPrecio[];
   crema: TierPrecio[];
 }
@@ -83,7 +85,7 @@ export async function obtenerListaPreciosPublica(): Promise<ListaPreciosPublica 
 
   const { data: lista, error: errorLista } = await supabase
     .from('listas_precios')
-    .select('id, nombre')
+    .select('id, nombre, sabores_agua, sabores_crema')
     .eq('activa', true)
     .limit(1)
     .single();
@@ -111,6 +113,8 @@ export async function obtenerListaPreciosPublica(): Promise<ListaPreciosPublica 
 
   return {
     nombre: lista.nombre,
+    saboresAgua: lista.sabores_agua || [...SABORES.agua],
+    saboresCrema: lista.sabores_crema || [...SABORES.crema],
     agua: porTipo('agua'),
     crema: porTipo('crema'),
   };
@@ -146,8 +150,8 @@ export function formatearPreciosWhatsApp(lista: ListaPreciosPublica): string {
     partes.push(`Sabores: ${sabores.join(', ')}`);
   };
 
-  bloque('Helados de agua', lista.agua, SABORES.agua);
-  bloque('Helados de crema', lista.crema, SABORES.crema);
+  bloque('Helados de agua', lista.agua, lista.saboresAgua);
+  bloque('Helados de crema', lista.crema, lista.saboresCrema);
 
   partes.push('');
   partes.push(

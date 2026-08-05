@@ -14,7 +14,9 @@ type ActionResponse = {
 export async function guardarListaPrecios(
     nombre: string,
     agua: { fromQuantity: number; pricePerUnit: number }[],
-    crema: { fromQuantity: number; pricePerUnit: number }[]
+    crema: { fromQuantity: number; pricePerUnit: number }[],
+    saboresAgua: string[],
+    saboresCrema: string[]
 ): Promise<ActionResponse> {
     
     // 1. Validaciones básicas antes de tocar la BD
@@ -32,7 +34,9 @@ export async function guardarListaPrecios(
         .from("listas_precios")
         .insert([{ 
             nombre,
-            activa: true
+            activa: true,
+            sabores_agua: saboresAgua,
+            sabores_crema: saboresCrema
         }])
         .select()
         .single() // Usamos .single() porque esperamos 1 solo registro
@@ -122,6 +126,8 @@ export async function getListaActiva(): Promise<PriceList | null> {
         // Estructurar los datos en el formato esperado
         const listaPrecios: PriceList = {
             name: listas.nombre || "",
+            saboresAgua: listas.sabores_agua || [],
+            saboresCrema: listas.sabores_crema || [],
             agua: reglas.filter(r => r.tipo_producto === "agua").map(r => ({
                 id: r.id.toString(),
                 fromQuantity: r.min_cantidad,
