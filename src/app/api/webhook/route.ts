@@ -37,6 +37,15 @@ console.log(`🔧 Webhook arrancado con WHATSAPP_PHONE_ID=${process.env.WHATSAPP
 // seguir escribiendo). Cada mensaje agenda su propio wake-up.
 const DEBOUNCE_SECONDS = 8;
 
+// Tope defensivo al tamaño del payload que aceptamos como webhook de Meta.
+// Un webhook real suele pesar 1-3 KB; los mensajes de texto de WhatsApp están
+// tapados por Meta a ~4096 chars. 32 KB deja holgura para entries con media
+// metadata sin abrir la puerta a payloads de MB (que serían una anomalía o un
+// ataque intentando quemar tokens de Groq forzándonos a procesar texto masivo).
+// Es defensa en profundidad: el HMAC ya bloquea cualquier request no firmado
+// por Meta, así que un atacante externo no llega ni acá.
+const MAX_PAYLOAD_BYTES = 32 * 1024;
+
 // Normalización del número argentino: Meta nos manda "549..." pero internamente
 // lo guardamos sin el 9 para alinearnos con lo que muestran las apps.
 function normalizarNumero(numero: string): string {
@@ -88,6 +97,13 @@ export async function POST(request: Request) {
     // cancelar pedidos ajenos, disparar WhatsApps salientes, quemar tokens).
     // La firma es sobre los bytes crudos → leemos text() y parseamos después.
     const rawBody = await request.text();
+
+    // Tope de tamaño defensivo. Corta antes de gastar CPU en HMAC o inflar la
+    // memoria de la función. Ver MAX_PAYLOAD_BYTES arriba.
+    if (rawBody.length > MAX_PAYLOAD_BYTES) {
+      console.warn(`⛔ Webhook con payload ${rawBody.length} bytes (>${MAX_PAYLOAD_BYTES}). Rechazado (413).`);
+      return NextResponse.json({ error: 'payload demasiado grande' }, { status: 413 });
+    }
 
     // Fail-closed: sin el secret configurado no podemos distinguir un request
     // de Meta de uno forjado, así que rechazamos todo. Si el bot deja de
