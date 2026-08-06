@@ -4,10 +4,12 @@ import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
-import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion } from '@/lib/bot/atencion-humana';
+import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion, requiereAtencionActual } from '@/lib/bot/atencion-humana';
 import { esBorradorCompleto } from '@/lib/bot/borradores';
 import { registrarAlertaFallback, siguienteModelo } from '@/lib/bot/alertas';
 import { obtenerListaPreciosPublica, formatearPreciosWhatsApp } from '@/lib/precios-publico';
+import { construirContextoNegocio, responderConsultaNegocio, elegirTextoDelegacion } from '@/lib/bot/consultas-negocio';
+import { patchConEnviadoCoherente } from '@/lib/pedidos-estado';
 
 const supabaseAdmin = createClient<Database>(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -463,6 +465,40 @@ export function mencionaRetiro(texto: string | null): boolean {
 }
 
 /**
+ * ¿El cliente está RECHAZANDO explícitamente la cancelación? Red determinista que
+ * respalda —no reemplaza— al modelo en estado `esperando_cancelacion`, igual que
+ * `mencionaRetiro`. El caso real que la motiva (hallazgo #2 del informe): "No, no
+ * lo cancelo, dame el total ya" — una negación clara mezclada con un pedido de
+ * precio que desviaba la clasificación del modelo, dejando el pedido trabado en
+ * `esperando_cancelacion`.
+ *
+ * Matchea negaciones explícitas de cancelar ("no lo cancelo", "no canceles", "no
+ * quiero cancelar", "dejalo así", "no, mantenelo", "no lo anules"). NO matchea un
+ * simple "no" suelto (eso ya lo agarra el short-circuit / el modelo) ni un "no"
+ * que trae cambios concretos del pedido (eso es rechazo implícito + modificación,
+ * ya manejado aparte). Tolera tildes y mayúsculas. Pura y exportada para test.
+ */
+export function mencionaRechazoCancelacion(texto: string | null): boolean {
+  if (!texto) return false;
+  const n = texto
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, ''); // sin tildes
+
+  // "no ... cancel(o|es|ar|en)" / "no ... anul(o|es|ar|en)": negación + verbo de
+  // cancelar/anular cerca (hasta ~20 chars entre medio, para "no lo cancelo",
+  // "no la canceles", "no quiero cancelar", "no lo anules").
+  if (/\bno\b[^.]{0,20}\bcancel(o|a|as|e|es|en|ar|arlo|arla)\b/.test(n)) return true;
+  if (/\bno\b[^.]{0,20}\banul(o|a|as|e|es|en|ar|arlo|arla)\b/.test(n)) return true;
+
+  // "dejalo (asi/como esta)" / "mantenelo" / "no lo toques": pedir que quede como está.
+  if (/\bdejalo\b/.test(n)) return true;
+  if (/\bmanten(elo|elo asi|lo|emelo)\b/.test(n)) return true;
+  if (/\bno\b[^.]{0,15}\btoques\b/.test(n)) return true;
+
+  return false;
+}
+
+/**
  * Qué responder cuando el pedido en armado está incompleto. La regla: si falta
  * UN solo dato y es una elección cerrada, se pide con botones (pago) o con un
  * botón de atajo (retiro cuando falta la dirección); si faltan varios, lista de
@@ -588,6 +624,10 @@ export type PedidoActivoContext = {
   observaciones_detalle?: Json | null;
   metodo_pago: string;
   enviado?: boolean | null;
+  // Total ya calculado del pedido (DB-side, vía procesar_pedido_final). Lo usa el
+  // contexto de la respuesta libre para poder contestar "¿cuánto es mi total?".
+  // null en un borrador todavía sin precio.
+  precio_total?: number | null;
 };
 
 /**
@@ -614,6 +654,89 @@ export type PedidoActivoContext = {
 export function estaDespachado(p: { estado?: string | null; enviado?: boolean | null }): boolean {
   if (p.estado === 'cancelado') return false;
   return p.estado === 'enviado' || p.enviado === true;
+}
+
+// Minutos desde que un pedido entró a cocina ('pendiente') durante los cuales
+// el bot todavía deja que el cliente lo modifique solo (cantidades, dirección,
+// sabores, pago) sin pasar por un humano. Pasado esto, la cocina puede ya
+// estar preparándolo y un cambio silencioso es más riesgoso que demorar el
+// cambio hasta que lo vea un operador.
+export const PLAZO_MODIFICACION_COCINA_MIN = 15;
+
+/**
+ * ¿Todavía se puede modificar un pedido 'pendiente' sin intervención humana?
+ * `msDesdeEntradaCocina` es `Date.now() - entro_a_cocina_at` (estampado por el
+ * trigger de DB `mantener_entro_a_cocina` al pasar a 'pendiente', ver la
+ * migración 20260804120000). `null` cuando el pedido no tiene la marca (fila
+ * de antes de la migración): no bloqueamos — la restricción es nueva y no debe
+ * afectar pedidos que ya estaban en curso. Pura y exportada para test.
+ */
+export function dentroDePlazoModificacionCocina(msDesdeEntradaCocina: number | null): boolean {
+  if (msDesdeEntradaCocina === null) return true;
+  return msDesdeEntradaCocina < PLAZO_MODIFICACION_COCINA_MIN * 60 * 1000;
+}
+
+/**
+ * Cola contextual para las consultas (precios / negocio) que se resuelven sin
+ * tocar el pedido: si el hilo tiene algo en juego, se lo recordamos para que la
+ * consulta no le pierda el pedido en el medio.
+ *
+ * CLAVE: un borrador puede estar COMPLETO (ya se mandó el resumen y espera un
+ * SÍ/NO) o EN ARMADO (falta dirección/pago/cantidad). Mandar "Respondé SÍ o NO"
+ * sobre un borrador incompleto confunde al cliente, que en realidad está en el
+ * paso de elegir pago/dirección/cantidad — no en el de confirmar. Por eso solo
+ * usamos la cola de confirmación cuando `esBorradorCompleto`; si está en armado,
+ * lo empujamos a completar lo que falta.
+ */
+export function colaRecordatorioPedido(pedidoActivo: PedidoActivoContext | null | undefined): string {
+  if (pedidoActivo?.estado === 'borrador') {
+    return esBorradorCompleto(pedidoActivo)
+      ? '\n\n👆 Ojo: tu pedido sigue esperando tu confirmación. ¿Está todo bien? Respondé *SÍ* o *NO*.'
+      : '\n\n👆 Ojo: tu pedido sigue en armado. Cuando puedas, pasame lo que falta para cerrarlo 🙌';
+  }
+  if (pedidoActivo?.estado === 'esperando_cancelacion') {
+    return '\n\n👆 Ojo: tenés una cancelación pendiente. ¿Cancelás el pedido? Respondé *SÍ* o *NO*.';
+  }
+  return '';
+}
+
+/**
+ * Intenta responder una consulta de negocio con el conocimiento que el bot SÍ
+ * tiene (constantes + lista de precios activa + el pedido en curso). Arma el
+ * contexto curado y delega en `responderConsultaNegocio` (módulo consultas-negocio).
+ * Devuelve el texto de la respuesta si el modelo pudo contestarla desde el
+ * contexto, o `null` si no (el llamador delega a un humano).
+ *
+ * Es el corazón de la mejora de la consigna: en vez de crear un estado por cada
+ * pregunta posible, damos contexto acotado y dejamos que el modelo responda con
+ * brevedad, con `puede_responder=false` como escape hatch anti-alucinación.
+ */
+async function intentarRespuestaNegocio(
+  pregunta: string,
+  pedidoActivo: PedidoActivoContext | null,
+  numeroCliente: string,
+): Promise<string | null> {
+  const lista = await obtenerListaPreciosPublica();
+  const contexto = construirContextoNegocio(pedidoActivo, lista);
+  const { puede_responder, respuesta } = await responderConsultaNegocio(pregunta, contexto, numeroCliente);
+  return puede_responder && respuesta ? respuesta : null;
+}
+
+/**
+ * Delega una consulta a un humano: levanta `requiere_atencion` y avisa al cliente
+ * con un texto de delegación ROTADO (hallazgo #4 — no repetir palabra por palabra
+ * ante insistencia). Si la conversación YA tenía el aviso levantado (delegación
+ * reciente sin atender), usa la variante "ya avisé". `sufijo` agrega la cola de
+ * recordatorio del pedido cuando la consulta corta el flujo (pregunta pura).
+ */
+async function delegarAHumano(
+  numeroCliente: string,
+  seed: number,
+  sufijo = '',
+): Promise<void> {
+  const yaAvisado = await requiereAtencionActual(numeroCliente);
+  await marcarRequiereAtencion(numeroCliente);
+  await enviarMensajeWhatsApp(numeroCliente, elegirTextoDelegacion(seed, yaAvisado) + sufijo);
 }
 
 /**
@@ -663,18 +786,18 @@ export function buildSystemPrompt(
       ${esperandoCancelacion ? `
       * EL PEDIDO ESTÁ EN PROCESO DE CANCELACIÓN *. El bot le preguntó al cliente si está seguro de cancelar.
       - "confirmar_cancelacion": el cliente confirma que SÍ quiere cancelar (ej: "sí", "dale", "borralo", "exacto", "sí, cancelar").
-      - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar, SIN aportar ningún dato del pedido (ej: "no", "no, pará", "me equivoqué", "dejalo así"). OJO: si además trae cambios concretos (cantidades, sabores, dirección, pago), NO uses esta opción — usá "datos_pedido" (el sistema entiende que no quiere cancelar Y aplica los cambios).
+      - "rechazar_cancelacion": el cliente se arrepiente y NO quiere cancelar, SIN aportar ningún dato del pedido (ej: "no", "no, pará", "me equivoqué", "dejalo así", "no lo canceles", "no, mantenelo"). Esto vale AUNQUE en el mismo mensaje pida un precio o el total ("no, no lo cancelo, dame el total ya") — pedir el total es una consulta, NO un cambio del pedido. SOLO si trae cambios CONCRETOS (cantidades, sabores, dirección, pago) usá "datos_pedido" en vez de esta (el sistema entiende que no quiere cancelar Y aplica los cambios).
       - "saludo": SOLO si el mensaje es un saludo o cortesía reconocible y nada más (ej: "hola", "buenas", "buen día", "gracias"). Un mensaje sin sentido, off-topic o que no encaja en ninguna de las otras opciones NO es un saludo → usá "datos_pedido".
-      - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
-      - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio o su pedido que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, demora de la entrega, un reclamo o problema con un pedido, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos del pedido, usá "datos_pedido".
+      - "consultar_precios": el cliente pregunta por la LISTA de precios general o cuánto sale un helado EN GENERAL (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"), SIN referirse a SU PROPIO pedido. Si en cambio pregunta cuánto sale / cuál es el total de SU PEDIDO (ej: "cuánto sale mi pedido?", "cuánto es el total?"), NO uses esta opción — usá "consulta_negocio": el sistema ya conoce el total exacto de ESTE pedido y responde con ese número puntual, no con la lista general. Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
+      - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio o su pedido que las otras opciones no cubren y que requiere que lo responda una persona o el contexto del pedido: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, demora de la entrega, un reclamo o problema con un pedido, facturación, o cuánto sale/es el total de SU PROPIO PEDIDO, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos del pedido, usá "datos_pedido".
       - "datos_pedido": cualquier otra cosa. Incluye mensajes que rechazan la cancelación PERO traen cambios concretos (ej: "no, mejor sumale 5 de agua" → datos_pedido con cantidad_agua=5/sumar).
       ` : `
       - "cancelar": el cliente pide explícitamente cancelar, anular, dar de baja, o dice "ya no quiero el pedido" / "fue mentira".
       - "confirmar": ${tieneBorrador ? `el cliente acepta el resumen (ej: "sí", "dale", "está bien", "confirmo").` : `NO APLICA en este estado (el pedido no está en borrador).`}
       - "saludo": SOLO si el mensaje es un saludo o cortesía reconocible y nada más (ej: "hola", "buenas", "buen día", "gracias"). Un mensaje sin sentido, off-topic o que no encaja en ninguna de las otras opciones NO es un saludo → usá "datos_pedido" (el default).
       - "modificar_sin_datos": el cliente quiere cambiar el pedido pero NO aporta NINGÚN dato concreto (ej: "quiero cambiar algo", "modificar"). Si menciona sabores, cantidades, dirección o pago, NO uses esta opción — usá "datos_pedido".
-      - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin aportar datos nuevos del pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
-      - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio o su pedido que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, demora de la entrega, un reclamo o problema con un pedido, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos del pedido, usá "datos_pedido".
+      - "consultar_precios": el cliente pregunta por la LISTA de precios general o cuánto sale un helado EN GENERAL (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen"), SIN referirse a SU PROPIO pedido. Si en cambio pregunta cuánto sale / cuál es el total de SU PEDIDO (ej: "cuánto sale mi pedido?", "cuánto es el total?"), NO uses esta opción — usá "consulta_negocio": el sistema ya conoce el total exacto de ESTE pedido y responde con ese número puntual, no con la lista general. Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago nuevos, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
+      - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio o su pedido que las otras opciones no cubren y que requiere que lo responda una persona o el contexto del pedido: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, demora de la entrega, un reclamo o problema con un pedido, facturación, o cuánto sale/es el total de SU PROPIO PEDIDO, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos del pedido, usá "datos_pedido".
       - "datos_pedido": el cliente trae info concreta del pedido (cantidades, sabores, dirección, pago), incluso para modificar uno existente. Default cuando no aplique ninguna otra.
       `}
 
@@ -714,8 +837,8 @@ export function buildSystemPrompt(
     - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).${hayPedidoCanceladoReciente ? `
     - "reactivar": el cliente acaba de cancelar un pedido y se ARREPIENTE: quiere recuperar ese mismo pedido tal cual estaba, SIN aportar datos nuevos (ej: "no, no lo canceles", "en realidad sí lo quiero", "reactivalo", "volvé a activar el pedido", "quiero el pedido que cancelé"). Si en cambio arranca un pedido NUEVO con datos concretos (cantidades/dirección/pago distintos), usá "datos_pedido".` : ''}
     - "saludo": el mensaje es ÚNICAMENTE un saludo (ej: "hola", "buenas"), sin datos del pedido.
-    - "consultar_precios": el cliente SOLO pregunta por los precios / la lista / cuánto sale/cuesta/vale un helado, sin dar datos de un pedido (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen los helados?"). Si el mensaje ADEMÁS trae cantidades, sabores, dirección o pago, NO uses esta opción — usá "datos_pedido" (el resumen del pedido ya le muestra el precio).
-    - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, un reclamo o problema con un pedido anterior, facturación, etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos de un pedido, usá "datos_pedido".
+    - "consultar_precios": el cliente pregunta por la LISTA de precios general o cuánto sale un helado EN GENERAL (ej: "cuánto salen?", "me pasás la lista de precios?", "qué precio tienen los helados?"), SIN referirse a un pedido propio. Si en cambio pregunta cuánto sale / cuál es el total de "su pedido" (ej: "cuánto sale mi pedido?"), NO uses esta opción — usá "consulta_negocio": como acá no hay pedido activo, el sistema le va a avisar que no tiene uno en curso, en vez de mandarle la lista general que no fue lo que pidió.
+    - "consulta_negocio": el cliente pregunta o plantea algo REAL sobre el negocio que las otras opciones no cubren y que requiere que lo responda una persona: horarios, zonas de entrega, qué sabores hay disponibles, stock, promociones, venta mayorista, un reclamo o problema con un pedido anterior, facturación, cuánto sale/es el total de "su pedido", etc. NO uses esta opción para mensajes sin sentido, bromas, o preguntas que no tienen NADA que ver con una heladería (ej: "quién ganó el partido?") — eso es "datos_pedido". Si el mensaje ADEMÁS trae datos concretos de un pedido, usá "datos_pedido".
     - "datos_pedido": el cliente trae info del pedido (cantidades, sabores, dirección, pago). Default cuando no aplique otra.
 
     CAMPO "pregunta_negocio" (INDEPENDIENTE de la intención): si el mensaje incluye una pregunta o planteo REAL de negocio (horarios, si llegan/cobertura de una zona, cuánto demora la entrega, qué sabores hay disponibles, stock, promos, venta mayorista, un reclamo o problema con un pedido, facturación), copiá esa pregunta textual en "pregunta_negocio" — SIEMPRE, aunque además elijas "datos_pedido" porque el mensaje trae datos del pedido. Dejala en null si no hay una pregunta de negocio real (bromas, off-topic o mensajes sin sentido NO son consulta de negocio).
@@ -939,7 +1062,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .eq('telefono', numeroCliente)
     .eq('rol', 'cliente') // refuerzo: nunca reclamamos un row del bot como input
     .eq('procesado', false)
-    .select('id, texto, created_at, wa_message_id');
+    .select('id, texto, created_at, wa_message_id, tipo');
 
   if (claimError) {
     console.error(`❌ Error al hacer claim de mensajes para ${numeroCliente}:`, claimError);
@@ -1060,6 +1183,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .eq('telefono', numeroCliente)
       .in('rol', ['bot', 'operador'])
       .eq('descartado', false)
+      // Excluimos envíos que Meta rechazó: si el bot "dijo" algo que el cliente
+      // nunca vio, no debe entrar al contexto como si fuera su último turno —
+      // el modelo interpretaría la próxima respuesta contra una pregunta fantasma.
+      .eq('fallido', false)
       .lt('created_at', primerNuevo)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -1074,6 +1201,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .select('texto, created_at, rol')
       .eq('telefono', numeroCliente)
       .eq('descartado', false) // ignoramos mensajes de conversaciones ya cerradas
+      .eq('fallido', false)    // ignoramos envíos del bot/operador que Meta rechazó (ver sección anterior)
       .gte('created_at', hace15Minutos)
       .order('created_at', { ascending: true })
       .limit(15);
@@ -1155,7 +1283,19 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   //     estado del pedido (ej. "sí" en esperando_cancelacion, "hola" con
   //     pedido en cocina), salteamos el LLM. Reduce latencia, costo y
   //     errores del modelo en los casos triviales.
-  if (mensajesClaim.length === 1) {
+  //
+  //     EXCEPCIÓN — audios transcriptos (tipo='audio'): Whisper alucina con
+  //     ALTA confianza cuando hay ruido de fondo con habla (TV, gente hablando
+  //     lejos): puede escupir un "sí, dale" perfectamente formado que pasa
+  //     esSegmentoAlucinado/esTranscripcionUtil (esos filtros atrapan silencio
+  //     y ruido no-verbal, no habla de fondo). Un short-circuit sobre un
+  //     transcript alucinado puede confirmar/cancelar un pedido con ruido
+  //     ambiente, sin ninguna red de razonamiento contextual. Forzamos el
+  //     paso por el LLM así al menos ve el estado y el último turno del bot y
+  //     puede detectar la incongruencia. Cuesta ~1s + tokens; los audios son
+  //     minoría y el trade-off es correcto (seguridad > latencia).
+  const fuenteEsAudio = mensajesClaim.length === 1 && mensajesClaim[0].tipo === 'audio';
+  if (mensajesClaim.length === 1 && !fuenteEsAudio) {
     const intento = intentarShortCircuit(
       mensajesClaim[0].texto ?? '',
       pedidoActivo?.estado ?? null,
@@ -1164,6 +1304,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       pedido = pedidoDesdeShortCircuit(intento, pedidoActivo);
       console.log(`⚡ Short-circuit (sin LLM): tipo=${intento}, mensaje="${mensajesClaim[0].texto}"`);
     }
+  } else if (fuenteEsAudio) {
+    console.log(`🎤 Fuente=audio: salteo short-circuit, mando al LLM aunque el transcript parezca inequívoco.`);
   }
 
   // Recorremos la cadena de modelos. Dentro de cada modelo reintentamos hasta
@@ -1281,6 +1423,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   try {
 
+    // #2 — RECHAZO EXPLÍCITO DE CANCELACIÓN (red determinista, temprana): en
+    // esperando_cancelacion, un "no lo cancelo" mezclado con otra frase (ej.
+    // "No, no lo cancelo, dame el total ya") desviaba la clasificación del
+    // modelo y dejaba el pedido trabado. Este flag corre sobre el texto crudo y
+    // se usa (a) para que los handlers de consulta —precios / negocio, que
+    // CORTAN el flujo con return— no roben el mensaje antes del bloque de
+    // cancelación, y (b) para forzar rechazar_cancelacion dentro de ese bloque.
+    const rechazoCancelacionExplicito =
+      pedidoActivo?.estado === 'esperando_cancelacion' &&
+      mencionaRechazoCancelacion(mensajesClaim.map(m => m.texto ?? '').join(' '));
+
     // CONSULTA DE NEGOCIO EMBEBIDA (versión completa): el modelo copia en
     // `pregunta_negocio` toda pregunta real de negocio, INCLUSO cuando el
     // mensaje además trae datos del pedido (intención datos_pedido/confirmar/
@@ -1292,12 +1445,22 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // que la excluimos acá para no avisar dos veces.
     const hayPreguntaNegocio = esPreguntaNegocioReal(pedido.pregunta_negocio);
     if (hayPreguntaNegocio && pedido.intencion !== 'consulta_negocio') {
-      console.log(`🙋 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") junto a intención "${pedido.intencion}". Delego a un humano y sigo el flujo del pedido.`);
-      await marcarRequiereAtencion(numeroCliente);
-      await enviarMensajeWhatsApp(
-        numeroCliente,
-        'Buena pregunta 🙌 Sobre eso te responde una persona del equipo en un momento 🙏',
-      );
+      // Primero intentamos responderla NOSOTROS desde el contexto conocido
+      // (tipos agua/crema, sabores, demora, envíos, y el total del pedido en
+      // curso). Si el modelo puede, contestamos y seguimos armando el pedido:
+      // esto elimina el patrón "negar y después contestar" (#3), donde antes
+      // mandábamos "te contesta una persona" y en la burbuja siguiente ya
+      // mostrábamos el total. Si NO puede (horarios/zonas/stock/promos…),
+      // delegamos a un humano como siempre.
+      const seedDelegacion = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
+      const respuestaNegocio = await intentarRespuestaNegocio(pedido.pregunta_negocio!, pedidoActivo, numeroCliente);
+      if (respuestaNegocio) {
+        console.log(`💬 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") respondida desde el contexto. Sigo el flujo del pedido.`);
+        await enviarMensajeWhatsApp(numeroCliente, respuestaNegocio);
+      } else {
+        console.log(`🙋 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") fuera del contexto conocido. Delego a un humano y sigo el flujo del pedido.`);
+        await delegarAHumano(numeroCliente, seedDelegacion);
+      }
       // NO retornamos: si el mensaje trae datos del pedido, el flujo de armado
       // de abajo los procesa igual (resumen / pedir lo que falta).
     }
@@ -1308,21 +1471,16 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // histórica, datos faltantes, etc.). El pedido activo (si lo hay) queda
     // intacto: solo mandamos la lista y salimos. Es la MISMA lista que muestra
     // la página pública /precios, generada desde la lista de precios activa.
-    if (pedido.intencion === 'consultar_precios') {
+    if (pedido.intencion === 'consultar_precios' && !rechazoCancelacionExplicito) {
       console.log("💲 El cliente pregunta por los precios. Respondiendo con la lista activa.");
       const lista = await obtenerListaPreciosPublica();
       const respuesta = lista
         ? formatearPreciosWhatsApp(lista)
         : "Ahora no puedo ver la lista de precios 😅 Escribime qué querés pedir y te ayudo igual.";
-      // Cola contextual: si el hilo quedó esperando una respuesta del cliente
-      // (confirmar el borrador / la cancelación), se lo recordamos para que la
-      // consulta de precios no le pierda el pedido en el medio.
-      let cola = '';
-      if (pedidoActivo?.estado === 'borrador') {
-        cola = '\n\n👆 Ojo: tu pedido sigue esperando tu confirmación. ¿Está todo bien? Respondé *SÍ* o *NO*.';
-      } else if (pedidoActivo?.estado === 'esperando_cancelacion') {
-        cola = '\n\n👆 Ojo: tenés una cancelación pendiente. ¿Cancelás el pedido? Respondé *SÍ* o *NO*.';
-      }
+      // Cola contextual: si el hilo quedó con un pedido en juego, se lo
+      // recordamos para que la consulta de precios no le pierda el pedido en el
+      // medio (distingue borrador completo esperando SÍ/NO vs borrador en armado).
+      const cola = colaRecordatorioPedido(pedidoActivo);
       await enviarMensajeWhatsApp(numeroCliente, respuesta + cola);
       return;
     }
@@ -1336,19 +1494,22 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // recordamos para que la consulta no le pierda el pedido en el medio.
     // El filtro "pregunta REAL vs sin sentido/off-topic" lo hace el prompt:
     // mensajes nada que ver caen en datos_pedido y siguen el flujo normal.
-    if (pedido.intencion === 'consulta_negocio') {
-      console.log("🙋 Consulta de negocio que el bot no puede responder. Delegando a un humano.");
-      await marcarRequiereAtencion(numeroCliente);
-      let cola = '';
-      if (pedidoActivo?.estado === 'borrador') {
-        cola = '\n\n👆 Ojo: tu pedido sigue esperando tu confirmación. ¿Está todo bien? Respondé *SÍ* o *NO*.';
-      } else if (pedidoActivo?.estado === 'esperando_cancelacion') {
-        cola = '\n\n👆 Ojo: tenés una cancelación pendiente. ¿Cancelás el pedido? Respondé *SÍ* o *NO*.';
+    if (pedido.intencion === 'consulta_negocio' && !rechazoCancelacionExplicito) {
+      const cola = colaRecordatorioPedido(pedidoActivo);
+      // La pregunta pura la copia el modelo en `pregunta_negocio`; si por algún
+      // no-determinismo vino null, usamos el texto crudo del batch como fallback.
+      const preguntaTexto = esPreguntaNegocioReal(pedido.pregunta_negocio)
+        ? pedido.pregunta_negocio!
+        : mensajesClaim.map(m => m.texto ?? '').join(' ').trim();
+      const respuestaNegocio = await intentarRespuestaNegocio(preguntaTexto, pedidoActivo, numeroCliente);
+      if (respuestaNegocio) {
+        console.log("💬 Consulta de negocio respondida desde el contexto conocido.");
+        await enviarMensajeWhatsApp(numeroCliente, respuestaNegocio + cola);
+      } else {
+        console.log("🙋 Consulta de negocio fuera del contexto conocido. Delegando a un humano.");
+        const seedDelegacion = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
+        await delegarAHumano(numeroCliente, seedDelegacion, cola);
       }
-      await enviarMensajeWhatsApp(
-        numeroCliente,
-        'Buena pregunta 🙌 Esa no te la puedo responder yo, pero en un momento te contesta una persona del equipo 🙏' + cola,
-      );
       return;
     }
 
@@ -1480,10 +1641,23 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // el repartidor pudo haber tocado "Marcar como enviado". Si el UPDATE
     // afecta 0 filas, sabemos que se envió en la ventana y le avisamos al cliente.
     if (pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion') {
+      // #2 — Si el texto crudo es una negación EXPLÍCITA de cancelar y el modelo
+      // no lo reconoció como confirmar/rechazar ni como una modificación real
+      // (datos_pedido + cambios), lo forzamos a rechazar_cancelacion. El handler
+      // de abajo reenvía el resumen (con el total), así un "no lo cancelo, dame
+      // el total" queda contestado de paso y el pedido no queda trabado.
+      if (
+        rechazoCancelacionExplicito &&
+        pedido.intencion !== 'confirmar_cancelacion' &&
+        !(pedido.intencion === 'datos_pedido' && hayCambiosReales)
+      ) {
+        console.log('🛡️ Red determinista: negación explícita de cancelar; reclasifico a rechazar_cancelacion.');
+        pedido.intencion = 'rechazar_cancelacion';
+      }
       if (pedido.intencion === 'confirmar_cancelacion') {
         const { data: cancelados } = await supabaseAdmin
           .from('pedidos')
-          .update({ estado: 'cancelado' })
+          .update(patchConEnviadoCoherente('cancelado'))
           .eq('id', pedidoActivo.id)
           .neq('estado', 'enviado')
           .neq('enviado', true)
@@ -1761,13 +1935,27 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
           return;
         }
-        const { data: finalData } = await supabaseAdmin.from('pedidos').update({ estado: 'pendiente' }).eq('id', pedidoActivo.id).select('*').single();
+        // Guard atómico: el borrador pudo pasar a cancelado (auto-rechazo del cron
+        // u operador cancelando desde el dashboard) o quedar con enviado=true entre
+        // el read de pedidoActivo y este UPDATE. Sin guard, este update resucita un
+        // cancelado a 'pendiente' o pisa un despachado. Filas afectadas == 0 → race.
+        const { data: finalData } = await supabaseAdmin
+          .from('pedidos')
+          .update({ estado: 'pendiente' })
+          .eq('id', pedidoActivo.id)
+          .eq('estado', 'borrador')
+          .neq('enviado', true)
+          .select('*')
+          .maybeSingle();
         if (finalData) {
           await enviarMensajeWhatsApp(numeroCliente, mensajeConfirmacion(finalData.direccion, finalData.metodo_pago));
           console.log("✅ Pedido borrador confirmado por el cliente. Enviado a cocina.");
           // Cierre de la fase de armado: descartamos los mensajes del historial
           // para que futuras modificaciones no vean "quiero 10 de crema" etc.
           await marcarHistorialDescartado(numeroCliente);
+        } else {
+          console.log(`⚠️ Race al confirmar: el pedido ${pedidoActivo.id} ya no está en 'borrador' o fue despachado.`);
+          await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
         }
         return;
       }
@@ -1776,6 +1964,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // (aunque quede incompleto) para no perder lo ya cargado, y después
       // decidimos si mandar el resumen o pedir lo que falta.
       if (hayCambiosReales || !pedidoCompleto) {
+        // Guard atómico: entre el read de pedidoActivo y este UPDATE, el borrador
+        // pudo haber pasado a cancelado (cron / operador) o a pendiente (otro
+        // worker confirmó). Sin guard, pisamos con datos viejos o revivimos un
+        // cancelado. Solo mutamos si sigue siendo borrador y NO fue despachado.
         const { data: updatedData } = await supabaseAdmin.from('pedidos').update({
           cantidad_agua: aguaFinal,
           cantidad_crema: cremaFinal,
@@ -1791,7 +1983,12 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           observaciones_detalle: pedido.observaciones_detalle,
           metodo_pago: pagoFinal,
           estado: 'borrador'
-        }).eq('id', pedidoActivo.id).select('*').single();
+        })
+          .eq('id', pedidoActivo.id)
+          .eq('estado', 'borrador')
+          .neq('enviado', true)
+          .select('*')
+          .maybeSingle();
 
         console.log("🔄 Borrador actualizado. Datos en DB:", updatedData);
 
@@ -1802,6 +1999,9 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             console.log("📝 El borrador sigue incompleto tras el merge. Pido lo que falta.");
             await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
           }
+        } else {
+          console.log(`⚠️ Race al actualizar borrador: el pedido ${pedidoActivo.id} cambió de estado o fue despachado.`);
+          await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
         }
         return;
       }
@@ -1916,7 +2116,29 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       let borradorDB = null;
 
       if (yaExisteEnCocina) {
+        // Ventana de modificación sin humano: si el pedido lleva más de
+        // PLAZO_MODIFICACION_COCINA_MIN en 'pendiente' (entro_a_cocina_at,
+        // estampado por el trigger de DB), la cocina puede estar ya
+        // preparándolo — un cambio de cantidad/dirección/sabor a esta altura
+        // es más riesgoso que demorarlo hasta que lo vea un operador. La
+        // cancelación NO pasa por este gate (sigue siempre disponible, más
+        // vale frenar una preparación que no frenarla).
+        const msDesdeEntradaCocina = pedidoActivo.entro_a_cocina_at
+          ? Date.now() - new Date(pedidoActivo.entro_a_cocina_at).getTime()
+          : null;
+        if (!dentroDePlazoModificacionCocina(msDesdeEntradaCocina)) {
+          console.log(`⏰ Pedido ${pedidoActivo.id} en cocina hace más de ${PLAZO_MODIFICACION_COCINA_MIN} min; no lo modifico solo. Delego a un humano.`);
+          await marcarRequiereAtencion(numeroCliente);
+          await enviarMensajeWhatsApp(numeroCliente, "Tu pedido ya está en preparación hace un rato y no puedo modificarlo yo solo 🍦 Le aviso a alguien del local para que te ayude con el cambio.");
+          return;
+        }
+
         console.log("🔄 El cliente quiere modificar su pedido activo. Actualizando datos...");
+        // Guard atómico: pendiente → borrador es un flujo válido (cliente
+        // modificando su pedido en cocina), pero entre el read y este UPDATE el
+        // operador pudo haber marcado enviado=true (copió el mensaje al cadete)
+        // o el estado pudo haber pasado a 'enviado'/'cancelado'. Sin guard,
+        // degradaríamos un despachado a 'borrador' con enviado=true colgado.
         const { data: updateData, error: updateError } = await supabaseAdmin
           .from('pedidos')
           .update({
@@ -1931,14 +2153,21 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             estado: 'borrador'
           })
           .eq('id', pedidoActivo.id)
+          .eq('estado', 'pendiente')
+          .neq('enviado', true)
           .select('*')
-          .single();
+          .maybeSingle();
 
-        if (!updateError) {
+        if (updateError) {
+          console.error("❌ Error al actualizar en Supabase:", updateError);
+        } else if (updateData) {
           borradorDB = updateData;
           console.log("💾 Pedido actualizado en DB:", borradorDB);
         } else {
-          console.error("❌ Error al actualizar en Supabase:", updateError);
+          // 0 filas: el pedido ya no está en 'pendiente' o fue despachado.
+          console.log(`⚠️ Race al modificar en cocina: el pedido ${pedidoActivo.id} cambió de estado o fue despachado.`);
+          await enviarMensajeWhatsApp(numeroCliente, "Uy, tu pedido ya está en camino y no se puede modificar 🛵");
+          return;
         }
       } else {
         const { data: insertData, error: insertError } = await supabaseAdmin

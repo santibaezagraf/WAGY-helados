@@ -343,6 +343,17 @@ const CASOS = [
     pedidoActivo: esperandoCancelacion({ cantidad_crema: 10 }),
     espera: { intencion: 'rechazar_cancelacion' },
   },
+  {
+    // Hallazgo #2 del informe: "no lo cancelo" + un pedido de precio desviaba la
+    // clasificación y el pedido quedaba trabado. El prompt ahora aclara que pedir
+    // el total es una CONSULTA (no un cambio) → sigue siendo rechazar_cancelacion.
+    // (En producción, además, la red determinista mencionaRechazoCancelacion lo
+    // respalda si el modelo igual falla acá.)
+    nombre: 'cancelacion: "no lo cancelo, dame el total" es rechazar_cancelacion (no queda trabado)',
+    mensaje: 'No, no lo cancelo, dame el total ya',
+    pedidoActivo: esperandoCancelacion({ cantidad_crema: 5, metodo_pago: 'efectivo', direccion: 'retira' }),
+    espera: { intencion: 'rechazar_cancelacion' },
+  },
 
   // ---- REACTIVAR (deshacer una cancelación reciente) ----
   // Sin pedido activo pero con uno cancelado hace poco (canceladoReciente=true),

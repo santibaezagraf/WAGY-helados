@@ -178,6 +178,27 @@ export async function marcarRequiereAtencion(telefono: string): Promise<void> {
   if (error) console.error(`⚠️ No se pudo marcar requiere_atencion para ${telefono}:`, error.message);
 }
 
+/**
+ * ¿La conversación YA tiene el aviso `requiere_atencion` levantado? Lo usa la
+ * delegación de consultas de negocio para no repetir el MISMO texto de "te
+ * atiende una persona" si ya se avisó y nadie lo atendió todavía (hallazgo #4):
+ * en ese caso se manda una variante "ya avisé". Fail-open (error/columna sin
+ * migrar → false), misma filosofía que el resto del módulo.
+ */
+export async function requiereAtencionActual(telefono: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('atencion_humana')
+    .select('requiere_atencion')
+    .eq('telefono', telefono)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`⚠️ No se pudo leer requiere_atencion para ${telefono} (se asume false):`, error.message);
+    return false;
+  }
+  return Boolean(data?.requiere_atencion);
+}
+
 /** Limpia el aviso (el operador ya lo vio). No crea fila si no existía. */
 export async function limpiarRequiereAtencion(telefono: string): Promise<void> {
   const { error } = await supabaseAdmin

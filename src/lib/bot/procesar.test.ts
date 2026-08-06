@@ -8,12 +8,14 @@ import {
   reconstruirObservaciones,
   pareceDireccion,
   mencionaRetiro,
+  mencionaRechazoCancelacion,
   mencionaCantidadEnUnidadNoSoportada,
   mencionaMetodoPagoNoSoportado,
   normalizarTextoShortCircuit,
   intentarShortCircuit,
   elegirRespuestaDatosFaltantes,
   estaDespachado,
+  dentroDePlazoModificacionCocina,
   esRateLimit,
   esPreguntaNegocioReal,
   normalizarMetodoPago,
@@ -224,6 +226,33 @@ describe('mencionaRetiro', () => {
   it('no dispara con null / vacío', () => {
     expect(mencionaRetiro(null)).toBe(false);
     expect(mencionaRetiro('')).toBe(false);
+  });
+});
+
+describe('mencionaRechazoCancelacion', () => {
+  it('detecta el caso del informe: "no lo cancelo" mezclado con un pedido de precio', () => {
+    expect(mencionaRechazoCancelacion('No, no lo cancelo, dame el total ya')).toBe(true);
+  });
+  it('detecta variantes de negación explícita de cancelar', () => {
+    expect(mencionaRechazoCancelacion('no lo canceles')).toBe(true);
+    expect(mencionaRechazoCancelacion('no quiero cancelar')).toBe(true);
+    expect(mencionaRechazoCancelacion('no, mantenelo')).toBe(true);
+    expect(mencionaRechazoCancelacion('dejalo así')).toBe(true);
+    expect(mencionaRechazoCancelacion('no lo anules')).toBe(true);
+  });
+  it('tolera tildes y mayúsculas', () => {
+    expect(mencionaRechazoCancelacion('NO LO CANCELÉS')).toBe(true);
+  });
+  it('no dispara con un "sí, cancelalo" (confirmación de cancelación)', () => {
+    expect(mencionaRechazoCancelacion('sí, cancelalo')).toBe(false);
+    expect(mencionaRechazoCancelacion('dale, cancelá')).toBe(false);
+  });
+  it('no dispara con un "no" suelto (lo agarra el short-circuit / el modelo)', () => {
+    expect(mencionaRechazoCancelacion('no')).toBe(false);
+  });
+  it('no dispara con null / vacío', () => {
+    expect(mencionaRechazoCancelacion(null)).toBe(false);
+    expect(mencionaRechazoCancelacion('')).toBe(false);
   });
 });
 
@@ -522,6 +551,28 @@ describe('estaDespachado', () => {
 
   it('campos ausentes → no despachado', () => {
     expect(estaDespachado({})).toBe(false);
+  });
+});
+
+describe('dentroDePlazoModificacionCocina', () => {
+  it('recién entrado a cocina (0ms) → dentro del plazo', () => {
+    expect(dentroDePlazoModificacionCocina(0)).toBe(true);
+  });
+
+  it('a los 14 minutos → todavía dentro del plazo', () => {
+    expect(dentroDePlazoModificacionCocina(14 * 60 * 1000)).toBe(true);
+  });
+
+  it('a los 15 minutos exactos → ya fuera del plazo (límite exclusivo)', () => {
+    expect(dentroDePlazoModificacionCocina(15 * 60 * 1000)).toBe(false);
+  });
+
+  it('a los 20 minutos → fuera del plazo', () => {
+    expect(dentroDePlazoModificacionCocina(20 * 60 * 1000)).toBe(false);
+  });
+
+  it('sin timestamp (fila pre-migración) → no bloqueamos (fail-open)', () => {
+    expect(dentroDePlazoModificacionCocina(null)).toBe(true);
   });
 });
 

@@ -181,6 +181,7 @@ export type Database = {
           created_at: string
           direccion: string
           direccion_de_historial: boolean
+          entro_a_cocina_at: string | null
           enviado: boolean
           es_cambio_manual: boolean | null
           esperando_respuesta_boton: boolean
@@ -211,6 +212,7 @@ export type Database = {
           created_at?: string
           direccion?: string
           direccion_de_historial?: boolean
+          entro_a_cocina_at?: string | null
           enviado?: boolean
           es_cambio_manual?: boolean | null
           esperando_respuesta_boton?: boolean
@@ -241,6 +243,7 @@ export type Database = {
           created_at?: string
           direccion?: string
           direccion_de_historial?: boolean
+          entro_a_cocina_at?: string | null
           enviado?: boolean
           es_cambio_manual?: boolean | null
           esperando_respuesta_boton?: boolean
