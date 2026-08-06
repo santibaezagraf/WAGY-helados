@@ -98,18 +98,24 @@ export type Database = {
           created_at: string
           id: number
           nombre: string | null
+          sabores_agua: Json | null
+          sabores_crema: Json | null
         }
         Insert: {
           activa?: boolean | null
           created_at?: string
           id?: number
           nombre?: string | null
+          sabores_agua?: Json | null
+          sabores_crema?: Json | null
         }
         Update: {
           activa?: boolean | null
           created_at?: string
           id?: number
           nombre?: string | null
+          sabores_agua?: Json | null
+          sabores_crema?: Json | null
         }
         Relationships: []
       }

@@ -18,7 +18,7 @@ export async function guardarListaPrecios(
     saboresAgua: string[],
     saboresCrema: string[]
 ): Promise<ActionResponse> {
-    
+
     // 1. Validaciones básicas antes de tocar la BD
     if (!nombre || nombre.trim() === "") {
         return { success: false, error: "El nombre de la lista es obligatorio." }
@@ -32,7 +32,7 @@ export async function guardarListaPrecios(
     // 2. Insertar la cabecera (Lista)
     const { data: listaData, error: listaError } = await supabase
         .from("listas_precios")
-        .insert([{ 
+        .insert([{
             nombre,
             activa: true,
             sabores_agua: saboresAgua,
@@ -68,7 +68,7 @@ export async function guardarListaPrecios(
         console.log("Reglas para insertar:", reglasParaInsertar)
 
         if (reglasParaInsertar.length > 0) {
-            
+
             const { error: reglasError } = await supabase
                 .from("reglas_precios")
                 .insert(reglasParaInsertar)
@@ -84,7 +84,7 @@ export async function guardarListaPrecios(
         // 5. ROLLBACK MANUAL (Estrategia de compensación)
         // Si fallaron los detalles, borramos la lista creada para no dejar basura en la BD
         console.error("Error en inserción de detalles, revirtiendo...", error)
-        
+
         await supabase
             .from("listas_precios")
             .delete()
@@ -126,8 +126,8 @@ export async function getListaActiva(): Promise<PriceList | null> {
         // Estructurar los datos en el formato esperado
         const listaPrecios: PriceList = {
             name: listas.nombre || "",
-            saboresAgua: listas.sabores_agua || [],
-            saboresCrema: listas.sabores_crema || [],
+            saboresAgua: (listas.sabores_agua as string[]) || [],
+            saboresCrema: (listas.sabores_crema as string[]) || [],
             agua: reglas.filter(r => r.tipo_producto === "agua").map(r => ({
                 id: r.id.toString(),
                 fromQuantity: r.min_cantidad,

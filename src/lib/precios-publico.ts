@@ -113,8 +113,8 @@ export async function obtenerListaPreciosPublica(): Promise<ListaPreciosPublica 
 
   return {
     nombre: lista.nombre,
-    saboresAgua: lista.sabores_agua || [...SABORES.agua],
-    saboresCrema: lista.sabores_crema || [...SABORES.crema],
+    saboresAgua: (lista.sabores_agua as string[]) || [...SABORES.agua],
+    saboresCrema: (lista.sabores_crema as string[]) || [...SABORES.crema],
     agua: porTipo('agua'),
     crema: porTipo('crema'),
   };
