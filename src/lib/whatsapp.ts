@@ -17,13 +17,20 @@ const supabaseAdmin = createClient<Database>(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-async function persistirMensajeBot(telefono: string, texto: string) {
+// `fallido=true`: se PERSISTE el intento del bot aunque Meta lo haya rechazado
+// tras agotar reintentos. Sirve como registro visual para el operador (chat con
+// un mensaje del bot marcado como no entregado) y — CRÍTICO — hace que el
+// filtro `fallido=false` en procesar.ts excluya esta fila del contexto que
+// arma el próximo turno del LLM: si el bot "dijo" algo que el cliente nunca
+// vio, no debe interpretar la próxima respuesta contra esa pregunta fantasma.
+async function persistirMensajeBot(telefono: string, texto: string, fallido = false) {
   const { error } = await supabaseAdmin.from('mensajes_chat').insert({
     telefono,
     texto,
     rol: 'bot',
     procesado: true,    // invisible al claim atómico y al defer
     descartado: false,  // visible en el historial de 15 min y al traer "último turno del bot"
+    fallido,
   });
   if (error) {
     // No bloqueamos el flow: el mensaje al cliente ya se mandó. Solo perdemos contexto futuro.
@@ -281,7 +288,11 @@ export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string
     text: { body: texto },
   }, "mensaje de texto");
 
-  if (ok) await persistirMensajeBot(numeroDestino, texto);
+  // Persistimos SIEMPRE — con fallido=true si Meta nunca lo aceptó — para que
+  // (a) el operador lo vea en el chat marcado como no entregado y (b) el LLM
+  // no lo tome como "lo que el bot dijo antes" en su próximo turno (ver el
+  // filtro `fallido=false` en procesar.ts).
+  await persistirMensajeBot(numeroDestino, texto, !ok);
   return ok;
 }
 
@@ -369,8 +380,9 @@ export async function enviarMensajeManual(
     text: { body: texto },
   }, "mensaje manual del operador");
 
-  if (!ok) return { ok: false, mensaje: null };
-
+  // Persistimos también los envíos que Meta rechazó (fuera de la ventana de
+  // 24h, token vencido, etc.): el operador ve en el chat qué intentó decir y
+  // por qué al cliente le "faltó". Mismo criterio que enviarMensajeWhatsApp.
   const { data, error } = await supabaseAdmin
     .from('mensajes_chat')
     .insert({
@@ -379,16 +391,17 @@ export async function enviarMensajeManual(
       rol: 'operador',
       procesado: true,    // invisible al claim atómico y al defer
       descartado: false,
+      fallido: !ok,
     })
     .select('id, rol, texto, created_at')
     .single();
 
   if (error) {
     console.error('⚠️ No se pudo persistir el mensaje del operador:', error);
-    return { ok: true, mensaje: null };
+    return { ok, mensaje: null };
   }
 
-  return { ok: true, mensaje: data };
+  return { ok, mensaje: data };
 }
 
 export type BotonReply = {
@@ -427,13 +440,14 @@ export async function enviarMensajeConBotones(
     },
   }, "mensaje con botones");
 
-  if (!ok) return false;
-
   // Persistimos el body + el listado de opciones que vio el cliente, así el
   // LLM entiende a qué está respondiendo cuando recibe un "sí" o "dale" suelto.
+  // Si Meta rechazó el envío, la persistimos igual con fallido=true (mismo
+  // criterio que enviarMensajeWhatsApp) — el operador ve el intento en el chat
+  // y el LLM lo ignora en el próximo turno.
   const opciones = botones.map(b => b.title).join(' | ');
-  await persistirMensajeBot(numeroDestino, `${texto}\n[opciones: ${opciones}]`);
-  return true;
+  await persistirMensajeBot(numeroDestino, `${texto}\n[opciones: ${opciones}]`, !ok);
+  return ok;
 }
 
 export type PedidoResumen = {
@@ -449,6 +463,9 @@ export type PedidoResumen = {
   // dio en esta conversación). Opcional para no romper llamadores con filas
   // parciales; si falta se asume false.
   direccion_de_historial?: boolean | null;
+  // Contador de reintentos fallidos de ESTE resumen (ver más abajo). Opcional
+  // por lo mismo que direccion_de_historial; si falta se asume 0.
+  intentos_reenvio?: number | null;
 };
 
 /**
@@ -525,9 +542,19 @@ export async function enviarResumenYPedirConfirmacion(
   // botones (Confirmar/Modificar) → armamos el token de un solo uso para que
   // ejecutarBoton procese solo el PRIMER click (ver botones.ts). Si no salió, no
   // hay botones vivos, lo dejamos en false.
+  // intentos_reenvio: cuenta fallos CONSECUTIVOS de este resumen (no de todo el
+  // pedido). Un envío exitoso lo resetea a 0; el cron de reenvío lo usa para
+  // frenar tras 5 intentos (ver /api/reenviar-resumenes) en vez de reintentar
+  // por 2h sin ninguna chance real (número bloqueado, token vencido, etc.).
+  const intentosPrevios = pedidoDB.intentos_reenvio ?? 0;
   const { error } = await supabaseAdmin
     .from('pedidos')
-    .update({ resumen_pendiente: !ok, recordatorio_enviado: false, esperando_respuesta_boton: ok })
+    .update({
+      resumen_pendiente: !ok,
+      recordatorio_enviado: false,
+      esperando_respuesta_boton: ok,
+      intentos_reenvio: ok ? 0 : intentosPrevios + 1,
+    })
     .eq('id', pedidoDB.id);
   if (error) console.error('⚠️ No se pudo actualizar resumen_pendiente:', error);
 

@@ -34,17 +34,25 @@ const supabaseAdmin = createClient<Database>(
 
 // Solo reintentamos resúmenes de borradores RECIENTES. Más viejos que esto ya
 // fueron auto-confirmados por el otro pg_cron o quedaron stale; no tiene sentido
-// mandarles un "¿confirmás?" horas tarde. Acota los reintentos sin un contador.
+// mandarles un "¿confirmás?" horas tarde. Acota la VENTANA temporal.
 const VENTANA_HORAS = 2;
+
+// Acota la CANTIDAD de reintentos (independiente de la ventana): si un número
+// está bloqueado por Meta o el token venció, cada intento en la ventana de 2h
+// es una petición fallida más (hasta 60), sin ninguna chance real de éxito.
+// Pasado este tope dejamos de reintentar; enviarResumenYPedirConfirmacion
+// resetea el contador a 0 en cuanto un envío sale bien.
+const MAX_INTENTOS_REENVIO = 5;
 
 async function reenviarPendientes() {
   const desde = new Date(Date.now() - VENTANA_HORAS * 60 * 60 * 1000).toISOString();
 
   const { data: pendientes, error } = await supabaseAdmin
     .from('pedidos')
-    .select('id, telefono, cantidad_crema, cantidad_agua, observaciones, direccion, aclaracion, metodo_pago, precio_total, direccion_de_historial')
+    .select('id, telefono, cantidad_crema, cantidad_agua, observaciones, direccion, aclaracion, metodo_pago, precio_total, direccion_de_historial, intentos_reenvio')
     .eq('estado', 'borrador')
     .eq('resumen_pendiente', true)
+    .lt('intentos_reenvio', MAX_INTENTOS_REENVIO)
     .gte('created_at', desde);
 
   if (error) {

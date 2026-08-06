@@ -117,6 +117,7 @@ export type Database = {
         Row: {
           created_at: string
           descartado: boolean
+          fallido: boolean
           id: string
           media_caption: string | null
           media_filename: string | null
@@ -134,6 +135,7 @@ export type Database = {
         Insert: {
           created_at?: string
           descartado?: boolean
+          fallido?: boolean
           id?: string
           media_caption?: string | null
           media_filename?: string | null
@@ -151,6 +153,7 @@ export type Database = {
         Update: {
           created_at?: string
           descartado?: boolean
+          fallido?: boolean
           id?: string
           media_caption?: string | null
           media_filename?: string | null
@@ -183,6 +186,7 @@ export type Database = {
           esperando_respuesta_boton: boolean
           estado: string
           id: number
+          intentos_reenvio: number
           metodo_pago: string
           monto_total_agua: number | null
           monto_total_crema: number | null
@@ -212,6 +216,7 @@ export type Database = {
           esperando_respuesta_boton?: boolean
           estado?: string
           id?: number
+          intentos_reenvio?: number
           metodo_pago: string
           monto_total_agua?: number | null
           monto_total_crema?: number | null
@@ -241,6 +246,7 @@ export type Database = {
           esperando_respuesta_boton?: boolean
           estado?: string
           id?: number
+          intentos_reenvio?: number
           metodo_pago?: string
           monto_total_agua?: number | null
           monto_total_crema?: number | null
