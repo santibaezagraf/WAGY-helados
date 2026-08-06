@@ -95,9 +95,12 @@ describe('decidirAccionBorrador', () => {
       .toEqual({ accion: 'rechazar', avisarCliente: false });
   });
 
-  it('los parciales abandonados también se rechazan (limpieza)', () => {
+  it('los parciales abandonados también se rechazan (limpieza), pero sin avisar', () => {
+    // Un borrador incompleto nunca llegó a mostrarle un resumen al cliente, así
+    // que no hay nada que "cancelar" desde su perspectiva — avisarle sería
+    // confuso. Se rechaza en silencio.
     expect(decidirAccionBorrador(params({ esCompleto: false, msSilencioCliente: 7 * HORA })))
-      .toEqual({ accion: 'rechazar', avisarCliente: true });
+      .toEqual({ accion: 'rechazar', avisarCliente: false });
   });
 
   it('sin mensajes del cliente, la edad del borrador es el fallback del silencio', () => {
