@@ -10,7 +10,7 @@ import {
   setTomaActiva,
   tieneTomaActiva,
 } from "@/lib/chat-abierto-store"
-import { getTelefonosConTomaActiva } from "@/lib/actions/mensajes"
+import { getTelefonosConTomaActiva, getTelefonosRequierenAtencion } from "@/lib/actions/mensajes"
 
 // Cuánto queda visible cada toast en pantalla (ms). Un poco más largo que antes
 // para que el operador alcance a leer el preview del mensaje.
@@ -117,21 +117,24 @@ function reproducirPing(): void {
 }
 
 /**
- * Toast push (arriba a la derecha, con sonido) SOLO para mensajes entrantes de
- * un CLIENTE cuando la conversación está en manos de un operador y el chat de
- * ese teléfono NO está abierto (si está abierto, el operador ya lo ve por el
- * Realtime del propio modal). Es el caso "estoy atendiendo a mano y el cliente
- * me respondió mientras miraba otra cosa".
+ * Toast push (arriba a la derecha, con sonido) para dos casos que requieren
+ * acción del operador y no serían visibles si el chat no está abierto:
  *
- * La delegación del bot a un humano (consulta_negocio / pregunta_negocio →
- * `requiere_atencion=true`) NO dispara toast: se refleja como badge en el ícono
- * de chat del header (ver header.tsx). Igual escuchamos `atencion_humana` acá
- * para mantener el set de tomas activas al día.
+ *  1) Mensaje entrante de un CLIENTE cuando la conversación está bajo toma
+ *     humana activa y el chat de ese teléfono no está abierto — "estoy
+ *     atendiendo a mano y el cliente me respondió mientras miraba otra cosa".
+ *  2) El bot delegó a un humano (`atencion_humana.requiere_atencion` pasa a
+ *     true): consulta_negocio, pregunta_negocio embebida, media sin resolver
+ *     (imagen/video/doc/etc.), o audio con transcripción fallida. Es el
+ *     momento en que la conversación pasa a necesitar acción humana.
  *
- * Estilo: contorno verde WhatsApp, preview del mensaje en dos líneas, ping
- * fuerte. Pensado para llamar la atención del operador aunque esté en otra
- * pestaña o mirando otra parte de la app. Al clickear el cuerpo del toast se
- * abre el chat de ese teléfono (`onAbrirChat`).
+ * En ambos casos: si el chat de ese teléfono ya está abierto, no molestamos
+ * (el operador ya lo está viendo por el Realtime del propio modal).
+ *
+ * Estilo: contorno verde WhatsApp, preview en dos líneas, ping fuerte.
+ * Pensado para llamar la atención del operador aunque esté en otra pestaña o
+ * mirando otra parte de la app. Al clickear el cuerpo del toast se abre el
+ * chat de ese teléfono (`onAbrirChat`).
  */
 export function NotificacionesEntrantes({
   onAbrirChat,
@@ -140,8 +143,15 @@ export function NotificacionesEntrantes({
 }) {
   const [avisos, setAvisos] = React.useState<Aviso[]>([])
   const chatAbiertoRef = React.useRef<string | null>(null)
+  // Teléfonos con `requiere_atencion=true` ya conocidos. Se usa para no
+  // re-tostar: un update de atencion_humana que solo refresca updated_at
+  // (p.ej. tocarAtencionHumana) llega igual por Realtime; sin este set el
+  // toast se dispararía en cada refresh porque `payload.old` en Supabase no
+  // trae las columnas sin REPLICA IDENTITY FULL.
+  const pendientesRef = React.useRef<Set<string>>(new Set())
 
-  // Estado inicial del set de tomas activas + suscripción al store del chat abierto.
+  // Estado inicial del set de tomas activas + del set de pendientes +
+  // suscripción al store del chat abierto.
   React.useEffect(() => {
     let cancelado = false
     getTelefonosConTomaActiva()
@@ -151,6 +161,15 @@ export function NotificacionesEntrantes({
       })
       .catch(() => {
         /* si falla, el set inicial queda vacío y se llena por Realtime */
+      })
+    getTelefonosRequierenAtencion()
+      .then((pendientes) => {
+        if (cancelado) return
+        pendientesRef.current = new Set(pendientes)
+      })
+      .catch(() => {
+        /* si falla, el set arranca vacío: el primer update por tel disparará
+           un toast de más (aceptable — mejor un toast extra que ninguno). */
       })
     chatAbiertoRef.current = getChatAbierto()
     const off = onChangeChatAbierto(() => {
@@ -201,7 +220,12 @@ export function NotificacionesEntrantes({
       )
       .subscribe()
 
-    // Solo para mantener el set de tomas activas al día (no dispara toast).
+    // Mantiene el set de tomas activas al día Y dispara toast cuando el bot
+    // delega a un humano (requiere_atencion transiciona a true). No queremos
+    // re-tostar cuando el flag ya estaba en true y solo cambió otra columna
+    // (p.ej. `tocarAtencionHumana` refresca updated_at) — comparamos contra
+    // `pendientesRef` en vez de contra `payload.old`, que llega sin las
+    // columnas no-PK a menos que la tabla tenga REPLICA IDENTITY FULL.
     const canalAtencion = supabase
       .channel("notif-atencion-humana")
       .on(
@@ -209,10 +233,36 @@ export function NotificacionesEntrantes({
         { event: "*", schema: "public", table: "atencion_humana" },
         (payload) => {
           const nueva = payload.new as
-            | { telefono?: string; activa?: boolean }
+            | { telefono?: string; activa?: boolean; requiere_atencion?: boolean }
             | undefined
           if (!nueva?.telefono) return
-          setTomaActiva(nueva.telefono, nueva.activa === true)
+          const tel = nueva.telefono
+          setTomaActiva(tel, nueva.activa === true)
+
+          // Transición a "pendiente" (delegación del bot, o media sin
+          // resolver): dispara toast, salvo:
+          //  - que el chat ya esté abierto (el operador ya lo ve), o
+          //  - que la toma humana ya esté activa para ese tel: ahí
+          //    `requiere_atencion=true` significa "no leído" (flag
+          //    dual-purpose), no "el bot pidió ayuda", y el mensaje
+          //    entrante del cliente ya disparó el toast correcto por el
+          //    canal de mensajes_chat — este sería un segundo toast redundante.
+          const yaEraPendiente = pendientesRef.current.has(tel)
+          if (nueva.requiere_atencion === true) {
+            if (!yaEraPendiente) {
+              pendientesRef.current.add(tel)
+              if (chatAbiertoRef.current !== tel && !tieneTomaActiva(tel)) {
+                empujarAviso({
+                  id: `deleg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  telefono: tel,
+                  preview: "El bot pidió ayuda con esta conversación.",
+                })
+              }
+            }
+          } else {
+            // El operador abrió el chat / respondió → flag limpiado.
+            pendientesRef.current.delete(tel)
+          }
         },
       )
       .subscribe()
