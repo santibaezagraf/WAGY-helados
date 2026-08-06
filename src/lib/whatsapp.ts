@@ -232,7 +232,7 @@ export async function descargarYGuardarMedia(
   mediaId: string,
   telefono: string,
   waMessageId: string | undefined,
-): Promise<{ media_path: string; media_mime: string | null } | null> {
+): Promise<{ media_path: string; media_mime: string | null; bytes: Uint8Array } | null> {
   const token = process.env.WHATSAPP_TOKEN;
   try {
     // 1. Metadata: URL temporal + mime.
@@ -273,11 +273,156 @@ export async function descargarYGuardarMedia(
       return null;
     }
 
-    return { media_path: path, media_mime: mime };
+    return { media_path: path, media_mime: mime, bytes };
   } catch (error) {
     console.error(`❌ Error al procesar el media ${mediaId}:`, error instanceof Error ? error.message : error);
     return null;
   }
+}
+
+// ── Transcripción de audio (Groq Whisper) ────────────────────────────────
+
+const TRANSCRIPCION_TIMEOUT_MS = 15000;
+// Sesgo léxico para Whisper: heladería WAGY en Argentina (rioplatense). Vende
+// SOLO helados de palito, por unidad — nada de potes/kilos. Dos tipos: agua y
+// crema, con sabores fijos. Enumerar los sabores exactos evita que Whisper
+// escriba "Pico Dulce" como "picodulce" o confunda "Caramelo Fizz" con otra
+// cosa. Incluye también términos frecuentes de pago/entrega para captar bien
+// las direcciones y el método.
+const PROMPT_DOMINIO =
+  'Pedido en heladería WAGY (Argentina, rioplatense). Vende helados de palito ' +
+  'por unidad — el cliente pide cantidades enteras ("10 de agua", "5 de crema"). ' +
+  'Tipos: agua y crema. Sabores de agua: Frutilla, Uva, Limón, Pico Dulce, ' +
+  'Crema del Cielo, Caramelo Fizz. Sabores de crema: Chocolate, Vainilla, ' +
+  'Frutilla, Dulce de leche. Vocabulario habitual: helado, palito, unidad, ' +
+  'los de agua, los de crema, sabor, gusto, retira, envío, delivery, dirección, ' +
+  'calle y número, departamento, piso, efectivo, transferencia, alias.';
+
+interface SegmentoWhisper {
+  text: string;
+  noSpeechProb: number;
+  avgLogprob: number;
+  compressionRatio: number;
+}
+
+// Whisper está entrenado para emitir SIEMPRE texto, incluso sobre silencio,
+// ruido o música — no tiene una salida nativa de "acá no hay habla". Sobre
+// audio no verbal (silbidos, ruido de fondo) alucina una frase verosímil en
+// vez de devolver vacío, y esa frase puede colar como dato real de pedido. Las
+// tres señales de abajo son las que el propio Whisper expone por segmento
+// (solo con response_format:'verbose_json' en la API de Groq — el SDK de
+// Vercel AI no las expone, por eso transcribirAudio pega directo al endpoint
+// REST) y son el mecanismo estándar que usan whisper.cpp / faster-whisper para
+// descartar alucinaciones:
+//   - noSpeechProb alto: el modelo mismo estima que el segmento no tiene habla.
+//   - avgLogprob bajo: baja confianza token a token.
+//   - compressionRatio alto: texto repetitivo (loop típico de alucinación).
+// noSpeechProb alto por sí solo no alcanza como criterio (también se da en
+// habla real pero bajita/con ruido), por eso se exige junto con avgLogprob
+// bajo; compressionRatio es un criterio independiente porque cubre el otro
+// modo de falla (repetición) sin pasar por no_speech.
+const UMBRAL_NO_SPEECH_PROB = 0.6;
+const UMBRAL_AVG_LOGPROB = -1.0;
+const UMBRAL_COMPRESSION_RATIO = 2.4;
+
+export function esSegmentoAlucinado(segmento: SegmentoWhisper): boolean {
+  return (
+    (segmento.noSpeechProb > UMBRAL_NO_SPEECH_PROB && segmento.avgLogprob < UMBRAL_AVG_LOGPROB) ||
+    segmento.compressionRatio > UMBRAL_COMPRESSION_RATIO
+  );
+}
+
+// Reconstruye el texto solo con los segmentos de confianza. null si no queda
+// ninguno (ej: el audio entero era ruido/silbidos).
+export function filtrarSegmentosConfiables(segmentos: SegmentoWhisper[]): string | null {
+  const texto = segmentos
+    .filter((s) => !esSegmentoAlucinado(s))
+    .map((s) => s.text.trim())
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  return texto || null;
+}
+
+export async function transcribirAudio(
+  bytes: Uint8Array,
+  mime: string | null,
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TRANSCRIPCION_TIMEOUT_MS);
+  try {
+    const formData = new FormData();
+    formData.append('model', 'whisper-large-v3-turbo');
+    formData.append(
+      'file',
+      new Blob([bytes as BlobPart], { type: mime ?? 'application/octet-stream' }),
+      `audio.${mimeAExtension(mime)}`,
+    );
+    formData.append('language', 'es');
+    formData.append('prompt', PROMPT_DOMINIO);
+    formData.append('temperature', '0');
+    // verbose_json es el único formato que trae no_speech_prob/avg_logprob/
+    // compression_ratio por segmento; el default ('json') solo da texto plano.
+    formData.append('response_format', 'verbose_json');
+
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: formData,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.error(`❌ Groq transcripción respondió ${res.status}: ${await res.text()}`);
+      return null;
+    }
+
+    const data: {
+      text?: string;
+      segments?: Array<{
+        text: string;
+        no_speech_prob: number;
+        avg_logprob: number;
+        compression_ratio: number;
+      }>;
+    } = await res.json();
+
+    if (!data.segments || data.segments.length === 0) {
+      // No debería pasar pidiendo verbose_json, pero por las dudas no se
+      // pierde la transcripción si Groq alguna vez no manda segmentos.
+      const limpio = (data.text ?? '').trim();
+      return limpio || null;
+    }
+
+    const segmentos: SegmentoWhisper[] = data.segments.map((s) => ({
+      text: s.text,
+      noSpeechProb: s.no_speech_prob,
+      avgLogprob: s.avg_logprob,
+      compressionRatio: s.compression_ratio,
+    }));
+
+    const descartados = segmentos.filter(esSegmentoAlucinado);
+    if (descartados.length > 0) {
+      console.log(
+        `🎤 Descartando ${descartados.length}/${segmentos.length} segmento(s) de baja confianza (posible alucinación): ` +
+          descartados.map((s) => `"${s.text.trim()}"`).join(', '),
+      );
+    }
+
+    return filtrarSegmentosConfiables(segmentos);
+  } catch (error) {
+    console.error(
+      `❌ Error al transcribir audio (mime: ${mime}):`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function esTranscripcionUtil(texto: string | null): boolean {
+  if (!texto) return false;
+  return /[a-zA-Z0-9áéíóúñü]/i.test(texto.trim());
 }
 
 export async function enviarMensajeWhatsApp(numeroDestino: string, texto: string): Promise<boolean> {

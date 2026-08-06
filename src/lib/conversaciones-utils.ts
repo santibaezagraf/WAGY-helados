@@ -10,14 +10,22 @@ export type Conversacion = {
 // Tipos de mensaje que el bot no resuelve y que hacen que su fila entrante
 // marque la conversación como pendiente. Debe coincidir con la lógica del
 // webhook (que dispara `marcarRequiereAtencion` para media/ubicación).
-const TIPOS_REQUIEREN_HUMANO = new Set(['image', 'audio', 'video', 'document', 'sticker', 'location'])
+// NOTA: `audio` NO va acá — el bot ahora transcribe las notas de voz y las
+// procesa como texto (fila entra con procesado=false). Si la transcripción
+// falla, el webhook cae al path de siempre (procesado=true + avisa a un
+// humano) y el pendiente queda marcado por la rama `procesado === true` de
+// abajo y por el listener de `atencion_humana.requiere_atencion` en el
+// header. Marcar todo audio acá encendía el badge apenas llegaba la nota,
+// antes de que el bot tuviera oportunidad de resolverla solo.
+const TIPOS_REQUIEREN_HUMANO = new Set(['image', 'video', 'document', 'sticker', 'location'])
 
 /**
  * Un mensaje entrante marca la conversación como pendiente cuando:
  *  - es un media/ubicación de un cliente (el bot no lo entiende), o
- *  - es texto de un cliente pero llegó con `procesado=true`: el webhook lo
- *    silenció (toma humana activa, gate por mensaje de operador reciente, o
- *    rate-limit), así que hay algo del cliente sin leer por el staff.
+ *  - es texto (o audio transcripto) de un cliente pero llegó con
+ *    `procesado=true`: el webhook lo silenció (toma humana activa, gate por
+ *    mensaje de operador reciente, o rate-limit), así que hay algo del
+ *    cliente sin leer por el staff.
  * Pura y compartida entre el header (dropdown) y el inbox (/conversaciones)
  * para que ambos marquen el amber al mismo instante.
  */

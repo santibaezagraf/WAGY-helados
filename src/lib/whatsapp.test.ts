@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mimeAExtension, mensajeConfirmacion, construirResumenPedido, esErrorTimeoutPropio } from './whatsapp';
+import { mimeAExtension, mensajeConfirmacion, construirResumenPedido, esErrorTimeoutPropio, esTranscripcionUtil, esSegmentoAlucinado, filtrarSegmentosConfiables } from './whatsapp';
 import { PAGO_TRANSFERENCIA, ENTREGA, formatearPesos } from './precios-publico';
 
 // Clasificación del error de un fetch a Meta: solo el timeout propio (AbortError)
@@ -25,6 +25,86 @@ describe('esErrorTimeoutPropio', () => {
     expect(esErrorTimeoutPropio(undefined)).toBe(false);
     expect(esErrorTimeoutPropio('AbortError')).toBe(false); // string suelto, no Error
     expect(esErrorTimeoutPropio({ name: 'AbortError' })).toBe(false); // objeto plano, no instanceof Error
+  });
+});
+
+describe('esTranscripcionUtil', () => {
+  it('acepta texto con contenido real', () => {
+    expect(esTranscripcionUtil('quiero 10 de crema en Mitre 951')).toBe(true);
+    expect(esTranscripcionUtil('sí')).toBe(true);
+    expect(esTranscripcionUtil('  dale  ')).toBe(true);
+  });
+
+  it('rechaza null, vacío y solo espacios', () => {
+    expect(esTranscripcionUtil(null)).toBe(false);
+    expect(esTranscripcionUtil('')).toBe(false);
+    expect(esTranscripcionUtil('   ')).toBe(false);
+  });
+
+  it('rechaza ruido sin alfanuméricos (silencio/alucinación)', () => {
+    expect(esTranscripcionUtil('...')).toBe(false);
+    expect(esTranscripcionUtil('♪')).toBe(false);
+    expect(esTranscripcionUtil('— , .')).toBe(false);
+  });
+});
+
+// Segunda línea de defensa contra alucinaciones de Whisper: a diferencia de
+// esTranscripcionUtil (que solo mira si el texto TIENE contenido), esto usa
+// las señales de confianza que el propio Whisper devuelve por segmento
+// (no_speech_prob/avg_logprob/compression_ratio, vía verbose_json) para
+// detectar texto verosímil pero fabricado sobre silbidos/ruido/silencio —
+// el caso real que motivó esto: "Tres de la cara de la tierra, el" sobre un
+// audio de puro ruido de fondo, que pasaba esTranscripcionUtil sin problema.
+describe('esSegmentoAlucinado', () => {
+  it('no marca un segmento de habla real y confiable', () => {
+    expect(
+      esSegmentoAlucinado({ text: 'quiero 10 de agua', noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.3 }),
+    ).toBe(false);
+  });
+
+  it('marca alto no_speech_prob + bajo avg_logprob (silencio/ruido no verbal)', () => {
+    expect(
+      esSegmentoAlucinado({ text: 'Tres de la cara de la tierra, el', noSpeechProb: 0.85, avgLogprob: -1.4, compressionRatio: 1.1 }),
+    ).toBe(true);
+  });
+
+  it('no alcanza con un solo criterio débil (evita falsos positivos)', () => {
+    // no_speech_prob alto solo: pasa en habla real bajita/con ruido de fondo.
+    expect(
+      esSegmentoAlucinado({ text: 'hola', noSpeechProb: 0.7, avgLogprob: -0.3, compressionRatio: 1.2 }),
+    ).toBe(false);
+    // avg_logprob bajo solo: pasa con acentos/audio de mala calidad.
+    expect(
+      esSegmentoAlucinado({ text: 'quiero cinco de crema', noSpeechProb: 0.2, avgLogprob: -1.3, compressionRatio: 1.2 }),
+    ).toBe(false);
+  });
+
+  it('marca compression_ratio alto (texto repetitivo, loop típico de alucinación)', () => {
+    expect(
+      esSegmentoAlucinado({ text: 'gracias gracias gracias gracias', noSpeechProb: 0.1, avgLogprob: -0.3, compressionRatio: 2.8 }),
+    ).toBe(true);
+  });
+});
+
+describe('filtrarSegmentosConfiables', () => {
+  it('concatena solo los segmentos confiables', () => {
+    const texto = filtrarSegmentosConfiables([
+      { text: ' quiero 10 de agua ', noSpeechProb: 0.05, avgLogprob: -0.2, compressionRatio: 1.3 },
+      { text: 'Tres de la cara de la tierra, el', noSpeechProb: 0.9, avgLogprob: -1.5, compressionRatio: 1.1 },
+      { text: 'en Mitre 951', noSpeechProb: 0.1, avgLogprob: -0.3, compressionRatio: 1.2 },
+    ]);
+    expect(texto).toBe('quiero 10 de agua en Mitre 951');
+  });
+
+  it('devuelve null si ningún segmento sobrevive (audio entero ruido/silbidos)', () => {
+    const texto = filtrarSegmentosConfiables([
+      { text: 'Tres de la cara de la tierra, el', noSpeechProb: 0.9, avgLogprob: -1.5, compressionRatio: 1.1 },
+    ]);
+    expect(texto).toBeNull();
+  });
+
+  it('devuelve null en una lista vacía', () => {
+    expect(filtrarSegmentosConfiables([])).toBeNull();
   });
 });
 

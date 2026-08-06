@@ -84,15 +84,24 @@ function CuerpoMensaje({ m }: { m: MensajeChat }) {
         noDisponible
       )
 
-    case "audio":
+    case "audio": {
+      const transcripcion = m.texto ? (
+        <span className="block whitespace-pre-wrap break-words mt-1 italic text-slate-600 dark:text-slate-400">
+          🎤 {m.texto}
+        </span>
+      ) : null
       return m.media_url ? (
         <>
           <audio controls src={m.media_url} className="max-w-full" />
-          {caption}
+          {transcripcion}
         </>
       ) : (
-        noDisponible
+        <>
+          {noDisponible}
+          {transcripcion}
+        </>
       )
+    }
 
     case "video":
       return m.media_url ? (

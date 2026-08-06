@@ -93,10 +93,23 @@ describe('marcaPendiente', () => {
     expect(marcaPendiente({ rol: 'operador', tipo: 'text', procesado: true })).toBe(false);
   });
 
-  it('media/ubicación de cliente → pendiente (aunque procesado sea false)', () => {
+  it('media (no-audio) / ubicación de cliente → pendiente (aunque procesado sea false)', () => {
     expect(marcaPendiente({ rol: 'cliente', tipo: 'image', procesado: false })).toBe(true);
-    expect(marcaPendiente({ rol: 'cliente', tipo: 'audio' })).toBe(true);
+    expect(marcaPendiente({ rol: 'cliente', tipo: 'video' })).toBe(true);
+    expect(marcaPendiente({ rol: 'cliente', tipo: 'document' })).toBe(true);
+    expect(marcaPendiente({ rol: 'cliente', tipo: 'sticker' })).toBe(true);
     expect(marcaPendiente({ rol: 'cliente', tipo: 'location' })).toBe(true);
+  });
+
+  it('audio transcripto (procesado=false, lo procesa el bot) → NO pendiente', () => {
+    // El bot ahora transcribe con Whisper y procesa el audio como texto. El
+    // badge/amber recién debería activarse si el bot decide delegar (via
+    // atencion_humana.requiere_atencion, otro listener del header).
+    expect(marcaPendiente({ rol: 'cliente', tipo: 'audio', procesado: false })).toBe(false);
+  });
+
+  it('audio con procesado=true (transcripción falló / toma humana / rate-limit) → pendiente', () => {
+    expect(marcaPendiente({ rol: 'cliente', tipo: 'audio', procesado: true })).toBe(true);
   });
 
   it('texto de cliente con procesado=true (toma humana / rate-limit) → pendiente', () => {

@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
 import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS } from '@/lib/bot/botones';
-import { enviarMensajeWhatsApp, descargarYGuardarMedia } from '@/lib/whatsapp';
+import { enviarMensajeWhatsApp, descargarYGuardarMedia, transcribirAudio, esTranscripcionUtil } from '@/lib/whatsapp';
 import { atencionHumanaActiva, estaBloqueado, intervencionHumanaReciente, marcarRequiereAtencion, tocarAtencionHumana } from '@/lib/bot/atencion-humana';
 import { estaRateLimiteado, RATE_LIMIT_MAX } from '@/lib/bot/rate-limit';
 import { verificarFirmaMeta } from '@/lib/firma-meta';
@@ -212,15 +212,84 @@ async function manejarBloqueado(
   return NextResponse.json({ status: 'bloqueado' }, { status: 200 });
 }
 
+/**
+ * Helper compartido entre texto y audio transcripto: aplica los gates de toma
+ * humana / rate-limit, inserta la fila en mensajes_chat y agenda el wake-up
+ * de QStash. `extras` permite setear tipo/media_path/media_mime para audios
+ * transcriptos (la misma fila lleva el reproductor + el texto).
+ */
+async function encolarComoEntradaDeCliente(
+  numeroCliente: string,
+  texto: string,
+  waMessageId: string | undefined,
+  extras?: { tipo?: string; media_path?: string | null; media_mime?: string | null },
+) {
+  const enTomaHumana = await atencionHumanaActiva(numeroCliente);
+  const operadorReciente = !enTomaHumana && await intervencionHumanaReciente(numeroCliente);
+  const rateLimiteado =
+    !enTomaHumana && !operadorReciente && (await estaRateLimiteado(numeroCliente));
+
+  const { error: insertError } = await supabaseAdmin
+    .from('mensajes_chat')
+    .insert([{
+      telefono: numeroCliente,
+      texto,
+      wa_message_id: waMessageId,
+      procesado: enTomaHumana || operadorReciente || rateLimiteado,
+      ...(extras?.tipo ? { tipo: extras.tipo } : {}),
+      ...(extras?.media_path !== undefined ? { media_path: extras.media_path } : {}),
+      ...(extras?.media_mime !== undefined ? { media_mime: extras.media_mime } : {}),
+    }]);
+
+  if (insertError) {
+    if (insertError.code === '23505') {
+      console.log(`⏭️ Mensaje duplicado de Meta (wa_id: ${waMessageId}). Ignorando reintento.`);
+      return NextResponse.json({ status: 'duplicate_ignored' }, { status: 200 });
+    }
+    console.error("Error al guardar el mensaje:", insertError);
+    return NextResponse.json({ status: 'error' }, { status: 200 });
+  }
+
+  if (enTomaHumana) {
+    await tocarAtencionHumana(numeroCliente);
+    await marcarRequiereAtencion(numeroCliente);
+    console.log(`🙋 Toma humana activa para ${numeroCliente}. Mensaje guardado sin agendar al bot.`);
+    return NextResponse.json({ status: 'atencion_humana' }, { status: 200 });
+  }
+
+  if (operadorReciente) {
+    console.log(`🙋 Último saliente fue de un operador hace <6h para ${numeroCliente}. El bot no responde; se avisa al operador.`);
+    await marcarRequiereAtencion(numeroCliente);
+    return NextResponse.json({ status: 'intervencion_humana_reciente' }, { status: 200 });
+  }
+
+  if (rateLimiteado) {
+    console.warn(`🚦 Rate-limit: ${numeroCliente} superó ${RATE_LIMIT_MAX} mensajes/hora. Guardado sin agendar al bot; se avisa al staff.`);
+    await marcarRequiereAtencion(numeroCliente);
+    return NextResponse.json({ status: 'rate_limited' }, { status: 200 });
+  }
+
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || `https://${process.env.VERCEL_URL}`;
+  try {
+    await qstash.publishJSON({
+      url: `${baseUrl}/api/procesar-pendientes`,
+      delay: DEBOUNCE_SECONDS,
+      body: { telefono: numeroCliente },
+    });
+    console.log(`⏰ Wake-up agendado en QStash para ${numeroCliente} en ${DEBOUNCE_SECONDS}s.`);
+  } catch (qstashError) {
+    console.error("❌ Error al agendar wake-up en QStash:", qstashError);
+  }
+
+  return NextResponse.json({ status: 'ok' }, { status: 200 });
+}
+
 async function manejarTexto(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   message: any,
   numeroCliente: string,
   waMessageId: string | undefined,
 ) {
-  // Validación de largo: ignoramos vacíos y truncamos textos muy largos.
-  // El máximo de WhatsApp es 4096 chars; para un bot de heladería, mensajes
-  // por encima de 1000 son casi seguro spam/copy-paste y queman tokens al pedo.
   const MAX_LARGO_MENSAJE = 1000;
   const rawTexto = (message.text?.body ?? '').trim();
 
@@ -237,94 +306,7 @@ async function manejarTexto(
 
   console.log(`📩 Recibido de ${numeroCliente}: "${textoMensaje}" (wa_id: ${waMessageId})`);
 
-  // Toma humana: si un operador está manejando esta conversación a mano, el bot
-  // no debe auto-responder. Guardamos el mensaje como procesado=true (visible en
-  // el chat del dashboard y vía Realtime, pero invisible al claim atómico y al
-  // defer) y NO agendamos el wake-up de QStash. 0 tokens, el LLM ni se entera.
-  const enTomaHumana = await atencionHumanaActiva(numeroCliente);
-
-  // Gate por mensajes (red de seguridad de la toma): aunque la toma no esté
-  // activa, si el último mensaje saliente fue de un OPERADOR hace <6h (y no
-  // hubo "devolver al bot" después), la conversación está en manos humanas.
-  // El bot no responde; en cambio avisamos al operador (requiere_atencion).
-  const operadorReciente = !enTomaHumana && await intervencionHumanaReciente(numeroCliente);
-
-  // Rate-limit anti-DoS: si este número ya mandó demasiados mensajes en la última
-  // hora, no lo procesamos con el LLM (protege el presupuesto de tokens de Groq de
-  // un flood sostenido). Guardamos el mensaje igual (visible para el staff) pero
-  // sin agendar el wake-up. Solo aplica si no hay ya un humano en la conversación:
-  // esos casos ya cortan el LLM por su cuenta y el operador decide.
-  const rateLimiteado =
-    !enTomaHumana && !operadorReciente && (await estaRateLimiteado(numeroCliente));
-
-  // 1. Insert con idempotencia: si Meta reintenta, el unique index en
-  //    wa_message_id devuelve 23505 y cortamos sin volver a procesar.
-  const { error: insertError } = await supabaseAdmin
-    .from('mensajes_chat')
-    .insert([{
-      telefono: numeroCliente,
-      texto: textoMensaje,
-      wa_message_id: waMessageId,
-      procesado: enTomaHumana || operadorReciente || rateLimiteado,
-    }]);
-
-  if (insertError) {
-    if (insertError.code === '23505') {
-      console.log(`⏭️ Mensaje duplicado de Meta (wa_id: ${waMessageId}). Ignorando reintento.`);
-      return NextResponse.json({ status: 'duplicate_ignored' }, { status: 200 });
-    }
-    console.error("Error al guardar el mensaje:", insertError);
-    return NextResponse.json({ status: 'error' }, { status: 200 });
-  }
-
-  if (enTomaHumana) {
-    // Refrescamos updated_at para que la ventana de auto-expiración (8h) se
-    // mida desde la última actividad de la conversación, no solo desde el
-    // último envío del operador.
-    await tocarAtencionHumana(numeroCliente);
-    // Y marcamos "requiere_atencion" para que el chat quede resaltado (punto
-    // amarillo + pestaña Pendientes) hasta que el operador lo abra: sin esto,
-    // un mensaje entrante durante la toma solo llegaba por Realtime al toast
-    // pero pasaba desapercibido en el listado ("mensaje sin leer" estilo WA).
-    await marcarRequiereAtencion(numeroCliente);
-    console.log(`🙋 Toma humana activa para ${numeroCliente}. Mensaje guardado sin agendar al bot.`);
-    return NextResponse.json({ status: 'atencion_humana' }, { status: 200 });
-  }
-
-  if (operadorReciente) {
-    console.log(`🙋 Último saliente fue de un operador hace <6h para ${numeroCliente}. El bot no responde; se avisa al operador.`);
-    await marcarRequiereAtencion(numeroCliente);
-    return NextResponse.json({ status: 'intervencion_humana_reciente' }, { status: 200 });
-  }
-
-  if (rateLimiteado) {
-    // Guardado (procesado=true, ya visible en el dashboard), sin gastar tokens.
-    // No le contestamos nada al número: responderle a un flood solo amplifica el
-    // DoS. Marcamos requiere_atencion para que un humano decida si es un cliente
-    // legítimo muy insistente o un abuso.
-    console.warn(`🚦 Rate-limit: ${numeroCliente} superó ${RATE_LIMIT_MAX} mensajes/hora. Guardado sin agendar al bot; se avisa al staff.`);
-    await marcarRequiereAtencion(numeroCliente);
-    return NextResponse.json({ status: 'rate_limited' }, { status: 200 });
-  }
-
-  // 2. Agendar el wake-up en QStash. Cada mensaje agenda el suyo. El primer
-  //    wake-up que dispare se lleva todos los mensajes pendientes con un
-  //    UPDATE...RETURNING atómico; los siguientes encuentran 0 filas y salen.
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || `https://${process.env.VERCEL_URL}`;
-  try {
-    await qstash.publishJSON({
-      url: `${baseUrl}/api/procesar-pendientes`,
-      delay: DEBOUNCE_SECONDS,
-      body: { telefono: numeroCliente },
-    });
-    console.log(`⏰ Wake-up agendado en QStash para ${numeroCliente} en ${DEBOUNCE_SECONDS}s.`);
-  } catch (qstashError) {
-    console.error("❌ Error al agendar wake-up en QStash:", qstashError);
-    // No devolvemos error: el mensaje ya está guardado. Otro wake-up futuro
-    // (o uno de un mensaje siguiente) lo va a barrer.
-  }
-
-  return NextResponse.json({ status: 'ok' }, { status: 200 });
+  return await encolarComoEntradaDeCliente(numeroCliente, textoMensaje, waMessageId);
 }
 
 /**
@@ -351,12 +333,30 @@ async function manejarMedia(
 
   let mediaPath: string | null = null;
   let mediaMime: string | null = mediaObj.mime_type ?? null;
+  let mediaBytes: Uint8Array | null = null;
   if (mediaId) {
     const res = await descargarYGuardarMedia(mediaId, numeroCliente, waMessageId);
     if (res) {
       mediaPath = res.media_path;
       mediaMime = res.media_mime;
+      mediaBytes = res.bytes;
     }
+  }
+
+  // Audio: transcribir con Whisper y meter el transcripto por el pipeline de
+  // texto, como si el cliente lo hubiera escrito. Si falla o sale vacío, cae
+  // al path normal de media (procesado=true + derivar a humano).
+  if (tipo === 'audio' && mediaBytes) {
+    const transcripto = await transcribirAudio(mediaBytes, mediaMime);
+    if (esTranscripcionUtil(transcripto)) {
+      console.log(`🎤 Audio de ${numeroCliente} transcripto: "${transcripto}"`);
+      return await encolarComoEntradaDeCliente(numeroCliente, transcripto!, waMessageId, {
+        tipo: 'audio',
+        media_path: mediaPath,
+        media_mime: mediaMime,
+      });
+    }
+    console.log(`🎤 Audio de ${numeroCliente} sin transcripción útil. Derivando a un humano.`);
   }
 
   const { error: insertError } = await supabaseAdmin
