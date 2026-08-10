@@ -265,7 +265,10 @@ async function encolarComoEntradaDeCliente(
 
   if (rateLimiteado) {
     console.warn(`🚦 Rate-limit: ${numeroCliente} superó ${RATE_LIMIT_MAX} mensajes/hora. Guardado sin agendar al bot; se avisa al staff.`);
-    await marcarRequiereAtencion(numeroCliente);
+    // Motivo distinto del genérico: el dashboard marca esto como "posible
+    // flood" en vez de "necesita intervención humana" (mismo flag, aviso
+    // visual distinto — ver conversaciones-utils.ts).
+    await marcarRequiereAtencion(numeroCliente, 'rate_limit');
     return NextResponse.json({ status: 'rate_limited' }, { status: 200 });
   }
 

@@ -155,23 +155,41 @@ export async function activarAtencionHumana(telefono: string): Promise<void> {
   const { error } = await supabaseAdmin
     .from('atencion_humana')
     .upsert(
-      { telefono, activa: true, updated_at: new Date().toISOString(), requiere_atencion: false, requiere_atencion_at: null },
+      {
+        telefono,
+        activa: true,
+        updated_at: new Date().toISOString(),
+        requiere_atencion: false,
+        requiere_atencion_at: null,
+        motivo_atencion: null,
+      },
       { onConflict: 'telefono' },
     );
 
   if (error) console.error(`⚠️ No se pudo activar atencion_humana para ${telefono}:`, error.message);
 }
 
+/** Motivo de `requiere_atencion`: null = genérico, 'rate_limit' = anti-DoS. */
+export type MotivoAtencion = 'rate_limit' | null;
+
 /**
- * Marca que un teléfono recibió algo que el bot no puede resolver (un media,
- * una ubicación) y que requiere que una persona intervenga desde el dashboard.
- * Lo levanta el webhook cuando NO hay toma humana activa.
+ * Marca que un teléfono necesita que una persona intervenga desde el
+ * dashboard: recibió algo que el bot no puede resolver (media, ubicación,
+ * consulta de negocio no respondible), o quedó pausado por el rate-limit
+ * anti-DoS (`motivo: 'rate_limit'`). Lo levanta el webhook cuando NO hay toma
+ * humana activa. El motivo se persiste para que el dashboard pueda mostrar un
+ * aviso distinto en cada caso (ver `conversaciones-utils.ts`).
  */
-export async function marcarRequiereAtencion(telefono: string): Promise<void> {
+export async function marcarRequiereAtencion(telefono: string, motivo: MotivoAtencion = null): Promise<void> {
   const { error } = await supabaseAdmin
     .from('atencion_humana')
     .upsert(
-      { telefono, requiere_atencion: true, requiere_atencion_at: new Date().toISOString() },
+      {
+        telefono,
+        requiere_atencion: true,
+        requiere_atencion_at: new Date().toISOString(),
+        motivo_atencion: motivo,
+      },
       { onConflict: 'telefono' },
     );
 
@@ -203,7 +221,7 @@ export async function requiereAtencionActual(telefono: string): Promise<boolean>
 export async function limpiarRequiereAtencion(telefono: string): Promise<void> {
   const { error } = await supabaseAdmin
     .from('atencion_humana')
-    .update({ requiere_atencion: false, requiere_atencion_at: null })
+    .update({ requiere_atencion: false, requiere_atencion_at: null, motivo_atencion: null })
     .eq('telefono', telefono);
 
   if (error) console.error(`⚠️ No se pudo limpiar requiere_atencion para ${telefono}:`, error.message);
@@ -230,18 +248,25 @@ export async function telefonosConTomaActiva(): Promise<string[]> {
   return (data ?? []).map((r: { telefono: string }) => r.telefono);
 }
 
-/** Teléfonos que esperan intervención humana (para el badge y el contador del dashboard). */
-export async function telefonosRequierenAtencion(): Promise<string[]> {
+/**
+ * Teléfonos que esperan intervención humana, con el motivo de cada uno (para
+ * el badge y el contador del dashboard, que muestran un aviso distinto para
+ * rate-limit vs el resto — ver `conversaciones-utils.ts`).
+ */
+export async function telefonosRequierenAtencion(): Promise<{ telefono: string; motivo: MotivoAtencion }[]> {
   const { data, error } = await supabaseAdmin
     .from('atencion_humana')
-    .select('telefono')
+    .select('telefono, motivo_atencion')
     .eq('requiere_atencion', true);
 
   if (error) {
     console.error('⚠️ No se pudo leer los teléfonos con requiere_atencion:', error.message);
     return [];
   }
-  return (data ?? []).map((r: { telefono: string }) => r.telefono);
+  return (data ?? []).map((r: { telefono: string; motivo_atencion: string | null }) => ({
+    telefono: r.telefono,
+    motivo: r.motivo_atencion === 'rate_limit' ? 'rate_limit' : null,
+  }));
 }
 
 /** Desactiva la toma humana (devolver la conversación al bot). */

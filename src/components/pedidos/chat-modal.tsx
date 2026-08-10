@@ -32,7 +32,7 @@ export function ChatModal({ open, onOpenChange, telefono, pedidoId }: ChatModalP
         <DialogTitle className="sr-only">
           {pedidoId != null ? `Pedido #${pedidoId}` : `Chat ${telefono}`}
         </DialogTitle>
-        <ChatPanel telefono={telefono} pedidoId={pedidoId} activo={open} />
+        <ChatPanel telefono={telefono} pedidoId={pedidoId} activo={open} enModal />
       </DialogContent>
     </Dialog>
   )

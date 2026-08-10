@@ -2,9 +2,17 @@
 // la server action (mensajes.ts es 'use server', no puede exportar funciones
 // sync) para poder testearla sin red ni Supabase.
 
+// Motivo de `requiereAtencion`: null = genérico (media/consulta/operador),
+// 'rate_limit' = el cliente quedó pausado por el anti-DoS de mensajes/hora.
+// Mismo tipo que `MotivoAtencion` en atencion-humana.ts (no se importa desde
+// acá para no acoplar este módulo puro a un archivo que crea un cliente
+// Supabase al cargar).
+export type MotivoAtencion = 'rate_limit' | null
+
 export type Conversacion = {
   telefono: string
   requiereAtencion: boolean
+  motivoAtencion: MotivoAtencion
 }
 
 // Tipos de mensaje que el bot no resuelve y que hacen que su fila entrante
@@ -47,16 +55,21 @@ export function marcaPendiente(fila: {
  */
 export function construirConversaciones(
   filasPorRecencia: { telefono: string | null }[],
-  pendientes: Iterable<string>,
+  pendientes: Iterable<{ telefono: string; motivo: MotivoAtencion }>,
 ): Conversacion[] {
-  const setPendientes = new Set(pendientes)
+  const mapaPendientes = new Map<string, MotivoAtencion>()
+  for (const p of pendientes) mapaPendientes.set(p.telefono, p.motivo)
   const vistos = new Set<string>()
   const out: Conversacion[] = []
   for (const fila of filasPorRecencia) {
     const tel = fila.telefono
     if (tel && !vistos.has(tel)) {
       vistos.add(tel)
-      out.push({ telefono: tel, requiereAtencion: setPendientes.has(tel) })
+      out.push({
+        telefono: tel,
+        requiereAtencion: mapaPendientes.has(tel),
+        motivoAtencion: mapaPendientes.get(tel) ?? null,
+      })
     }
   }
   return out

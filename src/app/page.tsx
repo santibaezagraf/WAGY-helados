@@ -93,6 +93,11 @@ export default async function Home({
     const telefonosRequierenAtencion = conversaciones
         .filter((c) => c.requiereAtencion)
         .map((c) => c.telefono)
+    // Subconjunto pausado por el rate-limit anti-DoS: aviso distinto del
+    // genérico "requiere intervención humana" (ver columns.tsx).
+    const telefonosRateLimit = conversaciones
+        .filter((c) => c.motivoAtencion === "rate_limit")
+        .map((c) => c.telefono)
 
     return (
         <div className="flex min-h-screen flex-col">
@@ -105,6 +110,7 @@ export default async function Home({
                     pageCount={pageCount}
                     rowCount={pedidos ? pedidos.length : 0}
                     telefonosRequierenAtencion={telefonosRequierenAtencion}
+                    telefonosRateLimit={telefonosRateLimit}
                 />
             </main>
         </div>

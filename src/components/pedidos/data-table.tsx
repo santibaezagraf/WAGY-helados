@@ -91,6 +91,8 @@ interface DataTableProps {
   rowCount: number,
   /** Teléfonos que recibieron algo no procesable por el bot y esperan a una persona. */
   telefonosRequierenAtencion?: string[],
+  /** Teléfonos pausados por el rate-limit anti-DoS (aviso distinto del anterior). */
+  telefonosRateLimit?: string[],
 }
 
 export function DataTable({
@@ -100,6 +102,7 @@ export function DataTable({
   pageCount,
   rowCount,
   telefonosRequierenAtencion = [],
+  telefonosRateLimit = [],
 }: DataTableProps) {
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
@@ -164,6 +167,10 @@ export function DataTable({
     () => new Set(telefonosRequierenAtencion),
     [telefonosRequierenAtencion],
   )
+  const telefonosRateLimitSet = React.useMemo(
+    () => new Set(telefonosRateLimit),
+    [telefonosRateLimit],
+  )
 
   const columns = React.useMemo(() => createColumns({
     editingOrderId,
@@ -174,7 +181,8 @@ export function DataTable({
     setChattingOrderId,
     onRowSelect: handleRowSelect,
     telefonosAtencion: telefonosAtencionSet,
-  }), [editingOrderId, editingCostoId, chattingOrderId, handleRowSelect, telefonosAtencionSet])
+    telefonosRateLimit: telefonosRateLimitSet,
+  }), [editingOrderId, editingCostoId, chattingOrderId, handleRowSelect, telefonosAtencionSet, telefonosRateLimitSet])
 
   const router = useRouter()
   const searchParams = useSearchParams()

@@ -6,6 +6,7 @@ import { Database } from '@/types/supabase'
 import { Pedido } from '@/types/pedidos'
 import { createClient as createUserClient } from '@/lib/supabase-server'
 import { enviarMensajeManual, enviarResumenYPedirConfirmacion, marcarLeidoWhatsapp } from '@/lib/whatsapp'
+import { estaRateLimiteado } from '@/lib/bot/rate-limit'
 import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
 import {
   activarAtencionHumana,
@@ -167,7 +168,7 @@ export async function firmarMedia(path: string): Promise<string | null> {
 /** Lista de teléfonos que esperan intervención humana (badge + contador del registro). */
 export async function getTelefonosRequierenAtencion(): Promise<string[]> {
   await exigirUsuario()
-  return telefonosRequierenAtencion()
+  return (await telefonosRequierenAtencion()).map((r) => r.telefono)
 }
 
 /**
@@ -201,16 +202,19 @@ export async function getConversacionesRecientes(): Promise<Conversacion[]> {
 
   const { data, error } = await supabaseAdminSinTipar
     .from('conversaciones_inbox')
-    .select('telefono, requiere_atencion')
+    .select('telefono, requiere_atencion, motivo_atencion')
     .gte('ultimo_at', desde)
     .order('ultimo_at', { ascending: false })
     .limit(500)
 
   if (!error) {
-    return (data ?? []).map((r: { telefono: string; requiere_atencion: boolean }) => ({
-      telefono: r.telefono,
-      requiereAtencion: r.requiere_atencion,
-    }))
+    return (data ?? []).map(
+      (r: { telefono: string; requiere_atencion: boolean; motivo_atencion: string | null }) => ({
+        telefono: r.telefono,
+        requiereAtencion: r.requiere_atencion,
+        motivoAtencion: r.motivo_atencion === 'rate_limit' ? 'rate_limit' : null,
+      }),
+    )
   }
 
   // Fallback (vista inexistente / error): método anterior sobre mensajes_chat.
@@ -333,6 +337,20 @@ export async function resetearRateLimitAccion(telefono: string): Promise<void> {
 }
 
 /**
+ * Estado EN VIVO del rate-limit anti-DoS: ¿este teléfono está frenado ahora
+ * mismo? Se recalcula sobre la marcha (misma cuenta que usa el webhook), no
+ * depende de `atencion_humana.requiere_atencion` — ese flag es un aviso de
+ * "no visto" que se limpia al abrir el chat, así que si el chat YA estaba
+ * abierto cuando el cliente se pasó del límite, nunca se vería. El panel del
+ * chat lo usa para un banner constante que solo desaparece cuando el cliente
+ * deja de estar limitado de verdad (ventana vencida o reset manual).
+ */
+export async function getEstadoRateLimit(telefono: string): Promise<boolean> {
+  await exigirUsuario()
+  return estaRateLimiteado(telefono)
+}
+
+/**
  * Pedido "vigente" del teléfono para el panel del chat modal: el más reciente
  * en armado o en cocina. Misma ventana y filtros que el lookup de pedidoActivo
  * del bot (12h, estados intervenibles, enviado=false), así el panel muestra
@@ -379,13 +397,15 @@ export async function getDatosChat(telefono: string): Promise<{
   atencionActiva: boolean
   pedido: Pedido | null
   bloqueado: boolean
+  enRateLimit: boolean
 }> {
   await exigirUsuario()
-  const [historial, estado, pedido, bloqueado] = await Promise.all([
+  const [historial, estado, pedido, bloqueado, enRateLimit] = await Promise.all([
     traerHistorialPagina(telefono),
     estadoAtencion(telefono),
     traerPedidoActivo(telefono),
     estaBloqueado(telefono),
+    estaRateLimiteado(telefono),
   ])
   return {
     historial: historial.mensajes,
@@ -393,6 +413,7 @@ export async function getDatosChat(telefono: string): Promise<{
     atencionActiva: estado.activa,
     pedido,
     bloqueado,
+    enRateLimit,
   }
 }
 

@@ -18,16 +18,28 @@ describe('construirConversaciones', () => {
 
   it('marca requiereAtencion según el set de pendientes', () => {
     const filas = [{ telefono: '5491111' }, { telefono: '5492222' }];
-    expect(construirConversaciones(filas, ['5492222'])).toEqual([
-      { telefono: '5491111', requiereAtencion: false },
-      { telefono: '5492222', requiereAtencion: true },
+    expect(construirConversaciones(filas, [{ telefono: '5492222', motivo: null }])).toEqual([
+      { telefono: '5491111', requiereAtencion: false, motivoAtencion: null },
+      { telefono: '5492222', requiereAtencion: true, motivoAtencion: null },
+    ]);
+  });
+
+  it('propaga el motivo rate_limit para distinguirlo del genérico', () => {
+    const filas = [{ telefono: '5491111' }, { telefono: '5492222' }];
+    const out = construirConversaciones(filas, [
+      { telefono: '5491111', motivo: 'rate_limit' },
+      { telefono: '5492222', motivo: null },
+    ]);
+    expect(out).toEqual([
+      { telefono: '5491111', requiereAtencion: true, motivoAtencion: 'rate_limit' },
+      { telefono: '5492222', requiereAtencion: true, motivoAtencion: null },
     ]);
   });
 
   it('ignora filas sin teléfono (null)', () => {
     const filas = [{ telefono: null }, { telefono: '5491111' }, { telefono: null }];
     expect(construirConversaciones(filas, [])).toEqual([
-      { telefono: '5491111', requiereAtencion: false },
+      { telefono: '5491111', requiereAtencion: false, motivoAtencion: null },
     ]);
   });
 
@@ -36,14 +48,14 @@ describe('construirConversaciones', () => {
       { telefono: '5491111' },
       { telefono: '5491111' },
     ];
-    const out = construirConversaciones(filas, ['5491111']);
-    expect(out).toEqual([{ telefono: '5491111', requiereAtencion: true }]);
+    const out = construirConversaciones(filas, [{ telefono: '5491111', motivo: null }]);
+    expect(out).toEqual([{ telefono: '5491111', requiereAtencion: true, motivoAtencion: null }]);
   });
 
   it('un pendiente sin actividad reciente no aparece en la lista', () => {
     // El badge de la tabla puede marcar un teléfono que no esté entre las filas
     // recientes; la lista del header solo incluye los que tienen actividad.
-    expect(construirConversaciones([], ['5499999'])).toEqual([]);
+    expect(construirConversaciones([], [{ telefono: '5499999', motivo: null }])).toEqual([]);
   });
 
   it('lista vacía → resultado vacío', () => {

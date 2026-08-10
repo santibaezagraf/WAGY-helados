@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { PriceListModal } from "@/components/pedidos/price-list-modal"
 import { AddGastoModal } from "@/components/gastos/add-gasto-modal"
 import * as React from "react"
-import { Tags, BarChart3, Receipt, MessageCircle } from "lucide-react"
+import { Tags, BarChart3, Receipt, MessageCircle, ShieldAlert } from "lucide-react"
 import { useRouter, usePathname } from "next/navigation"
 import Link from "next/link"
 import { createClient } from "@/lib/supabase-client"
@@ -69,7 +69,14 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
             const previa = prev.find((c) => c.telefono === tel)
             const resto = prev.filter((c) => c.telefono !== tel)
             return [
-              { telefono: tel, requiereAtencion: esPendiente || previa?.requiereAtencion || false },
+              {
+                telefono: tel,
+                requiereAtencion: esPendiente || previa?.requiereAtencion || false,
+                // El motivo (rate-limit vs genérico) lo confirma el evento de
+                // atencion_humana que sigue a este insert; hasta que llegue,
+                // conservamos el que ya teníamos.
+                motivoAtencion: previa?.motivoAtencion ?? null,
+              },
               ...resto,
             ]
           })
@@ -88,20 +95,24 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
           const fila = payload.new as {
             telefono?: string
             requiere_atencion?: boolean
+            motivo_atencion?: string | null
           } | null
           if (!fila?.telefono) return
           const tel = fila.telefono
           const requiere = fila.requiere_atencion === true
+          const motivo = requiere && fila.motivo_atencion === 'rate_limit' ? 'rate_limit' : null
           setConversaciones((prev) => {
             const previa = prev.find((c) => c.telefono === tel)
             // Si el teléfono no está en la lista y hay que marcarlo, lo sumamos
             // al frente; si ya está, solo actualizamos su flag in-place (no lo
             // movemos: no llegó un mensaje nuevo, solo cambió el estado).
             if (!previa) {
-              return requiere ? [{ telefono: tel, requiereAtencion: true }, ...prev] : prev
+              return requiere
+                ? [{ telefono: tel, requiereAtencion: true, motivoAtencion: motivo }, ...prev]
+                : prev
             }
             return prev.map((c) =>
-              c.telefono === tel ? { ...c, requiereAtencion: requiere } : c,
+              c.telefono === tel ? { ...c, requiereAtencion: requiere, motivoAtencion: motivo } : c,
             )
           })
         },
@@ -153,7 +164,7 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
                     className="relative flex items-center p-1 rounded hover:bg-cyan-500/40"
                     title={
                       pendientes > 0
-                        ? `${pendientes} conversación(es) esperan intervención humana`
+                        ? `${pendientes} conversación(es) necesitan tu atención`
                         : "Conversaciones recientes"
                     }
                   >
@@ -178,12 +189,25 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
                         key={c.telefono}
                         onClick={() => abrirChat(c.telefono)}
                         className="gap-2"
+                        title={
+                          c.motivoAtencion === "rate_limit"
+                            ? "Superó el límite de mensajes por hora — el bot se pausó"
+                            : c.requiereAtencion
+                              ? "Espera intervención humana"
+                              : undefined
+                        }
                       >
-                        <span
-                          className={`h-2 w-2 rounded-full shrink-0 ${
-                            c.requiereAtencion ? "bg-amber-500" : "bg-transparent"
-                          }`}
-                        />
+                        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+                          {c.motivoAtencion === "rate_limit" ? (
+                            <ShieldAlert className="h-3.5 w-3.5 text-orange-600" />
+                          ) : (
+                            <span
+                              className={`h-2 w-2 rounded-full ${
+                                c.requiereAtencion ? "bg-amber-500" : "bg-transparent"
+                              }`}
+                            />
+                          )}
+                        </span>
                         <span className={c.requiereAtencion ? "font-medium" : ""}>{c.telefono}</span>
                       </DropdownMenuItem>
                     ))

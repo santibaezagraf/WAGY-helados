@@ -2,7 +2,7 @@
 
 import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { createClient as createUserClient } from '@/lib/supabase-server'
-import { armarPreviewMensaje } from '@/lib/conversaciones-utils'
+import { armarPreviewMensaje, type MotivoAtencion } from '@/lib/conversaciones-utils'
 
 // Cliente service-role: lee la vista `conversaciones_inbox` y atencion_humana
 // bypasseando RLS (igual que el resto del pipeline del dashboard). La vista es
@@ -21,6 +21,7 @@ export type FilaInbox = {
   preview: string | null
   ultimoAt: string | null
   requiereAtencion: boolean
+  motivoAtencion: MotivoAtencion
   tomaActiva: boolean
   bloqueado: boolean
 }
@@ -55,6 +56,7 @@ type FilaVista = {
   requiere_atencion: boolean
   bloqueado: boolean
   toma_activa: boolean
+  motivo_atencion: string | null
 }
 
 /**
@@ -111,6 +113,7 @@ export async function getInboxConversaciones(
       preview: null,
       ultimoAt: r.updated_at,
       requiereAtencion: false,
+      motivoAtencion: null,
       tomaActiva: false,
       bloqueado: true,
     }))
@@ -141,6 +144,7 @@ export async function getInboxConversaciones(
     }),
     ultimoAt: r.ultimo_at,
     requiereAtencion: r.requiere_atencion,
+    motivoAtencion: r.motivo_atencion === 'rate_limit' ? 'rate_limit' : null,
     tomaActiva: r.toma_activa,
     bloqueado: r.bloqueado,
   }))

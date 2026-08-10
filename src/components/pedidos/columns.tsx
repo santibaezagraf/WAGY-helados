@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { TruncatedText } from "@/components/ui/truncated-text"
-import { ArrowUpDown, MoreHorizontal, Check, X, Clock, Copy, Edit, MessageCircle, Paperclip } from "lucide-react"
+import { ArrowUpDown, MoreHorizontal, Check, X, Clock, Copy, Edit, MessageCircle, Paperclip, ShieldAlert } from "lucide-react"
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -35,8 +35,11 @@ export const createColumns = (config: {
     chattingOrderId: number | null
     setChattingOrderId: (id: number | null) => void
     onRowSelect: (row: Row<Pedido>, event: React.MouseEvent<HTMLButtonElement>) => void
-    /** Teléfonos que esperan intervención humana (mandaron un media/ubicación). */
+    /** Teléfonos que esperan intervención humana (mandaron un media/ubicación, o una
+     *  consulta que el bot no pudo responder). */
     telefonosAtencion: Set<string>
+    /** Teléfonos pausados por el rate-limit anti-DoS (>=40 msj/hora) — aviso distinto. */
+    telefonosRateLimit: Set<string>
 }): ColumnDef<Pedido>[] => [
     {
         id: "select",
@@ -73,13 +76,21 @@ export const createColumns = (config: {
         header: "Teléfono",
         cell: ({ row }) => {
             const telefono = row.getValue("telefono") as string
+            const enRateLimit = config.telefonosRateLimit.has(telefono)
             const requiereAtencion = config.telefonosAtencion.has(telefono)
             return (
                 <div className="flex items-center gap-1.5">
                     <span>{telefono}</span>
-                    {requiereAtencion && (
+                    {enRateLimit ? (
                         <span
-                            title="Mandó un archivo o ubicación — requiere intervención humana"
+                            title="Alcanzó el límite de mensajes por hora — el bot se pausó automáticamente"
+                            className="inline-flex items-center gap-1 rounded-full bg-orange-100 text-orange-700 px-1.5 py-0.5 text-[10px] font-medium"
+                        >
+                            <ShieldAlert className="h-3 w-3" />
+                        </span>
+                    ) : requiereAtencion && (
+                        <span
+                            title="Mandó un archivo o ubicación, o hizo una consulta — requiere intervención humana"
                             className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-700 px-1.5 py-0.5 text-[10px] font-medium"
                         >
                             <Paperclip className="h-3 w-3" />

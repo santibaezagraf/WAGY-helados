@@ -4,13 +4,14 @@ import * as React from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { createClient } from "@/lib/supabase-client"
-import { Send, Bot, User, Loader2, AlertCircle, FileText, MapPin, Download, Pencil, ClipboardCheck, Ban, ShieldCheck, RotateCcw, CheckCircle2, ArrowLeft, ChevronDown } from "lucide-react"
+import { Send, Bot, User, Loader2, AlertCircle, FileText, MapPin, Download, Pencil, ClipboardCheck, Ban, ShieldCheck, ShieldAlert, RotateCcw, CheckCircle2, ArrowLeft, ChevronDown } from "lucide-react"
 import { etiquetaFecha, mismoDia } from "@/lib/fecha-chat"
 import { formatearHoraAR } from "@/lib/zona-horaria"
 import {
   getDatosChat,
   getMensajesAntiguos,
   getPedidoActivoChat,
+  getEstadoRateLimit,
   bloquearNumeroAccion,
   desbloquearNumeroAccion,
   resetearRateLimitAccion,
@@ -35,6 +36,13 @@ export interface ChatPanelProps {
   /** Si se pasa, muestra una flecha de "volver" en el encabezado (para el layout
    *  de dos paneles en mobile). En el modal no se usa (cierra con la X del Dialog). */
   onVolver?: () => void
+  /** True cuando el panel se renderiza dentro de `ChatModal`: la X de cerrar del
+   *  Dialog es `absolute right-4 top-4` sobre el propio contenido (DialogContent
+   *  va con `p-0`), así que sin este margen los botones "Editar"/"Enviar resumen"
+   *  del panel del pedido (que se empujan al extremo derecho con `ml-auto`)
+   *  quedan tapados/superpuestos por la X. La vista inline de /conversaciones no
+   *  tiene esa X, así que no reserva el espacio. Default false. */
+  enModal?: boolean
 }
 
 const esOutbound = (rol: string) => rol === "bot" || rol === "operador"
@@ -163,7 +171,7 @@ function CuerpoMensaje({ m }: { m: MensajeChat }) {
  * con la lista de mensajes en flex-1). Lo usan el `ChatModal` (dentro de un
  * Dialog) y la vista `/conversaciones` (panel derecho estilo WhatsApp Web).
  */
-export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatPanelProps) {
+export function ChatPanel({ telefono, pedidoId, activo = true, onVolver, enModal = false }: ChatPanelProps) {
   const [mensajes, setMensajes] = React.useState<MensajeChat[]>([])
   const [cargando, setCargando] = React.useState(false)
   const [texto, setTexto] = React.useState("")
@@ -173,6 +181,12 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
   // Moderación manual del número: bloqueo persistente + reset del rate-limit.
   const [bloqueado, setBloqueado] = React.useState(false)
   const [moderando, setModerando] = React.useState(false)
+  // Estado EN VIVO del rate-limit anti-DoS (no el flag "no visto" de
+  // atencion_humana, que se limpia al abrir el chat — ver comentario en
+  // getEstadoRateLimit). Se re-consulta con cada mensaje entrante y con el
+  // mismo tick de 1' que re-evalúa la ventana de 24h, así el banner desaparece
+  // solo cuando el cliente deja de estar limitado de verdad.
+  const [enRateLimit, setEnRateLimit] = React.useState(false)
   const [aviso, setAviso] = React.useState<string | null>(null)
   // Pedido vigente (borrador/cocina/esperando_cancelacion) del teléfono, para
   // el panel de acceso rápido: editarlo o mandarle el resumen de confirmación.
@@ -250,13 +264,14 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
     // Una sola llamada trae historial + toma humana + pedido vigente + bloqueo
     // (autentica una vez, lee las 4 cosas en paralelo server-side).
     getDatosChat(telefono)
-      .then(({ historial, hayMasHistorial, atencionActiva, pedido, bloqueado }) => {
+      .then(({ historial, hayMasHistorial, atencionActiva, pedido, bloqueado, enRateLimit }) => {
         if (cancelado) return
         setMensajes(historial)
         setHayMas(hayMasHistorial)
         setAtencionActiva(atencionActiva)
         setPedidoActivo(pedido)
         setBloqueado(bloqueado)
+        setEnRateLimit(enRateLimit)
       })
       .catch((e) => {
         if (!cancelado) setError(e instanceof Error ? e.message : "No se pudo cargar el chat")
@@ -315,7 +330,13 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
           // webhook prende ante cada mensaje entrante con toma humana activa) y
           // de paso mandamos el read-receipt a Meta. Sin esto, el propio chat
           // que estás mirando aparecería resaltado como "no leído" al listado.
-          if (fila.rol === "cliente") marcarAtendido(telefono).catch(() => {})
+          if (fila.rol === "cliente") {
+            marcarAtendido(telefono).catch(() => {})
+            // Un mensaje nuevo del cliente es el momento en que más importa
+            // saber si acaba de cruzar el límite (el webhook lo frena justo en
+            // ese instante) — no esperamos al tick de 1'.
+            getEstadoRateLimit(telefono).then(setEnRateLimit).catch(() => {})
+          }
           // Fallback para refrescar el panel del pedido cuando la migración
           // que suma `pedidos` a la publicación de Realtime todavía no está
           // aplicada: un mensaje del bot suele ser la señal indirecta de que
@@ -356,12 +377,18 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
     }
   }, [activo, telefono, refrescarPedido])
 
-  // Re-evalúa la ventana de 24h cada minuto mientras el panel está activo.
+  // Re-evalúa la ventana de 24h y el rate-limit cada minuto mientras el panel
+  // está activo. El rate-limit importa acá porque su conteo es una ventana
+  // deslizante: aunque el cliente no vuelva a escribir, el banner debe poder
+  // apagarse solo cuando esos mensajes viejos salen de la ventana de 1h.
   React.useEffect(() => {
     if (!activo) return
-    const t = setInterval(() => setAhora(Date.now()), 60_000)
+    const t = setInterval(() => {
+      setAhora(Date.now())
+      getEstadoRateLimit(telefono).then(setEnRateLimit).catch(() => {})
+    }, 60_000)
     return () => clearInterval(t)
-  }, [activo])
+  }, [activo, telefono])
 
   // Marca este teléfono como "chat abierto" mientras el panel está activo. Lo lee
   // el componente de notificaciones para NO disparar un toast por un mensaje que
@@ -553,6 +580,7 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
     setAviso(null)
     try {
       await resetearRateLimitAccion(telefono)
+      setEnRateLimit(false)
       setAviso("Límite reseteado — el cliente puede volver a escribirle al bot.")
     } catch (e) {
       setError(e instanceof Error ? e.message : "No se pudo resetear el límite")
@@ -567,7 +595,11 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
           (info + editar + enviar resumen) al extremo derecho. `flex-wrap` hace
           que en anchos chicos (modal) el bloque del pedido baje a una segunda
           línea en vez de desbordar. */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 bg-[#075E54] px-4 py-2 text-white">
+      <div
+        className={`flex flex-wrap items-center gap-x-3 gap-y-2 bg-[#075E54] py-2 pl-4 text-white ${
+          enModal ? "pr-11" : "pr-4"
+        }`}
+      >
         {onVolver && (
           <button
             type="button"
@@ -636,16 +668,40 @@ export function ChatPanel({ telefono, pedidoId, activo = true, onVolver }: ChatP
 
       {/* Barra de moderación: bloquear/desbloquear el número y resetear el
           rate-limit anti-DoS. El bloqueo afecta SOLO al bot (el operador puede
-          seguir escribiendo a mano). */}
-      <div className="flex items-center justify-between gap-2 border-b bg-slate-50 px-4 py-1.5">
-        <span className="text-[11px] text-slate-400">
-          {bloqueado ? "🚫 Bloqueado — el bot no le responde" : "Moderación"}
+          seguir escribiendo a mano). Mientras el cliente esté REALMENTE
+          frenado por el anti-DoS (`enRateLimit`, recalculado en vivo — no el
+          aviso "no visto" de atencion_humana, que se apaga con solo abrir el
+          chat) la barra se pone naranja con el aviso, así queda visible de
+          forma constante incluso si el chat ya estaba abierto cuando el
+          cliente se pasó del límite. Los mismos 2 botones siguen ahí siempre. */}
+      <div
+        className={`flex items-center justify-between gap-2 border-b px-4 py-1.5 ${
+          enRateLimit ? "bg-orange-50 border-orange-200" : "bg-slate-50"
+        }`}
+      >
+        <span
+          className={`flex items-center gap-1.5 text-[11px] ${
+            enRateLimit ? "font-medium text-orange-800" : "text-slate-400"
+          }`}
+        >
+          {enRateLimit ? (
+            <>
+              <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+              Superó el límite de mensajes por hora — el bot está pausado para este cliente
+            </>
+          ) : bloqueado ? (
+            "🚫 Bloqueado — el bot no le responde"
+          ) : (
+            "Moderación"
+          )}
         </span>
         <div className="flex shrink-0 items-center gap-1">
           <Button
             variant="ghost"
             size="sm"
-            className="h-6 gap-1 px-2 text-[11px] text-slate-500 hover:text-slate-700"
+            className={`h-6 gap-1 px-2 text-[11px] ${
+              enRateLimit ? "text-orange-800 hover:text-orange-900" : "text-slate-500 hover:text-slate-700"
+            }`}
             onClick={handleResetLimite}
             disabled={moderando}
             title="Resetear el límite anti-spam: el cliente vuelve a poder escribirle al bot de inmediato (sin esperar 1 h)"
