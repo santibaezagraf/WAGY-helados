@@ -15,6 +15,11 @@
 #   STAGING_SUPABASE_URL                 = https://oqrufwtuwvogdfhojips.supabase.co
 #   STAGING_SUPABASE_ANON_KEY            = <anon key de staging>
 #   STAGING_SUPABASE_SERVICE_ROLE_KEY    = <service_role key de staging>
+#   STAGING_DB_URL                       = postgresql://postgres.oqrufwtuwvogdfhojips:<PASSWORD>@aws-1-sa-east-1.pooler.supabase.com:5432/postgres
+#                                          (Session pooler, puerto 5432, password url-encodeada si tiene símbolos.
+#                                           Supabase → staging → Settings → Database → Connection string → "Session pooler".
+#                                           Se usa para aplicar las migraciones pendientes a staging antes de testear —
+#                                           sin esto, staging driftea en silencio y el bot queda mudo, invisible.)
 #   GROQ_API_KEY                         = <tu Groq API key>
 # (Son claves de STAGING, no de prod: si se filtran, rotás staging sin drama.)
 #
@@ -73,6 +78,25 @@ jobs:
           echo "$NEXT_PUBLIC_SUPABASE_URL" | grep -q "oqrufwtuwvogdfhojips" \
             || { echo "::error::NEXT_PUBLIC_SUPABASE_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
           echo "OK: modo test + staging."
+
+      - name: Instalar Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.98.2
+
+      - name: Aplicar migraciones pendientes a staging
+        # Sin esto, staging driftea en silencio: una migración nueva que el
+        # esquema de staging no tiene hace fallar el camino común de TODOS los
+        # mensajes (ej. `.eq('fallido', false)` sobre una columna inexistente),
+        # el bot queda mudo, y el catch silencioso de procesar.ts lo esconde.
+        # `db push` falla ruidoso si no puede aplicar → gatea el nightly.
+        env:
+          STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
+        run: |
+          test -n "$STAGING_DB_URL" || { echo "::error::Falta el secret STAGING_DB_URL"; exit 1; }
+          echo "$STAGING_DB_URL" | grep -q "oqrufwtuwvogdfhojips" \
+            || { echo "::error::STAGING_DB_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
+          supabase db push --db-url "$STAGING_DB_URL"
 
       - name: Levantar server + correr suites
         env:
