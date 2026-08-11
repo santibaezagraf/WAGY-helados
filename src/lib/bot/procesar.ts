@@ -1177,7 +1177,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // Incluimos 'operador' porque, al reactivarse el bot tras una toma humana,
     // el cliente suele estar respondiendo al último mensaje del operador.
     const primerNuevo = nuevosCliente[0]?.created_at ?? new Date().toISOString();
-    const { data: ultimoBot } = await supabaseAdmin
+    const { data: ultimoBot, error: errUltimoBot } = await supabaseAdmin
       .from('mensajes_chat')
       .select('texto, created_at, rol')
       .eq('telefono', numeroCliente)
@@ -1191,12 +1191,20 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    // Un error acá (ej. columna inexistente por drift de esquema) devolvía data=null
+    // en silencio: el bot seguía sin contexto y, en el peor caso, la próxima query
+    // vacía lo dejaba mudo sin ninguna señal. En modo test lo propagamos para que el
+    // harness lo marque como fallo en vez de "no respondió".
+    if (errUltimoBot) {
+      console.error("❌ Error leyendo el último turno para contexto:", errUltimoBot);
+      if (process.env.BOT_TEST_MODE === '1') throw new Error(`contexto ultimoBot: ${errUltimoBot.message}`);
+    }
 
     mensajesParaIA = ultimoBot ? [ultimoBot, ...nuevosCliente] : nuevosCliente;
     console.log(`📚 Hay pedidoActivo (${pedidoActivo.estado}): pasamos ${nuevosCliente.length} mensaje(s) nuevo(s)${ultimoBot ? ' + último turno del bot' : ''}.`);
   } else {
     const hace15Minutos = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-    const { data: historial } = await supabaseAdmin
+    const { data: historial, error: errHistorial } = await supabaseAdmin
       .from('mensajes_chat')
       .select('texto, created_at, rol')
       .eq('telefono', numeroCliente)
@@ -1205,6 +1213,14 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       .gte('created_at', hace15Minutos)
       .order('created_at', { ascending: true })
       .limit(15);
+    // Si esta query falla (ej. columna 'fallido' inexistente por drift de esquema),
+    // data=null → mensajesParaIA=[] → return temprano "sin mensajes" = SILENCIO TOTAL
+    // sin ninguna traza de error. Es exactamente el modo de falla que dejó al bot mudo
+    // en staging durante días. Lo hacemos ruidoso, y en modo test lo propagamos.
+    if (errHistorial) {
+      console.error("❌ Error leyendo el historial reciente para contexto:", errHistorial);
+      if (process.env.BOT_TEST_MODE === '1') throw new Error(`contexto historial: ${errHistorial.message}`);
+    }
 
     mensajesParaIA = historial ?? [];
     console.log(`📚 Sin pedidoActivo: traemos ${mensajesParaIA.length} mensajes recientes (últimos 15 min, ambos roles) para captar el pedido en armado.`);
@@ -2217,6 +2233,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   } catch (flowError) {
     // Cualquier error inesperado en la lógica de flow post-IA cae acá.
     // El error del structured output ya se maneja arriba con su propio try/catch.
-    console.error("❌ Error en el flow post-IA:", flowError);
+    console.error("❌ Error en el flow post-IA:", flowError instanceof Error ? flowError.stack : flowError);
+    // En modo test propagamos para que /api/dev/simular-conversacion devuelva
+    // { ok:false, error } y el harness lo marque como fallo. En prod seguimos
+    // tragándolo (no queremos tumbar el worker), pero ahora con stack completo.
+    if (process.env.BOT_TEST_MODE === '1') throw flowError;
   }
 }
