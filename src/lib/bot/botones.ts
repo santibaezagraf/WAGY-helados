@@ -41,6 +41,35 @@ export const RESPUESTAS_RAPIDAS: Record<string, string> = {
 };
 
 /**
+ * Botones de TIPO DE HELADO (de agua / de crema): los manda el bot cuando el
+ * cliente dio la cantidad pero no el tipo (ver procesar.ts > pedirDatosFaltantes,
+ * que arma estos ids). A diferencia de RESPUESTAS_RAPIDAS, el id lleva la
+ * CANTIDAD ("resp_tipo_agua_50"), así el click se convierte en el texto canónico
+ * "50 de agua" y el turno siguiente no tiene que deducir el número del historial.
+ * Igual que las respuestas rápidas, el texto sigue el pipeline normal de texto
+ * (QStash + LLM), que es quien sabe fusionarlo con el pedido en armado.
+ *
+ * Devuelve null si el id no es de esta familia (o si la cantidad no es válida).
+ */
+export function parsearBotonTipoHelado(
+  buttonId: string,
+): { tipo: 'agua' | 'crema'; cantidad: number; texto: string } | null {
+  const familias: Array<{ prefijo: string; tipo: 'agua' | 'crema' }> = [
+    { prefijo: 'resp_tipo_agua_', tipo: 'agua' },
+    { prefijo: 'resp_tipo_crema_', tipo: 'crema' },
+  ];
+
+  for (const { prefijo, tipo } of familias) {
+    if (!buttonId.startsWith(prefijo)) continue;
+    const cantidad = Number(buttonId.slice(prefijo.length));
+    if (!Number.isInteger(cantidad) || cantidad <= 0) return null;
+    return { tipo, cantidad, texto: `${cantidad} de ${tipo}` };
+  }
+
+  return null;
+}
+
+/**
  * Parsea un button_id con formato "<accion>_<pedidoId>". Devuelve null si
  * el id no matchea ninguna de las acciones conocidas (no es un botón nuestro
  * o es de una versión vieja).

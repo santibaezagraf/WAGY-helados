@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { construirContextoNegocio, elegirTextoDelegacion } from './consultas-negocio';
+import { construirContextoNegocio, construirContextoTipoHelado, elegirTextoDelegacion } from './consultas-negocio';
 import type { PedidoActivoContext } from './procesar';
 import type { ListaPreciosPublica } from '@/lib/precios-publico';
 
@@ -19,6 +19,8 @@ function pa(extra: Partial<PedidoActivoContext>): PedidoActivoContext {
 
 const listaDemo: ListaPreciosPublica = {
   nombre: 'Demo',
+  saboresAgua: ['Frutilla', 'Uva'],
+  saboresCrema: ['Chocolate'],
   agua: [{ min_cantidad: 1, precio_unitario: 500 }],
   crema: [{ min_cantidad: 1, precio_unitario: 400 }],
 };
@@ -30,6 +32,8 @@ describe('construirContextoNegocio', () => {
     expect(ctx).toMatch(/POR UNIDAD/);
     expect(ctx).toMatch(/Sabores de los de agua:/);
     expect(ctx).toMatch(/Sabores de los de crema:/);
+    // Ancla anti-delegación: los sabores son un dato que el bot SÍ conoce.
+    expect(ctx).toMatch(/Estos sabores los sabés SIEMPRE/);
     expect(ctx).toMatch(/Demora estimada de entrega:/);
     expect(ctx).toMatch(/efectivo o transferencia/);
   });
@@ -79,12 +83,38 @@ describe('elegirTextoDelegacion', () => {
     expect(a).not.toBe(b);
   });
 
-  it('con yaAvisado usa la variante "ya avisé" (no vuelve a sonar como recién enterado)', () => {
+  it('con yaAvisado usa una variante "ya avisé" (no vuelve a sonar como recién enterado)', () => {
     const texto = elegirTextoDelegacion(0, true);
-    expect(texto).toMatch(/ya le pas/i);
+    expect(texto).toMatch(/equipo/i);
+  });
+
+  it('con yaAvisado también rota (no repite palabra por palabra al insistir)', () => {
+    const a = elegirTextoDelegacion(0, true);
+    const b = elegirTextoDelegacion(1, true);
+    expect(a).not.toBe(b);
   });
 
   it('es determinista para el mismo seed', () => {
     expect(elegirTextoDelegacion(5, false)).toBe(elegirTextoDelegacion(5, false));
+  });
+});
+
+describe('construirContextoTipoHelado', () => {
+  it('acota el contexto a la cantidad, lo que escribió el cliente y los sabores reales', () => {
+    const ctx = construirContextoTipoHelado(50, 'quiero 50 helados de frutilla');
+    expect(ctx).toMatch(/Cantidad que pidió: 50/);
+    expect(ctx).toMatch(/quiero 50 helados de frutilla/);
+    expect(ctx).toMatch(/Sabores de los de agua:.*Frutilla/);
+    expect(ctx).toMatch(/Sabores de los de crema:.*Chocolate/);
+    // Ancla del caso que motivó todo: un sabor puede estar en los dos tipos, así
+    // que el modelo no debe "resolverlo" por su cuenta.
+    expect(ctx).toMatch(/puede existir en los dos tipos/);
+  });
+
+  it('no filtra precios ni otros datos del negocio (la pregunta es solo por el tipo)', () => {
+    const ctx = construirContextoTipoHelado(20, 'mandame 20 helados');
+    expect(ctx).not.toMatch(/Precios/);
+    expect(ctx).not.toMatch(/alias/i);
+    expect(ctx).not.toMatch(/Demora/);
   });
 });

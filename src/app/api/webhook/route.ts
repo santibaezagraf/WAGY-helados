@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { Client as QStashClient } from '@upstash/qstash';
 import { Database } from '@/types/supabase';
-import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS } from '@/lib/bot/botones';
+import { ejecutarBoton, parsearBotonId, parsearBotonTipoHelado, RESPUESTAS_RAPIDAS } from '@/lib/bot/botones';
 import { enviarMensajeWhatsApp, descargarYGuardarMedia, transcribirAudio, esTranscripcionUtil } from '@/lib/whatsapp';
 import { atencionHumanaActiva, estaBloqueado, intervencionHumanaReciente, marcarRequiereAtencion, tocarAtencionHumana } from '@/lib/bot/atencion-humana';
 import { estaRateLimiteado, RATE_LIMIT_MAX } from '@/lib/bot/rate-limit';
@@ -500,6 +500,15 @@ async function manejarInteractivo(
   if (textoRapido) {
     console.log(`⚡ Respuesta rápida "${buttonId}" → texto "${textoRapido}".`);
     return await guardarComoTextoYAgendar(numeroCliente, textoRapido, waMessageId);
+  }
+
+  // Botón de tipo de helado (de agua / de crema): el id lleva la cantidad, así
+  // que lo pasamos a su texto canónico ("50 de agua") y sigue el pipeline normal
+  // de texto, igual que una respuesta rápida.
+  const tipoHelado = parsearBotonTipoHelado(buttonId);
+  if (tipoHelado) {
+    console.log(`⚡ Botón de tipo de helado "${buttonId}" → texto "${tipoHelado.texto}".`);
+    return await guardarComoTextoYAgendar(numeroCliente, tipoHelado.texto, waMessageId);
   }
 
   const parsed = parsearBotonId(buttonId);

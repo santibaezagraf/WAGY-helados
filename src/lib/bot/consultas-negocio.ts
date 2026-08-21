@@ -40,6 +40,7 @@ const MODELOS_CONSULTA = [
   'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
   'moonshotai/kimi-k2-instruct',
+  'qwen/qwen3-32b',
 ] as const;
 
 // Timeout defensivo: esto corre en el worker de QStash (no en el webhook), pero
@@ -84,6 +85,7 @@ export function construirContextoNegocio(
   partes.push('- Se venden POR UNIDAD (no por kilo, gramo, pote, porción, bola ni cucurucho).');
   partes.push(`- Sabores de los de agua: ${SABORES.agua.join(', ')}.`);
   partes.push(`- Sabores de los de crema: ${SABORES.crema.join(', ')}.`);
+  partes.push('- Estos sabores los sabés SIEMPRE: si preguntan qué sabores hay (de agua o de crema), respondé con la lista, nunca lo delegues a una persona.');
   partes.push(
     `- Envíos: GRATIS en compras de ${formatearPesos(ENVIOS.minimoGratis)} o más. Por menos de eso, se consulta el costo o el cliente pasa a retirar por el local.`,
   );
@@ -155,18 +157,68 @@ REGLAS ESTRICTAS (para no inventar ni filtrar información de más):
 4. Si la pregunta no tiene NADA que ver con la heladería (bromas, off-topic, sinsentidos), puede_responder=false.
 5. Cuando la respuesta sirva para avanzar el pedido, cerrá reencauzando (ej: "¿cuántos querés?").
 6. No confirmes ni modifiques el pedido; solo respondé la pregunta.
+7. Los SABORES (de agua y de crema) SIEMPRE están en el CONTEXTO: si preguntan qué sabores hay, cuáles son, o si tenés tal sabor, respondé con la lista y NUNCA delegues. Ejemplo: "¿qué sabores de crema hay?" → puede_responder=true, listás los de crema.
 
 Devolvé el objeto { puede_responder, respuesta }.`;
 
 /**
- * Llama al modelo para responder UNA consulta de negocio con el contexto curado.
- * NO testeada (network), como `transcribirAudio`: la lógica testeable vive en
- * `construirContextoNegocio` y en el schema.
+ * Motor compartido de las respuestas libres ACOTADAS de este módulo (consulta de
+ * negocio y pregunta por el tipo de helado): una llamada con schema chico,
+ * temperature 0, timeout, y la misma política de fallback por 429 que la
+ * extracción. NO testeada (network), como `transcribirAudio`: lo testeable son
+ * los constructores de contexto y los schemas.
  *
  * FAIL-SAFE: ante cualquier error (timeout, validación, cuota agotada en toda la
- * cadena) devuelve `{ puede_responder: false, respuesta: null }` — el llamador
- * delega a un humano, que es exactamente el comportamiento previo. Una respuesta
- * libre que falla nunca rompe la conversación.
+ * cadena) devuelve `null` y el llamador cae a su camino determinista (delegar a
+ * un humano / texto fijo). Una respuesta libre que falla nunca rompe la
+ * conversación.
+ */
+async function generarAcotado<T>(
+  etiqueta: string,
+  system: string,
+  prompt: string,
+  schema: z.ZodType<T>,
+  telefono: string | null,
+): Promise<T | null> {
+  for (let idx = 0; idx < MODELOS_CONSULTA.length; idx++) {
+    const modelo = MODELOS_CONSULTA[idx];
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const { object } = await generateObject({
+        model: groq(modelo),
+        system,
+        prompt,
+        schema,
+        temperature: 0,
+        abortSignal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return object;
+    } catch (error) {
+      clearTimeout(timeout);
+      // Solo saltamos de modelo ante 429 (cuota); cualquier otro error → fail-safe.
+      if (esRateLimit(error)) {
+        const fallback = siguienteModelo(idx, MODELOS_CONSULTA);
+        console.warn(`⚠️ ${etiqueta}: "${modelo}" sin cuota (429). Fallback → ${fallback ?? 'ninguno'}.`);
+        void registrarAlertaFallback(modelo, fallback, telefono);
+        continue; // probamos el siguiente modelo de la cadena
+      }
+      console.warn(`⚠️ ${etiqueta} con "${modelo}" falló (se usa el camino determinista):`, error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+
+  // Cadena agotada por 429: fail-safe.
+  return null;
+}
+
+/**
+ * Llama al modelo para responder UNA consulta de negocio con el contexto curado.
+ *
+ * FAIL-SAFE: si el dato no está en el contexto (o el modelo falla), devuelve
+ * `{ puede_responder: false, respuesta: null }` — el llamador delega a un humano,
+ * que es exactamente el comportamiento previo a esta mejora.
  */
 export async function responderConsultaNegocio(
   pregunta: string,
@@ -175,41 +227,116 @@ export async function responderConsultaNegocio(
 ): Promise<ConsultaNegocioResultado> {
   const noSe: ConsultaNegocioResultado = { puede_responder: false, respuesta: null };
 
-  for (let idx = 0; idx < MODELOS_CONSULTA.length; idx++) {
-    const modelo = MODELOS_CONSULTA[idx];
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    try {
-      const { object } = await generateObject({
-        model: groq(modelo),
-        system: SYSTEM_PROMPT_CONSULTA,
-        prompt: `CONTEXTO:\n${contexto}\n\nPREGUNTA DEL CLIENTE: "${pregunta}"`,
-        schema: ConsultaNegocioSchema,
-        temperature: 0,
-        abortSignal: controller.signal,
-      });
-      clearTimeout(timeout);
-      // Coherencia: si dijo que puede pero no trajo texto, lo tratamos como "no sé".
-      if (object.puede_responder && object.respuesta && object.respuesta.trim()) {
-        return { puede_responder: true, respuesta: object.respuesta.trim() };
-      }
-      return noSe;
-    } catch (error) {
-      clearTimeout(timeout);
-      // Solo saltamos de modelo ante 429 (cuota); cualquier otro error → fail-safe.
-      if (esRateLimit(error)) {
-        const fallback = siguienteModelo(idx, MODELOS_CONSULTA);
-        console.warn(`⚠️ Consulta de negocio: "${modelo}" sin cuota (429). Fallback → ${fallback ?? 'ninguno'}.`);
-        void registrarAlertaFallback(modelo, fallback, telefono);
-        continue; // probamos el siguiente modelo de la cadena
-      }
-      console.warn(`⚠️ Consulta de negocio con "${modelo}" falló (se delega a humano):`, error instanceof Error ? error.message : error);
-      return noSe;
-    }
-  }
+  const object = await generarAcotado(
+    'Consulta de negocio',
+    SYSTEM_PROMPT_CONSULTA,
+    `CONTEXTO:\n${contexto}\n\nPREGUNTA DEL CLIENTE: "${pregunta}"`,
+    ConsultaNegocioSchema,
+    telefono,
+  );
+  if (!object) return noSe;
 
-  // Cadena agotada por 429: fail-safe → delegar.
+  // Coherencia: si dijo que puede pero no trajo texto, lo tratamos como "no sé".
+  if (object.puede_responder && object.respuesta && object.respuesta.trim()) {
+    return { puede_responder: true, respuesta: object.respuesta.trim() };
+  }
   return noSe;
+}
+
+// ─── Pregunta acotada por el TIPO de helado (agua o crema) ───────────────────
+//
+// Caso real: "quiero 50 helados de frutilla". El cliente dio la cantidad pero NO
+// dijo si son de agua o de crema, y no se puede deducir: frutilla existe en los
+// dos tipos. El modelo de extracción venía ADIVINANDO (metía los 50 en
+// `cantidad_agua` y "los de agua frutilla" en observaciones), o sea escribía un
+// pedido que el cliente nunca hizo.
+//
+// Acá el cliente no cometió un "error" con una respuesta fija: lo que conviene
+// decirle depende del sabor que mencionó y de en qué tipos existe. Pero es un área
+// que el bot SÍ conoce (SABORES es una constante del sistema), así que en vez de
+// sumar otro texto hardcodeado le damos el mismo tratamiento que a las consultas
+// de negocio: respuesta LIBRE pero ACOTADA a un contexto curado + schema chico,
+// con un texto determinista como piso si el modelo falla o se va de tema.
+
+/**
+ * Schema chico y cerrado de la pregunta por el tipo: un solo campo de texto, sin
+ * lugar para confirmar el pedido ni irse de tema.
+ */
+export const PreguntaTipoHeladoSchema = z.object({
+  pregunta: z
+    .string()
+    .describe('La pregunta breve (1-2 frases, rioplatense informal) para que el cliente elija si los quiere de agua o de crema. Tiene que repetir la cantidad con números.'),
+});
+
+// Largo máximo aceptable de la pregunta redactada: más que esto no son 1-2 frases,
+// es el modelo yéndose de tema. Cae al texto determinista.
+const LARGO_MAX_PREGUNTA_TIPO = 300;
+
+/**
+ * Contexto curado de la pregunta por el tipo: la cantidad, lo que escribió el
+ * cliente y los sabores reales de cada tipo. Es TODO lo que ve el modelo, así que
+ * no puede inventar sabores ni hablar de otra cosa. Pura y exportada para test.
+ */
+export function construirContextoTipoHelado(cantidad: number, textoCliente: string): string {
+  return [
+    'SITUACIÓN: el cliente pidió helados pero NO dijo de qué tipo son (de agua o de crema), y no se puede deducir.',
+    `- Cantidad que pidió: ${cantidad} (repetila con números).`,
+    `- Lo que escribió, textual: "${textoCliente}"`,
+    '',
+    'CONOCIMIENTO DEL NEGOCIO (WAGY helados, heladería):',
+    '- Hay DOS tipos de helado, los dos siempre disponibles: de AGUA y de CREMA. Se venden por unidad.',
+    `- Sabores de los de agua: ${SABORES.agua.join(', ')}.`,
+    `- Sabores de los de crema: ${SABORES.crema.join(', ')}.`,
+    '- Un mismo sabor puede existir en los dos tipos; en ese caso el cliente igual tiene que elegir el tipo.',
+  ].join('\n');
+}
+
+const SYSTEM_PROMPT_TIPO_HELADO = `Sos el asistente de WhatsApp de WAGY helados (una heladería). Hablás en español rioplatense informal (usás "vos").
+
+El cliente pidió una cantidad de helados pero NO dijo si los quiere de AGUA o de CREMA. Tu ÚNICA tarea es escribir la pregunta para que elija el tipo. El mensaje se manda con dos botones ("N de agua" / "N de crema"), así que no hace falta explicarle cómo contestar.
+
+REGLAS ESTRICTAS (para no inventar ni desviarte):
+1. Máximo 2 frases. Como mucho 1 emoji. Sin saludos largos.
+2. Repetí la cantidad con NÚMEROS, así el cliente ve que la tomaste bien.
+3. Si mencionó un sabor, usá SOLO las listas del CONTEXTO: decile en qué tipo está. Si está en los dos, decíselo. Si no está en ninguna, avisale que ese sabor no lo tenés y nombrale algunos que sí.
+4. NUNCA inventes sabores, precios, horarios, promos, demoras ni ningún dato que no esté en el CONTEXTO.
+5. Cerrá preguntando si los quiere de agua o de crema. NO pidas dirección ni forma de pago, NO confirmes ni armes el pedido, NO des precios.
+6. El cliente no se equivocó en nada: no lo corrijas ni te disculpes, solo preguntá.
+
+Devolvé el objeto { pregunta }.`;
+
+/**
+ * Redacta la pregunta por el tipo de helado. Devuelve el texto, o `null` si el
+ * modelo falló o se fue de los límites (largo, o no repitió la cantidad): en ese
+ * caso el llamador manda el texto determinista.
+ */
+export async function redactarPreguntaTipoHelado(
+  cantidad: number,
+  textoCliente: string,
+  telefono: string | null = null,
+): Promise<string | null> {
+  const object = await generarAcotado(
+    'Pregunta de tipo de helado',
+    SYSTEM_PROMPT_TIPO_HELADO,
+    construirContextoTipoHelado(cantidad, textoCliente),
+    PreguntaTipoHeladoSchema,
+    telefono,
+  );
+
+  const texto = object?.pregunta?.trim();
+  if (!texto) return null;
+  // Guardas de que la redacción respetó el encargue: breve y con la cantidad que
+  // le pasamos (si no la repite, ignoró el contexto). Cualquiera que falle → texto
+  // determinista, que siempre cumple las dos.
+  if (texto.length > LARGO_MAX_PREGUNTA_TIPO) {
+    console.warn(`⚠️ Pregunta de tipo de helado demasiado larga (${texto.length} chars). Uso el texto fijo.`);
+    return null;
+  }
+  if (!texto.includes(String(cantidad))) {
+    console.warn('⚠️ Pregunta de tipo de helado sin la cantidad. Uso el texto fijo.');
+    return null;
+  }
+  return texto;
 }
 
 // ─── Textos de delegación (rotables) ─────────────────────────────────────────
@@ -225,15 +352,25 @@ const DELEGACIONES = [
   'Uh, esa no la manejo yo 😅 Ya le avisé a una persona del equipo para que te responda 🙏',
 ];
 
-const DELEGACION_YA_AVISADO =
-  'Tranqui, ya le pasé tu consulta a una persona del equipo 🙏 En un ratito te responden.';
+// Variantes para cuando la conversación YA tenía requiere_atencion levantado
+// (delegación reciente): suenan a "ya avisé", no a recién enterarse. También
+// rotables — si el cliente insiste varias veces con el flag ya activo, el texto
+// no debe repetirse palabra por palabra (spec punto 10; hallazgo del informe
+// nightly, donde se repitió idéntico 5 veces seguidas).
+const DELEGACIONES_YA_AVISADO = [
+  'Tranqui, ya le pasé tu consulta a una persona del equipo 🙏 En un ratito te responden.',
+  'Sí, ya quedó avisada una persona del equipo para que te conteste 🙌 Aguantá un toque.',
+  'Ya está en manos de alguien del equipo, en breve te escriben 🙏',
+];
 
 /**
  * Elige el texto de delegación a humano. Pura y exportada para test.
- * - `yaAvisado=true` (ya había requiere_atencion) → variante "ya avisé".
- * - Si no, rota entre `DELEGACIONES` según un seed determinista.
+ * - `yaAvisado=true` (ya había requiere_atencion) → rota entre `DELEGACIONES_YA_AVISADO`.
+ * - Si no, rota entre `DELEGACIONES`.
+ * En ambos casos rota según un seed determinista, para no repetir palabra por
+ * palabra cuando el cliente insiste con la misma consulta (spec punto 10).
  */
 export function elegirTextoDelegacion(seed = 0, yaAvisado = false): string {
-  if (yaAvisado) return DELEGACION_YA_AVISADO;
-  return DELEGACIONES[Math.abs(seed) % DELEGACIONES.length];
+  const variantes = yaAvisado ? DELEGACIONES_YA_AVISADO : DELEGACIONES;
+  return variantes[Math.abs(seed) % variantes.length];
 }

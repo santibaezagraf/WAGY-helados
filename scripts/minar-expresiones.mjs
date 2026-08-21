@@ -41,9 +41,21 @@ async function main() {
     process.exit(1);
   }
 
-  const { parametros, totalMensajesCliente, candidatos } = data;
+  const { parametros, totalMensajesCliente, candidatos, excluidasPorRed = {} } = data;
   console.log(`\n🔎 Minería de expresiones — últimos ${parametros.dias} días contra ${BASE_URL}`);
-  console.log(`   ${totalMensajesCliente} mensajes de clientes analizados · ${candidatos.length} candidatos (≥${parametros.minCount} veces, ≤${parametros.maxPalabras} palabras)\n`);
+  console.log(`   ${totalMensajesCliente} mensajes de clientes analizados · ${candidatos.length} candidatos (≥${parametros.minCount} veces, ≤${parametros.maxPalabras} palabras)`);
+
+  // Transparencia: cuántas formas se descartaron por estar ya cubiertas por una
+  // red determinista (retiro / rechazo cancelación / pago o unidad no soportada).
+  const redes = Object.entries(excluidasPorRed);
+  if (redes.length > 0) {
+    const total = redes.reduce((a, [, c]) => a + c, 0);
+    console.log(`   ${total} formas ya cubiertas por una red determinista (no se proponen):`);
+    for (const [red, count] of redes.sort((a, b) => b[1] - a[1])) {
+      console.log(`      · ${red}: ${count}`);
+    }
+  }
+  console.log('');
 
   if (candidatos.length === 0) {
     console.log('   (Sin candidatos: o ya está todo cubierto, o no hay suficientes datos.)\n');

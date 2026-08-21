@@ -18,6 +18,7 @@ import {
   dentroDePlazoModificacionCocina,
   esRateLimit,
   esPreguntaNegocioReal,
+  mencionaTipoHelado,
   normalizarMetodoPago,
   type PedidoActivoContext,
 } from './procesar';
@@ -600,5 +601,62 @@ describe('esRateLimit', () => {
     expect(esRateLimit(new Error('ECONNRESET'))).toBe(false);
     expect(esRateLimit(null)).toBe(false);
     expect(esRateLimit(undefined)).toBe(false);
+  });
+});
+
+// Red determinista que veta la señal `cantidad_sin_tipo` del modelo: si el cliente
+// SÍ dijo el tipo, no hay nada que preguntar.
+describe('mencionaTipoHelado', () => {
+  it('detecta el tipo dicho de cualquier forma', () => {
+    expect(mencionaTipoHelado('quiero 20 de agua')).toBe(true);
+    expect(mencionaTipoHelado('50 helados de crema')).toBe(true);
+    expect(mencionaTipoHelado('10 de AGUA y 5 de Crema')).toBe(true);
+    expect(mencionaTipoHelado('los quiero al agua')).toBe(true);
+    expect(mencionaTipoHelado('20 cremas')).toBe(true);
+  });
+
+  it('no confunde un sabor que contiene la palabra de un tipo con el tipo', () => {
+    // "Crema del Cielo" es un sabor DE AGUA: nombrarlo no es decir el tipo.
+    expect(mencionaTipoHelado('quiero 30 de crema del cielo')).toBe(false);
+    expect(mencionaTipoHelado('30 de Crema del Cielo')).toBe(false);
+    // ...pero si además dice el tipo, sí cuenta.
+    expect(mencionaTipoHelado('30 de agua, de crema del cielo')).toBe(true);
+  });
+
+  it('devuelve false cuando el cliente no dijo el tipo', () => {
+    expect(mencionaTipoHelado('quiero 50 helados de frutilla')).toBe(false);
+    expect(mencionaTipoHelado('mandame 20 helados')).toBe(false);
+    expect(mencionaTipoHelado(null)).toBe(false);
+    expect(mencionaTipoHelado('')).toBe(false);
+  });
+});
+
+describe('elegirRespuestaDatosFaltantes con el tipo sin definir', () => {
+  it('cantidad sin tipo → botones agua/crema con la cantidad, no "me falta la cantidad"', () => {
+    const r = elegirRespuestaDatosFaltantes(true, true, true, 0, false, false, 50);
+    expect(r.tipo).toBe('botones_tipo_helado');
+    if (r.tipo === 'botones_tipo_helado') {
+      expect(r.cantidad).toBe(50);
+      // El texto determinista (piso si falla la redacción libre) repite la cantidad.
+      expect(r.mensaje).toContain('50');
+      expect(r.mensaje).toMatch(/agua o de crema/);
+      expect(r.mensaje).not.toContain('Dirección de envío');
+    }
+  });
+
+  it('tiene prioridad sobre los demás faltantes, pero solo si falta la cantidad', () => {
+    // Si el merge ya dejó cantidad cargada, no hay tipo que preguntar.
+    expect(elegirRespuestaDatosFaltantes(false, false, true, 0, false, false, 50).tipo).toBe('botones_pago');
+    expect(elegirRespuestaDatosFaltantes(false, true, false, 0, false, false, 50).tipo).toBe('boton_retira');
+  });
+
+  it('la unidad no soportada gana: sin unidades no hay número para ningún tipo', () => {
+    const r = elegirRespuestaDatosFaltantes(true, false, false, 0, true, false, 2);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') expect(r.mensaje).toMatch(/por unidad/i);
+  });
+
+  it('sin señal se comporta igual que antes (pide la cantidad como texto)', () => {
+    expect(elegirRespuestaDatosFaltantes(true, true, true, 0, false, false, 0).tipo).toBe('texto');
   });
 });

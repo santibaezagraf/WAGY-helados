@@ -6,6 +6,10 @@ import {
   CONFIRMACIONES,
   NEGACIONES,
   SALUDOS,
+  mencionaRetiro,
+  mencionaRechazoCancelacion,
+  mencionaMetodoPagoNoSoportado,
+  mencionaCantidadEnUnidadNoSoportada,
 } from '@/lib/bot/procesar';
 
 /**
@@ -18,13 +22,25 @@ import {
  * Idea (ver la charla sobre "aprender" los sets): el LLM ya generaliza a
  * expresiones nuevas; los sets son solo una optimización para cortar antes del
  * LLM en los casos triviales. Entonces lo útil NO es entrenar un modelo, sino
- * descubrir qué formas CORTAS y FRECUENTES caen hoy al LLM y podrían sumarse al
- * set (con revisión humana — una entrada mala en CONFIRMACIONES auto-confirmaría
- * pedidos que el cliente rechaza).
+ * descubrir qué formas CORTAS y FRECUENTES caen hoy a través de TODAS las redes
+ * deterministas (y llegan al LLM), para sumarlas al set con revisión humana —
+ * una entrada mala en CONFIRMACIONES auto-confirmaría pedidos que el cliente
+ * rechaza.
+ *
+ * Redes deterministas de texto que el sistema ya tiene (y que este endpoint usa
+ * para NO proponer lo ya cubierto):
+ *   - Sets exact-match del short-circuit: CONFIRMACIONES / NEGACIONES / SALUDOS
+ *   - mencionaRetiro (paso a retirar / lo busco / paso por el local)
+ *   - mencionaRechazoCancelacion (no lo cancelo / dejalo / mantenelo)
+ *   - mencionaMetodoPagoNoSoportado (tarjeta / débito / crédito / posnet / rapipago)
+ *   - mencionaCantidadEnUnidadNoSoportada (kilo / gramo / pote / porción / bola)
+ *   (pareceDireccion queda fuera porque exige un número, y las formas con dígitos
+ *    ya se descartan como "dato del pedido").
  *
  * Qué hace: toma los mensajes de clientes, los normaliza igual que el
- * short-circuit, descarta los que ya están en algún set y los que claramente son
- * datos del pedido (tienen números), y devuelve las formas cortas más repetidas.
+ * short-circuit, descarta los que ya cubre alguna red y los que son datos del
+ * pedido (tienen números), y devuelve las formas cortas más repetidas que hoy
+ * caen al LLM.
  *
  * Params (query string):
  *   dias=90          ventana hacia atrás (default 90)
@@ -39,7 +55,17 @@ const supabaseAdmin = createClient<Database>(
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
 );
 
-const YA_CUBIERTO = new Set<string>([...CONFIRMACIONES, ...NEGACIONES, ...SALUDOS]);
+const YA_CUBIERTO_SHORT_CIRCUIT = new Set<string>([...CONFIRMACIONES, ...NEGACIONES, ...SALUDOS]);
+
+// Redes por regex sobre el texto crudo. Devuelve el nombre de la primera que
+// matchea, o null. Sirve para no proponer como candidato algo que ya se maneja.
+function cubiertaPorRedRegex(forma: string): string | null {
+  if (mencionaRetiro(forma)) return 'mencionaRetiro';
+  if (mencionaRechazoCancelacion(forma)) return 'mencionaRechazoCancelacion';
+  if (mencionaMetodoPagoNoSoportado(forma)) return 'mencionaMetodoPagoNoSoportado';
+  if (mencionaCantidadEnUnidadNoSoportada(forma)) return 'mencionaCantidadEnUnidadNoSoportada';
+  return null;
+}
 
 // Hint de a qué set podría ir un candidato. Conservador: solo sugiere cuando hay
 // una pista clara; si no, deja "revisar" para que lo decida el humano.
@@ -85,14 +111,24 @@ export async function GET(request: Request) {
     if (data.length < PAGINA) break;
   }
 
-  // Normalizamos y contamos frecuencias de las formas candidatas.
+  // Normalizamos y contamos frecuencias de las formas candidatas. Vamos llevando
+  // aparte cuántas descartamos por estar YA cubiertas por una red regex (para
+  // transparencia: muestra que esas redes están trabajando).
   const conteo = new Map<string, number>();
+  const excluidasPorRed: Record<string, number> = {};
   for (const texto of mensajes) {
     const n = normalizarTextoShortCircuit(texto);
     if (!n) continue;
-    if (/\d/.test(n)) continue;                       // tiene números => dato del pedido, no expresión
-    if (n.split(' ').length > maxPalabras) continue;  // demasiado largo para short-circuit
-    if (YA_CUBIERTO.has(n)) continue;                 // ya lo cortamos
+    if (/\d/.test(n)) continue;                          // tiene números => dato del pedido, no expresión
+    if (n.split(' ').length > maxPalabras) continue;     // demasiado largo para short-circuit
+    if (YA_CUBIERTO_SHORT_CIRCUIT.has(n)) continue;      // ya lo corta el short-circuit
+
+    const red = cubiertaPorRedRegex(n);
+    if (red) {                                           // ya lo maneja una red regex
+      excluidasPorRed[red] = (excluidasPorRed[red] ?? 0) + 1;
+      continue;
+    }
+
     conteo.set(n, (conteo.get(n) ?? 0) + 1);
   }
 
@@ -107,6 +143,7 @@ export async function GET(request: Request) {
     parametros: { dias, maxPalabras, minCount, limit },
     totalMensajesCliente: mensajes.length,
     formasUnicasCandidatas: conteo.size,
+    excluidasPorRed,
     candidatos,
   });
 }

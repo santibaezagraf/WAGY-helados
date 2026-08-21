@@ -82,6 +82,81 @@ const CASOS = [
     pedidoActivo: borrador({ cantidad_agua: 0 }),
     espera: { cantidad_agua: 60 },
   },
+  // ---- CAMBIO DE TIPO vs AGREGADO (informe nightly #3) ----
+  // Un cambio de tipo ("mejor N de crema" tras "25 de agua") reemplaza el pedido
+  // por el otro tipo (viejo → 0), NO suma dos tipos. Se distingue del agregado
+  // legítimo ("y sumale N de crema"), que conserva el tipo viejo.
+  {
+    nombre: 'cambio-tipo: "mejor N pero de crema" limpia agua (Caso A)',
+    mensaje: 'mejor 30, pero ahora de crema',
+    pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
+    espera: { cantidad_agua: 0, cantidad_crema: 30 },
+  },
+  {
+    nombre: 'cambio-tipo: "no, N de crema" limpia agua (Caso B)',
+    mensaje: 'no, mejor 30 de crema',
+    pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
+    espera: { cantidad_agua: 0, cantidad_crema: 30 },
+  },
+  {
+    nombre: 'cambio-tipo: "que sean de crema" sin número arrastra la cantidad (Caso C)',
+    mensaje: 'mejor que sean de crema',
+    pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
+    espera: { cantidad_agua: 0, cantidad_crema: 25 },
+  },
+  {
+    nombre: 'cambio-tipo: "y sumale N de crema" es agregado, conserva agua (Caso D)',
+    mensaje: 'y sumale 30 de crema',
+    pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
+    espera: { cantidad_agua: 25, cantidad_crema: 30 },
+  },
+  {
+    nombre: 'cambio-tipo: "mejor 30" sin tipo corrige el mismo tipo, no toca crema (Caso E)',
+    mensaje: 'mejor 30',
+    pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
+    espera: { cantidad_agua: 30, cantidad_crema: 0 },
+  },
+  // ---- TIPO DE HELADO SIN DECIR (agua o crema) ----
+  // El cliente da la cantidad y el sabor, pero no el tipo. No se puede deducir
+  // (frutilla existe en agua Y en crema), así que el modelo NO debe repartir la
+  // cantidad: la deja en `cantidad_sin_tipo` y TS le pregunta el tipo al cliente.
+  {
+    nombre: 'sin tipo: "50 helados de frutilla" no se asigna a ningún tipo',
+    mensaje: 'quiero 50 helados de frutilla',
+    espera: { cantidad_agua: 0, cantidad_crema: 0, cantidad_sin_tipo: 50 },
+  },
+  {
+    nombre: 'sin tipo: el sabor queda en el slot general (no en el de agua)',
+    mensaje: 'quiero 50 helados de frutilla',
+    espera: { observaciones: /frutilla/i, obs_agua: null, obs_crema: null },
+  },
+  {
+    nombre: 'sin tipo: cantidad sola sin sabor ni tipo también pregunta',
+    mensaje: 'mandame 20 helados a Mitre 950, efectivo',
+    espera: { cantidad_agua: 0, cantidad_crema: 0, cantidad_sin_tipo: 20, direccion: /mitre 950/i },
+  },
+  {
+    // Contraste: con el tipo dicho, cantidad_sin_tipo NO se activa.
+    nombre: 'sin tipo: si dice el tipo, no hay señal de ambigüedad',
+    mensaje: 'quiero 50 de agua de frutilla',
+    espera: { cantidad_agua: 50, cantidad_sin_tipo: 0 },
+  },
+  {
+    // Con un tipo ya cargado, un mensaje sin tipo se refiere a ESE tipo: no es
+    // ambigüedad, es una corrección (ver los casos de "mejor 30" más arriba).
+    nombre: 'sin tipo: con un tipo ya cargado no hay ambigüedad',
+    mensaje: 'mejor 30',
+    pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
+    espera: { cantidad_agua: 30, cantidad_sin_tipo: 0 },
+  },
+  {
+    // El turno siguiente a la pregunta del bot: el click del botón llega como
+    // "50 de agua", así que la cantidad viene en el propio mensaje.
+    nombre: 'sin tipo: la respuesta "50 de agua" carga la cantidad en ese tipo',
+    mensaje: '50 de agua',
+    pedidoActivo: borrador({ cantidad_agua: 0, cantidad_crema: 0, observaciones: 'frutilla' }),
+    espera: { cantidad_agua: 50, cantidad_crema: 0, cantidad_sin_tipo: 0 },
+  },
   {
     // Se venden por unidad, no por peso. En pedido nuevo, "2 kilos" no debe
     // convertirse ni inventar un número: la cantidad queda en 0 y el flujo de
@@ -419,8 +494,16 @@ function aplanar(resultado) {
     metodo_pago: raw.metodo_pago,
     cantidad_agua: comp.cantidad_agua,
     cantidad_crema: comp.cantidad_crema,
+    // Senal de tipo ambiguo (dio cantidad pero no si es de agua o de crema).
+    // Es raw porque no se persiste: solo dispara la pregunta por el tipo.
+    cantidad_sin_tipo: raw.cantidad_sin_tipo,
     aclaracion: comp.aclaracion,
     observaciones: comp.observaciones,
+    // Slots crudos de sabores, para poder afirmar en CUAL cayo el sabor (el
+    // texto plano proyectado sigue estando en `observaciones`).
+    obs_agua: raw.obs_agua ?? null,
+    obs_crema: raw.obs_crema ?? null,
+    obs_general: raw.obs_general ?? null,
     // Señal ortogonal (versión completa de A): la pregunta de negocio se extrae
     // aunque la intención sea datos_pedido. El flujo la delega a un humano.
     // Normalizamos igual que esPreguntaNegocioReal en el flujo: el modelo a veces

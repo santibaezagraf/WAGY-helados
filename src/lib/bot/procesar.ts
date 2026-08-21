@@ -7,8 +7,8 @@ import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConf
 import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion, requiereAtencionActual } from '@/lib/bot/atencion-humana';
 import { esBorradorCompleto } from '@/lib/bot/borradores';
 import { registrarAlertaFallback, siguienteModelo } from '@/lib/bot/alertas';
-import { obtenerListaPreciosPublica, formatearPreciosWhatsApp } from '@/lib/precios-publico';
-import { construirContextoNegocio, responderConsultaNegocio, elegirTextoDelegacion } from '@/lib/bot/consultas-negocio';
+import { obtenerListaPreciosPublica, formatearPreciosWhatsApp, SABORES } from '@/lib/precios-publico';
+import { construirContextoNegocio, responderConsultaNegocio, elegirTextoDelegacion, redactarPreguntaTipoHelado } from '@/lib/bot/consultas-negocio';
 import { patchConEnviadoCoherente } from '@/lib/pedidos-estado';
 
 const supabaseAdmin = createClient<Database>(
@@ -28,6 +28,7 @@ const MODELOS_EXTRACCION = [
   'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
   'moonshotai/kimi-k2-instruct',
+  'qwen/qwen3-32b',
 ] as const;
 
 // ¿El error del SDK es un rate limit (429)? Es la señal de "modelo sin cuota" que
@@ -129,6 +130,16 @@ export const PedidoIASchema = z.object({
   cantidad_agua_operacion: z.enum(['sumar', 'restar', 'reemplazar', 'mantener']).describe('Que hacer con cantidad_agua: "sumar" si el cliente pide agregar al actual ("sumale 5", "agrega 10"), "restar" si pide quitar ("quitale 3", "sacale 2"), "reemplazar" si pide un valor fijo ("que sean 20", "cambialo a 50") o si es un pedido nuevo desde cero, "mantener" si no se menciona agua en el mensaje.'),
   cantidad_crema: z.number().describe('Valor literal mencionado en el mensaje para crema (no calcules sumas/restas). 0 si no se mencionó.'),
   cantidad_crema_operacion: z.enum(['sumar', 'restar', 'reemplazar', 'mantener']).describe('Que hacer con cantidad_crema. Mismas reglas que cantidad_agua_operacion.'),
+  // SEÑAL DE TIPO AMBIGUO: el cliente dijo CUÁNTOS quiere pero no si son de
+  // agua o de crema ("quiero 50 helados de frutilla"). No se puede adivinar (un
+  // mismo sabor existe en los dos tipos), así que el modelo NO reparte esa
+  // cantidad: la deja acá y TS le pregunta el tipo al cliente. No se persiste.
+  // Nullable (no opcional): Groq exige structured output ESTRICTO, o sea todas las
+  // claves en `required` — un campo opcional hace fallar la request entera. Pero el
+  // modelo tiende a devolver null cuando el campo no aplica, y eso NO debe tumbar la
+  // extracción por validación: null se lee como 0 ("no hay ambigüedad de tipo"),
+  // mismo criterio tolerante que la coerción de `normalizarMetodoPago`.
+  cantidad_sin_tipo: z.number().nullable().describe('Cantidad de helados que el cliente pidió SIN decir si son de agua o de crema (ej: "quiero 50 helados de frutilla" -> 50). Es solo una señal para que el sistema le pregunte el tipo: NUNCA adivines el tipo ni repartas esa cantidad en cantidad_agua/cantidad_crema. 0 si dijo el tipo, si no dio cantidad, o si la cantidad se puede deducir del pedido actual.'),
   // OBSERVACIONES POR SLOT. El modelo NO fusiona: extrae los sabores de ESTE
   // mensaje por tipo de helado y elige una operación; TS combina con lo actual
   // y reconstruye el texto plano. Esto elimina la clase de bug donde el modelo,
@@ -253,6 +264,8 @@ function pedidoDesdeShortCircuit(
     cantidad_agua_operacion: 'mantener',
     cantidad_crema: pedidoActivo?.cantidad_crema ?? 0,
     cantidad_crema_operacion: 'mantener',
+    // Un saludo/confirmación/cancelación nunca trae una cantidad sin tipo.
+    cantidad_sin_tipo: 0,
     // El short-circuit (saludo/confirmar/cancelar) nunca modifica sabores:
     // todas las operaciones son "mantener" y arrastramos lo que ya había.
     obs_agua: null, obs_agua_operacion: 'mantener',
@@ -504,9 +517,17 @@ export function mencionaRechazoCancelacion(texto: string | null): boolean {
  * botón de atajo (retiro cuando falta la dirección); si faltan varios, lista de
  * texto. Pura y exportada para tests — el envío queda en el flow.
  */
+/**
+ * Señal de "el cliente dio la cantidad pero no el tipo (agua/crema)": la cantidad
+ * que quedó sin asignar y el texto crudo del cliente (el sabor que mencionó es lo
+ * que hace útil la redacción libre). `null` = no hay ambigüedad de tipo.
+ */
+export type TipoHeladoAmbiguo = { cantidad: number; textoCliente: string };
+
 export type RespuestaDatosFaltantes =
   | { tipo: 'botones_pago' }
   | { tipo: 'boton_retira' }
+  | { tipo: 'botones_tipo_helado'; cantidad: number; mensaje: string }
   | { tipo: 'texto'; mensaje: string };
 
 // Variantes del saludo de "arranquemos tu pedido" (cuando faltan los 3 datos).
@@ -528,7 +549,24 @@ export function elegirRespuestaDatosFaltantes(
   seed = 0,
   cantidadEnUnidadNoSoportada = false,
   pagoNoSoportado = false,
+  cantidadSinTipo = 0,
 ): RespuestaDatosFaltantes {
+  // TIPO DE HELADO SIN DEFINIR: el cliente dijo CUÁNTOS quiere pero no si son de
+  // agua o de crema, así que "me falta la cantidad" es falso (ya la dio) y
+  // confuso. Tiene prioridad sobre el resto de los faltantes: hasta que no se
+  // sepa el tipo no hay cantidad que guardar, y es una elección cerrada de dos
+  // opciones (va con botones). El `mensaje` es el piso determinista; el caller
+  // intenta primero una redacción libre acotada (que puede nombrar en qué tipo
+  // está el sabor que pidió). Si además la cantidad venía en una unidad que no
+  // vendemos, gana ese caso: no hay número que asignarle a ningún tipo.
+  if (faltaCantidad && cantidadSinTipo > 0 && !cantidadEnUnidadNoSoportada) {
+    return {
+      tipo: 'botones_tipo_helado',
+      cantidad: cantidadSinTipo,
+      mensaje: `¿Esos ${cantidadSinTipo} los querés de agua o de crema? 🍦`,
+    };
+  }
+
   // Falta solo el pago y el cliente mencionó un método no soportado →
   // aclaramos explícitamente en vez de ofrecer los botones sin contexto.
   if (!faltaCantidad && !faltaDireccion && faltaPago && pagoNoSoportado) {
@@ -607,6 +645,30 @@ export function mencionaCantidadEnUnidadNoSoportada(texto: string | null): boole
     /\bbol(a|as|ita|itas)\b/.test(n) ||
     /\bcucuruchos?\b/.test(n)
   );
+}
+
+/**
+ * Guard determinista (respalda al modelo): ¿el cliente dijo el TIPO de helado
+ * (de agua o de crema)? Se usa como VETO de la señal `cantidad_sin_tipo`: si el
+ * texto crudo SÍ nombra el tipo, no le preguntamos nada aunque el modelo haya
+ * llenado la señal por no-determinismo.
+ *
+ * Ojo con los sabores que contienen la palabra de un tipo ("Crema del Cielo" es un
+ * sabor DE AGUA): los borramos del texto antes de buscar el tipo, así "50 de crema
+ * del cielo" no cuenta como "dijo crema". Corre sobre el texto CRUDO del batch.
+ */
+export function mencionaTipoHelado(texto: string | null): boolean {
+  if (!texto) return false;
+  const sinTildes = (t: string) => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+  let n = sinTildes(texto);
+  for (const sabor of [...SABORES.agua, ...SABORES.crema]) {
+    const s = sinTildes(sabor);
+    // Solo los sabores que contienen "agua"/"crema" pueden confundir al guard.
+    if (s.includes('agua') || s.includes('crema')) n = n.split(s).join(' ');
+  }
+
+  return /\baguas?\b/.test(n) || /\bcremas?\b/.test(n);
 }
 
 /**
@@ -820,7 +882,10 @@ export function buildSystemPrompt(
         * "restar": quita. Pistas: "menos", "quitá", "sacá". Ej: "quitale 3", "5 menos de crema".
         * "reemplazar": valor FIJO, SIN "más"/"menos". Ej: "que sean 50", "cambialo a 20", "ahora 30 de crema". También el desglose ya sumado ("que los de agua sean 20 de frutilla y 40 de menta" → 60).
         * "mantener": no menciona ese tipo en el mensaje. Valor = 0.
-        Contraste clave (cada tipo es independiente): "25 más de agua" = sumar 25 | "25 de agua" = reemplazar 25 | "5 menos de crema" = restar 5.
+        * CAMBIO DE TIPO (reemplaza un tipo por el OTRO): cuando el cliente CORRIGE el tipo del pedido —"mejor N de <otro tipo>", "no, N de <otro tipo>", "en vez de eso N de <otro tipo>", "mejor que sean de <otro tipo>"— NO está sumando un segundo tipo: está cambiando el pedido al otro tipo. Poné el tipo NUEVO en "reemplazar" con la cantidad dicha, Y el tipo VIEJO en "reemplazar" con valor 0 (se limpia). Si NO da número nuevo ("mejor que sean de crema"), arrastrá la cantidad actual del tipo viejo al nuevo (nuevo=reemplazar con esa cantidad, viejo=reemplazar 0). Pistas de CAMBIO: "mejor", "no", "en vez de", "que sean de". Pistas de AGREGADO (esto NO es cambio, es "sumar" y CONSERVA el tipo viejo con "mantener"): "y", "sumale", "agregá", "también", "además", "más".
+        Contraste clave (cada tipo es independiente; suponé actual agua=25, crema=0): "25 más de agua" = agua sumar 25 | "25 de agua" = agua reemplazar 25 | "5 menos de crema" = crema restar 5 | "mejor 30 pero de crema" = crema reemplazar 30 + agua reemplazar 0 (cambio de tipo) | "no, 30 de crema" = crema reemplazar 30 + agua reemplazar 0 (cambio de tipo) | "mejor que sean de crema" = crema reemplazar 25 + agua reemplazar 0 (cambio de tipo sin número, arrastra la cantidad) | "y sumale 30 de crema" = crema sumar 30 + agua mantener (agregado, conserva agua) | "mejor 30" = agua reemplazar 30 + crema mantener (corrige la cantidad del MISMO tipo, no toca el otro).
+        * SIN TIPO ("cantidad_sin_tipo"): si el mensaje da una cantidad, el pedido tiene agua=0 Y crema=0 y no dice "de agua" ni "de crema" ("50 helados de frutilla"), NO adivines (el sabor NO define el tipo): las dos cantidades en "mantener", el número en "cantidad_sin_tipo" y el sabor en "obs_general". Si ya hay cantidad en un tipo ("mejor 30") o la unidad no se vende (kilos/potes/porciones/bolas), cantidad_sin_tipo=0.
+        * Si el último turno del bot preguntó el tipo y el cliente lo responde ("de agua", "50 de crema"), poné en ese tipo la cantidad del mensaje o, si no la repite, la que preguntó el bot, con "reemplazar", y mové obs_general al slot de ese tipo ("agregar" + obs_general "limpiar").
         POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en "mantener" (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede sin definir.
 
       IMPORTANTE: Devolvé TODOS los campos del schema. "intencion" es una sola opción del enum, no un booleano.
@@ -849,6 +914,7 @@ export function buildSystemPrompt(
     - "aclaracion_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay aclaración previa que combinar).
     - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10). POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en 0 (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede en 0.
     - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
+    - "cantidad_sin_tipo": si el cliente dice CUÁNTOS quiere pero NO si son de agua o de crema (ej: "quiero 50 helados de frutilla", "mandame 20 helados"), poné ese número acá y dejá cantidad_agua=0 y cantidad_crema=0. NUNCA deduzcas el tipo por el sabor: un mismo sabor puede existir en los dos tipos, y el sistema le va a preguntar al cliente cuál quiere. El sabor mencionado va igual a "obs_general". Si el cliente SÍ dice el tipo, cantidad_sin_tipo=0. Tampoco lo uses para cantidades en kilos/gramos/potes/porciones/bolas/cucuruchos (esas quedan en 0, sin señal).
     - SABORES (campos "obs_agua" / "obs_crema" / "obs_general"): poné los sabores en el slot del tipo, SIN el prefijo "los de agua/crema". NO confundas el tipo de helado con un sabor.
       * "obs_agua": sabores de los de agua (ej. "frutilla y menta", "5 de frutilla y 5 de menta"). "obs_crema": ídem crema. "obs_general": sabores/detalles sin tipo ("sin coco", "de dulce de leche").
       * Conservá desgloses numéricos tal cual ("6 de chocolate y 4 de granizado"); la cocina los necesita.
@@ -907,13 +973,14 @@ export async function pedirDatosFaltantes(
   seed = 0,
   cantidadEnUnidadNoSoportada = false,
   pagoNoSoportado = false,
+  tipoHeladoAmbiguo: TipoHeladoAmbiguo | null = null,
 ): Promise<boolean> {
-  console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}, unidadNoSoportada=${cantidadEnUnidadNoSoportada}, pagoNoSoportado=${pagoNoSoportado}`);
+  console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}, unidadNoSoportada=${cantidadEnUnidadNoSoportada}, pagoNoSoportado=${pagoNoSoportado}, cantidadSinTipo=${tipoHeladoAmbiguo?.cantidad ?? 0}`);
 
   // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
   // `seed` rota el saludo cuando faltan los 3 datos (ver elegirRespuestaDatosFaltantes),
   // para no repetir el mismo texto ante mensajes off-topic seguidos.
-  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed, cantidadEnUnidadNoSoportada, pagoNoSoportado);
+  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo?.cantidad ?? 0);
   // Cuando entramos por la rama "saludo con borrador parcial", el caller
   // prepende un "¡Hola! 👋 …" al cuerpo así el cliente ve UNA sola burbuja en
   // vez de dos seguidas (saludo + pedido de datos). Vale para las tres formas
@@ -924,6 +991,26 @@ export async function pedirDatosFaltantes(
     return enviarMensajeConBotones(numeroCliente, `${prefijo}¿Cómo lo pagás? 💰`, [
       { id: 'resp_pago_efectivo', title: 'Efectivo' },
       { id: 'resp_pago_transferencia', title: 'Transferencia' },
+    ]);
+  }
+
+  if (respuesta.tipo === 'botones_tipo_helado') {
+    // RESPUESTA LIBRE PERO ACOTADA (mismo mecanismo que las consultas de negocio):
+    // acá no hay un texto fijo que sirva —lo que conviene decirle depende del sabor
+    // que pidió y de en qué tipos existe—, pero los sabores son un área que el bot
+    // conoce, así que la redacción se la pedimos al modelo con contexto curado. Si
+    // falla o se va de tema, va el texto determinista de `respuesta.mensaje`.
+    const libre = tipoHeladoAmbiguo
+      ? await redactarPreguntaTipoHelado(respuesta.cantidad, tipoHeladoAmbiguo.textoCliente, numeroCliente)
+      : null;
+    // La cantidad viaja en el ID del botón (y en su título), así que el click
+    // vuelve como el texto canónico "N de agua"/"N de crema": el turno siguiente
+    // no tiene que deducir el número del historial.
+    return enviarMensajeConBotones(numeroCliente, `${prefijo}${libre ?? respuesta.mensaje}`, [
+      // (los prefijos los parsea `parsearBotonTipoHelado` en botones.ts, igual que
+      // los ids literales de RESPUESTAS_RAPIDAS que manda este mismo helper)
+      { id: `resp_tipo_agua_${respuesta.cantidad}`, title: `${respuesta.cantidad} de agua` },
+      { id: `resp_tipo_crema_${respuesta.cantidad}`, title: `${respuesta.cantidad} de crema` },
     ]);
   }
 
@@ -1649,6 +1736,23 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     const cantidadEnUnidadNoSoportada = faltaCantidad && mencionaCantidadEnUnidadNoSoportada(textoBatch);
     const pagoNoSoportado = faltaPago && mencionaMetodoPagoNoSoportado(textoBatch);
 
+    // TIPO DE HELADO AMBIGUO: el modelo dejó la cantidad en `cantidad_sin_tipo`
+    // porque el cliente no dijo si eran de agua o de crema ("quiero 50 helados de
+    // frutilla" — frutilla existe en los dos tipos, así que adivinar escribía un
+    // pedido que el cliente nunca hizo). Veto determinista con `mencionaTipoHelado`:
+    // si el texto crudo SÍ nombra el tipo, la señal es un no-determinismo del
+    // modelo y la ignoramos. Solo aplica si además NO quedó cantidad cargada
+    // (si el merge dejó cantidades, no hay nada que preguntar).
+    const cantidadSinTipo =
+      faltaCantidad && !mencionaTipoHelado(textoBatch)
+        ? Math.max(0, Math.trunc(pedido.cantidad_sin_tipo ?? 0))
+        : 0;
+    const tipoHeladoAmbiguo: TipoHeladoAmbiguo | null =
+      cantidadSinTipo > 0 ? { cantidad: cantidadSinTipo, textoCliente: textoBatch } : null;
+    if (tipoHeladoAmbiguo) {
+      console.log(`🍦 El cliente pidió ${cantidadSinTipo} helados sin decir el tipo. Le pregunto agua/crema en vez de adivinar.`);
+    }
+
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
     //
     // Todos los UPDATE de estos flujos van con guard atómico:
@@ -1718,6 +1822,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               0,
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
+              tipoHeladoAmbiguo,
             );
           }
         } else {
@@ -1769,6 +1874,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               0,
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
+              tipoHeladoAmbiguo,
             );
           }
         } else {
@@ -1849,6 +1955,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               0,
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
+              tipoHeladoAmbiguo,
             );
           }
           return;
@@ -1917,6 +2024,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             0,
             cantidadEnUnidadNoSoportada,
             pagoNoSoportado,
+            tipoHeladoAmbiguo,
           );
         }
       } else if (esperandoCancelacion) {
@@ -1948,7 +2056,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       if (pedido.intencion === 'confirmar' && !hayCambiosReales) {
         if (!pedidoCompleto) {
           console.log("⚠️ El cliente confirmó pero el borrador todavía está incompleto. Pido lo que falta.");
-          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
+          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
           return;
         }
         // Guard atómico: el borrador pudo pasar a cancelado (auto-rechazo del cron
@@ -2013,7 +2121,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             await enviarResumenYPedirConfirmacion(numeroCliente, updatedData, true);
           } else {
             console.log("📝 El borrador sigue incompleto tras el merge. Pido lo que falta.");
-            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
+            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
           }
         } else {
           console.log(`⚠️ Race al actualizar borrador: el pedido ${pedidoActivo.id} cambió de estado o fue despachado.`);
@@ -2051,7 +2159,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         // Un pedido en cocina ya tenía datos completos; si un merge lo dejó
         // "incompleto" es por algo puntual del mensaje. No degradamos su estado
         // ni persistimos placeholders: solo pedimos el dato que falte.
-        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado);
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
         return;
       }
 
@@ -2107,6 +2215,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               0,
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
+              tipoHeladoAmbiguo,
             );
             return;
           }
@@ -2122,7 +2231,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // típico de un mensaje off-topic/sin sentido): mensajes distintos → largo
       // distinto → variante distinta, así no se repite palabra por palabra.
       const seedSaludo = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
-      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, seedSaludo, cantidadEnUnidadNoSoportada, pagoNoSoportado);
+      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, seedSaludo, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
       return;
     }
 

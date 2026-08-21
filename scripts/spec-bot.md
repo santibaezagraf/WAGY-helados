@@ -48,6 +48,7 @@ como ramas.
 9. **Un solo click por ronda de botones**: tocar ambos botones de un par no dispara dos acciones contradictorias.
 10. **Consulta de negocio**: el bot primero intenta **responderla él mismo** desde el conocimiento que tiene (tipos agua/crema, sabores, demora de entrega, envíos/costo, formas de pago, y datos del pedido en curso como el **total**). Lo hace con una respuesta **breve** generada con contexto acotado (schema `{puede_responder, respuesta}`); si el dato NO está en ese contexto (horarios exactos, zonas/cobertura puntual, stock del día, promos, mayorista, reclamos, facturación) → **delega a un humano**: marca `requiere_atencion` y responde "te atiende una persona", SIN tocar el pedido activo. Esto vale **también cuando la pregunta viene mezclada con datos de pedido** (campo ortogonal `pregunta_negocio`): el bot responde/delega la pregunta **y además procesa el pedido** (resumen o pide lo que falta). La pregunta ya NO se descarta en silencio. **Señal de ⚠️/❓**: delegar a un humano algo que el bot conoce de memoria (ej: "¿tenés de agua o de crema?"), o **contradicción** "no te puedo responder" + contestarlo igual en la burbuja siguiente. Si delega varias veces seguidas, el texto debe **variar** (no repetir palabra por palabra).
 11. **Media** (foto/audio/video) → delega a humano. **Ubicación** (pin) → NO delega: pide la dirección escrita.
+12. **Cantidad sin tipo de helado**: si el cliente dice cuántos quiere pero NO si son de agua o de crema ("quiero 50 helados de frutilla"), el bot **NO debe adivinar el tipo** (ni deducirlo del sabor: un mismo sabor puede existir en los dos). Debe **preguntar el tipo** repitiendo la cantidad, con los dos botones ("50 de agua" / "50 de crema"), y recién con la respuesta cargar la cantidad. La pregunta es **libre pero acotada** al conocimiento real (puede decir en qué tipo está el sabor pedido, o que ese sabor no lo tenemos), nunca inventar sabores ni delegar a un humano — los sabores son un dato que el bot conoce. **Señal de ⚠️/❌**: un pedido con 50 de agua y "los de agua frutilla" en observaciones cuando el cliente nunca dijo "de agua".
 
 ## Señales de "❓ NO CONTEMPLADO" (lo más valioso de detectar)
 
@@ -60,6 +61,7 @@ resuelve por accidente (o mal). Señales:
 - El pedido queda **trabado** en un estado (p.ej. `esperando_cancelacion` sin salida, borrador que nunca completa).
 - **Loop**: el bot repite el mismo pedido de dato o el mismo resumen sin avanzar.
 - **Pérdida de datos**: una cantidad/dirección/sabor dicha antes desaparece tras un turno siguiente.
+- **Dato inventado**: el bot escribe en el pedido algo que el cliente no dijo (p.ej. el tipo de helado cuando solo nombró el sabor). Es peor que preguntar de más.
 - Contradicción entre lo que dice el bot y el estado real del pedido.
 
 Distinguir **"bien por diseño"** de **"bien por accidente"**: si el bot acertó
