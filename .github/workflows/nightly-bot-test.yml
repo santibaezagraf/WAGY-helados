@@ -60,7 +60,10 @@ jobs:
       # improvisa mensajes de cliente con generateText), así que corre en OTRO modelo
       # Groq para no gastar el bucket TPD de gpt-oss-20b, que queda entero para el
       # bot real. El bot bajo prueba sigue siendo gpt-oss-20b (hardcodeado en procesar.ts).
-      PROBAR_MODELO_CLIENTE: 'llama-3.3-70b-versatile'
+      # (llama-3.3-70b-versatile fue dado de baja en Groq; se usa un modelo de la
+      # cadena MODELOS_EXTRACCION/MODELOS_CONSULTA del bot, confirmado vigente
+      # contra GET /openai/v1/models el 2026-08-22.)
+      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.6-27b'
     steps:
       - uses: actions/checkout@v4
 

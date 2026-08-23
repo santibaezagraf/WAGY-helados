@@ -36,11 +36,12 @@ const groq = createGroq();
 
 // Misma cadena y misma política de fallback que la extracción: ante un 429
 // (cuota TPD agotada) saltamos al siguiente modelo, que tiene cubeta separada.
+// (Ver nota en procesar.ts sobre MODELOS_EXTRACCION: kimi-k2/qwen3-32b ya no
+// existen en Groq, reemplazados por qwen3.6-27b.)
 const MODELOS_CONSULTA = [
   'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
-  'moonshotai/kimi-k2-instruct',
-  'qwen/qwen3-32b',
+  'qwen/qwen3.6-27b',
 ] as const;
 
 // Timeout defensivo: esto corre en el worker de QStash (no en el webhook), pero

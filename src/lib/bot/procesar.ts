@@ -24,11 +24,14 @@ const groq = createGroq();
 // (429 / TPD), seguimos con el siguiente en vez de contestar "no te entendí".
 // Todos bancan structured output y tienen cubeta TPD SEPARADA en Groq, así que
 // si se agotó gpt-oss-20b es muy probable que el siguiente siga disponible.
+// (moonshotai/kimi-k2-instruct y qwen/qwen3-32b fueron dados de baja por Groq —
+// verificado 2026-08-22 contra GET /openai/v1/models — y reemplazados/quitados;
+// esRateLimit solo dispara el salto de modelo con un 429, así que un id muerto
+// (404) agotaba los 3 reintentos de validación en vano en vez de saltar.)
 const MODELOS_EXTRACCION = [
   'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
-  'moonshotai/kimi-k2-instruct',
-  'qwen/qwen3-32b',
+  'qwen/qwen3.6-27b',
 ] as const;
 
 // ¿El error del SDK es un rate limit (429)? Es la señal de "modelo sin cuota" que
