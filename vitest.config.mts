@@ -5,7 +5,10 @@ export default defineConfig({
   test: {
     // Solo testeamos las funciones puras del bot (sin red ni LLM). Las evals
     // del prompt contra Groq viven aparte en scripts/prompts.eval.mjs.
-    include: ['src/**/*.test.ts'],
+    // Además de src/, los helpers puros del harness conversacional que viven en
+    // scripts/ (ej. el saneamiento del cliente-agente). El harness en sí es .mjs
+    // y no se importa acá: solo sus módulos puros, sin efectos de import.
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'],
     // procesar.ts / whatsapp.ts crean un cliente de Supabase a nivel de módulo
     // con `createClient(url!, key!)`. En tests no hay .env.local cargado, así que
     // damos valores dummy: el cliente se construye sin hacer red (lo que importa
