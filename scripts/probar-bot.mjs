@@ -22,7 +22,11 @@
 //   PROBAR_PREFIX=54000                prefijo de los teléfonos de test (debe
 //                                      coincidir con BOT_TEST_PREFIX del server)
 //   PROBAR_MAX_TURNOS=12               tope de turnos por escenario (red de seguridad)
-//   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo Groq del cliente-agente (exploratorios)
+//   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo Groq del cliente-agente (exploratorios).
+//                                      Si es de razonamiento híbrido (qwen3.x), su bloque
+//                                      <think> se apaga vía providerOptions y, por si acaso,
+//                                      se filtra en cliente-agente.mjs. Hay preflight: si Groq
+//                                      dio de baja el modelo, la corrida aborta ruidosa.
 //   PROBAR_SOLO_GUIONADOS=1            omite los exploratorios (no usa el cliente-agente LLM)
 //   PROBAR_SOLO_EXPLORATORIOS=1        omite los guionados (corre solo la capa exploratoria)
 
@@ -31,6 +35,7 @@ import { join } from 'node:path';
 import { generateText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
 import { ESCENARIOS } from './escenarios-bot.mjs';
+import { limpiarMensajeCliente, validarMensajeCliente } from './cliente-agente.mjs';
 
 const BASE_URL = process.env.PROBAR_URL || 'http://localhost:3000';
 const FILTER = process.env.PROBAR_FILTER || '';
@@ -193,8 +198,44 @@ Reglas de salida:
     system,
     prompt: `Conversación hasta ahora:\n${historial}\n\nTu próximo mensaje (o FIN):`,
     temperature: 0.7,
+    // Una burbuja de WhatsApp no necesita más. Sin un tope explícito, el modelo
+    // de razonamiento gastaba la salida entera en el bloque <think> y el mensaje
+    // real salía cortado a mitad de frase (corrida 32609751045).
+    maxOutputTokens: 300,
+    // CAUSA RAÍZ de la fuga de <think>: MODELO_CLIENTE es un modelo de
+    // razonamiento híbrido. `hidden` le pide a Groq que no devuelva el bloque y
+    // `none` que directamente no razone (es un cliente improvisando un mensaje
+    // corto, no lo necesita). `limpiarMensajeCliente` queda igual como red,
+    // porque esto depende de que el modelo del día soporte las dos opciones.
+    providerOptions: { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } },
   });
-  return (text || '').trim();
+  // Se limpia SIEMPRE antes de que el llamador compare contra FIN o se lo mande
+  // al bot: el crudo puede traer razonamiento pegado adelante.
+  return limpiarMensajeCliente(text);
+}
+
+// Chequeo previo del modelo del cliente-agente. Groq da de baja modelos sin
+// aviso (le pasó a llama-3.3-70b-versatile) y el síntoma era pésimo: los 5
+// escenarios fallaban en el turno 1 y quedaba una nota por escenario en vez de
+// un error claro. Una llamada mínima acá lo convierte en un abort ruidoso.
+async function preflightModeloCliente() {
+  process.stdout.write(`🔎 Preflight del modelo del cliente-agente (${MODELO_CLIENTE})… `);
+  try {
+    await generateText({
+      model: groq(MODELO_CLIENTE),
+      prompt: 'Respondé solo: ok',
+      maxOutputTokens: 16,
+      providerOptions: { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } },
+    });
+    console.log('OK');
+  } catch (error) {
+    console.log('❌');
+    throw new Error(
+      `El modelo del cliente-agente "${MODELO_CLIENTE}" no respondió: ${String(error.message || error)}\n` +
+      '   Si Groq lo dio de baja, elegí otro vigente (GET /openai/v1/models) y actualizá\n' +
+      '   PROBAR_MODELO_CLIENTE (local) y .github/workflows/nightly-bot-test.yml (CI).'
+    );
+  }
 }
 
 async function correrExploratorio(escenario, telefono) {
@@ -210,7 +251,16 @@ async function correrExploratorio(escenario, telefono) {
       notas.push(`El cliente-agente falló en el turno ${turno + 1}: ${String(error.message || error)}`);
       break;
     }
-    if (!mensaje || /^fin\b/i.test(mensaje)) break;
+    if (/^fin\b/i.test(mensaje)) break;
+
+    // Guarda ruidosa: un mensaje vacío o larguísimo significa que el cliente-agente
+    // filtró razonamiento (o se cortó a mitad). Cortamos el escenario con una nota
+    // visible en el informe, en vez de seguir contaminando la conversación en silencio.
+    const valido = validarMensajeCliente(mensaje);
+    if (!valido.ok) {
+      notas.push(`Turno ${turno + 1}: ${valido.motivo} Se cortó el escenario acá.`);
+      break;
+    }
 
     transcript.push({ rol: 'cliente', texto: mensaje });
     const data = await llamar({ accion: 'enviarTexto', telefono, texto: mensaje });
@@ -334,6 +384,10 @@ async function main() {
   const nExplor = seleccionados.filter((e) => e.tipo === 'exploratorio').length;
   console.log(`▶️  Corriendo ${seleccionados.length} escenario(s) contra ${BASE_URL} (${nGuionados} guionado(s), ${nExplor} exploratorio(s))`);
   console.log(`   delay entre turnos: ${DELAY_MS}ms · prefijo teléfonos: ${PREFIX} · modelo cliente: ${MODELO_CLIENTE}\n`);
+
+  // Solo si hay exploratorios: los guionados no usan el cliente-agente y no
+  // tienen por qué gastar una llamada a Groq ni depender de ese modelo.
+  if (nExplor > 0) await preflightModeloCliente();
 
   const generadoEn = new Date().toISOString();
   const escenarios = [];
