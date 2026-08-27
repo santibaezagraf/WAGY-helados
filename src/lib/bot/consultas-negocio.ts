@@ -81,6 +81,17 @@ export function construirContextoNegocio(
 ): string {
   const partes: string[] = [];
 
+  // QUÉ SOS: una pregunta meta ("¿qué sabés hacer?", "¿sos un bot?") no es una
+  // consulta de negocio real, pero sin este bloque el contexto no tenía con qué
+  // contestarla y caía en la delegación a un humano — usarla de cajón de sastre
+  // para la PRIMERA pregunta de un cliente (hallazgo menor del informe 32740622175).
+  partes.push('QUÉ SOS Y QUÉ PODÉS HACER (si te preguntan esto, contestalo vos, NO lo delegues):');
+  partes.push('- Sos el asistente de WhatsApp de WAGY helados: tomás pedidos de helado por acá.');
+  partes.push('- Armás el pedido pidiendo: cuántos y de qué tipo (agua o crema), la dirección de envío o si pasa a retirar, y la forma de pago.');
+  partes.push('- También pasás precios y sabores, y le mostrás el resumen para que confirme antes de mandarlo a la cocina.');
+  partes.push('- Puede cambiar o cancelar el pedido mientras no haya salido para entrega.');
+  partes.push('');
+
   partes.push('CONOCIMIENTO DEL NEGOCIO (WAGY helados, heladería):');
   partes.push('- Vendemos DOS tipos de helado, ambos siempre disponibles: de AGUA y de CREMA.');
   partes.push('- Se venden POR UNIDAD (no por kilo, gramo, pote, porción, bola ni cucurucho).');

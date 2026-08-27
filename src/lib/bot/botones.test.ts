@@ -44,9 +44,17 @@ describe('RESPUESTAS_RAPIDAS', () => {
 // Botones de tipo de helado: el id lleva la cantidad, así que el parseo es lo que
 // convierte el click en el texto canónico del pedido.
 describe('parsearBotonTipoHelado', () => {
-  it('parsea los ids que manda pedirDatosFaltantes, con su texto canónico', () => {
-    expect(parsearBotonTipoHelado('resp_tipo_agua_50')).toEqual({ tipo: 'agua', cantidad: 50, texto: '50 de agua' });
-    expect(parsearBotonTipoHelado('resp_tipo_crema_7')).toEqual({ tipo: 'crema', cantidad: 7, texto: '7 de crema' });
+  it('parsea los ids de reemplazo (sin operación en el id), con su texto canónico', () => {
+    expect(parsearBotonTipoHelado('resp_tipo_agua_50')).toEqual({ tipo: 'agua', cantidad: 50, operacion: 'reemplazar', texto: '50 de agua' });
+    expect(parsearBotonTipoHelado('resp_tipo_crema_7')).toEqual({ tipo: 'crema', cantidad: 7, operacion: 'reemplazar', texto: '7 de crema' });
+  });
+
+  it('parsea los ids con operación (delta pelado): el texto canónico dice sumar/sacar', () => {
+    // "sumale 10" ambiguo de tipo → botón resp_tipo_agua_sumar_10 → el texto que
+    // vuelve por el pipeline es "sumale 10 de agua", que el modelo interpreta como
+    // sumar (no reemplazar), así 40 → 50 en vez de 40 → 10.
+    expect(parsearBotonTipoHelado('resp_tipo_agua_sumar_10')).toEqual({ tipo: 'agua', cantidad: 10, operacion: 'sumar', texto: 'sumale 10 de agua' });
+    expect(parsearBotonTipoHelado('resp_tipo_crema_restar_5')).toEqual({ tipo: 'crema', cantidad: 5, operacion: 'restar', texto: 'sacale 5 de crema' });
   });
 
   it('rechaza ids sin cantidad válida (no inventa un pedido de 0)', () => {
@@ -55,6 +63,9 @@ describe('parsearBotonTipoHelado', () => {
     expect(parsearBotonTipoHelado('resp_tipo_agua_-5')).toBeNull();
     expect(parsearBotonTipoHelado('resp_tipo_agua_dos')).toBeNull();
     expect(parsearBotonTipoHelado('resp_tipo_agua_2.5')).toBeNull();
+    expect(parsearBotonTipoHelado('resp_tipo_agua_sumar_')).toBeNull();
+    expect(parsearBotonTipoHelado('resp_tipo_agua_sumar_0')).toBeNull();
+    expect(parsearBotonTipoHelado('resp_tipo_crema_restar_dos')).toBeNull();
   });
 
   it('rechaza ids de otras familias (respuestas rápidas y acciones de pedido)', () => {
@@ -70,5 +81,7 @@ describe('parsearBotonTipoHelado', () => {
     // mutación del pedido en vez de rutear el click como texto.
     expect(parsearBotonId('resp_tipo_agua_50')).toBeNull();
     expect(parsearBotonId('resp_tipo_crema_50')).toBeNull();
+    expect(parsearBotonId('resp_tipo_agua_sumar_10')).toBeNull();
+    expect(parsearBotonId('resp_tipo_crema_restar_5')).toBeNull();
   });
 });

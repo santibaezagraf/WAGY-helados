@@ -10,6 +10,7 @@ import {
   mencionaRetiro,
   mencionaRechazoCancelacion,
   mencionaCantidadEnUnidadNoSoportada,
+  cantidadVieneDeUnidadNoSoportada,
   mencionaMetodoPagoNoSoportado,
   normalizarTextoShortCircuit,
   intentarShortCircuit,
@@ -20,8 +21,48 @@ import {
   esPreguntaNegocioReal,
   mencionaTipoHelado,
   normalizarMetodoPago,
+  mencionaConfirmacion,
+  traeSenalDeConfirmacion,
+  detectarCantidadPelada,
+  detectarDeltaPelado,
+  traeDatosDePedido,
+  intencionesValidasPara,
+  clampIntencionPorEstado,
+  CONFIRMACIONES,
+  NEGACIONES,
+  SALUDOS,
   type PedidoActivoContext,
+  type PedidoIA,
 } from './procesar';
+
+// Helper: arma un PedidoIA completo "neutro" (todo en mantener, sin datos) para
+// que cada test solo declare el campo que le importa.
+function ia(extra: Partial<PedidoIA> = {}): PedidoIA {
+  return {
+    intencion: 'datos_pedido',
+    direccion: null,
+    aclaracion: null,
+    aclaracion_operacion: 'mantener',
+    cantidad_agua: 0,
+    cantidad_agua_operacion: 'mantener',
+    cantidad_crema: 0,
+    cantidad_crema_operacion: 'mantener',
+    cantidad_sin_tipo: 0,
+    obs_agua: null,
+    obs_agua_operacion: 'mantener',
+    obs_crema: null,
+    obs_crema_operacion: 'mantener',
+    obs_general: null,
+    obs_general_operacion: 'mantener',
+    metodo_pago: null,
+    pregunta_negocio: null,
+    // Campos que TS agrega al schema del modelo (los calcula el flujo, no la IA).
+    observaciones: null,
+    observaciones_detalle: { agua: null, crema: null, general: null },
+    datos_completos: false,
+    ...extra,
+  };
+}
 
 // Helper: arma un PedidoActivoContext completo a partir de un parcial, para no
 // repetir los campos que no importan en cada test.
@@ -644,10 +685,42 @@ describe('elegirRespuestaDatosFaltantes con el tipo sin definir', () => {
     }
   });
 
-  it('tiene prioridad sobre los demás faltantes, pero solo si falta la cantidad', () => {
-    // Si el merge ya dejó cantidad cargada, no hay tipo que preguntar.
-    expect(elegirRespuestaDatosFaltantes(false, false, true, 0, false, false, 50).tipo).toBe('botones_pago');
-    expect(elegirRespuestaDatosFaltantes(false, true, false, 0, false, false, 50).tipo).toBe('boton_retira');
+  it('tiene prioridad sobre los demás faltantes, incluso con cantidad ya cargada', () => {
+    // CAMBIO DE CONTRATO (informe 32740622175): antes esta señal se ignoraba si no
+    // faltaba la cantidad, porque solo se generaba en pedidos sin cantidad alguna.
+    // Ahora también llega cuando el cliente corrige con un número pelado sobre un
+    // pedido con los DOS tipos cargados ("mejor que sean 30"): ahí tampoco se puede
+    // adivinar el tipo, así que preguntar gana sobre pedir el resto de los datos.
+    // El gate de "¿es ambiguo de verdad?" vive en el caller, que calcula cantidadSinTipo.
+    expect(elegirRespuestaDatosFaltantes(false, false, true, 0, false, false, 50).tipo).toBe('botones_tipo_helado');
+    expect(elegirRespuestaDatosFaltantes(false, true, false, 0, false, false, 50).tipo).toBe('botones_tipo_helado');
+    // Sin señal de ambigüedad, el resto de los faltantes se comporta igual que antes.
+    expect(elegirRespuestaDatosFaltantes(false, false, true, 0, false, false, 0).tipo).toBe('botones_pago');
+    expect(elegirRespuestaDatosFaltantes(false, true, false, 0, false, false, 0).tipo).toBe('boton_retira');
+  });
+
+  it('la operación viaja: un delta pelado pide sumar/sacar, no reemplazar', () => {
+    // "sumale 10" ambiguo de tipo → el texto pregunta por lo que se SUMA, y la
+    // operación queda en el objeto para que el caller arme el id resp_tipo_*_sumar_10.
+    const suma = elegirRespuestaDatosFaltantes(false, false, false, 0, false, false, 10, 'sumar');
+    expect(suma.tipo).toBe('botones_tipo_helado');
+    if (suma.tipo === 'botones_tipo_helado') {
+      expect(suma.operacion).toBe('sumar');
+      expect(suma.mensaje).toContain('10');
+      expect(suma.mensaje).toMatch(/sumar/i);
+    }
+    const resta = elegirRespuestaDatosFaltantes(false, false, false, 0, false, false, 4, 'restar');
+    if (resta.tipo === 'botones_tipo_helado') {
+      expect(resta.operacion).toBe('restar');
+      expect(resta.mensaje).toMatch(/sacar/i);
+    }
+    // Reemplazo (default): el texto histórico, sin verbo de delta.
+    const reemplazo = elegirRespuestaDatosFaltantes(false, false, false, 0, false, false, 50);
+    if (reemplazo.tipo === 'botones_tipo_helado') {
+      expect(reemplazo.operacion).toBe('reemplazar');
+      expect(reemplazo.mensaje).toMatch(/agua o de crema/);
+      expect(reemplazo.mensaje).not.toMatch(/sumar|sacar/i);
+    }
   });
 
   it('la unidad no soportada gana: sin unidades no hay número para ningún tipo', () => {
@@ -658,5 +731,287 @@ describe('elegirRespuestaDatosFaltantes con el tipo sin definir', () => {
 
   it('sin señal se comporta igual que antes (pide la cantidad como texto)', () => {
     expect(elegirRespuestaDatosFaltantes(true, true, true, 0, false, false, 0).tipo).toBe('texto');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Redes deterministas agregadas a partir del informe nightly 32740622175.
+// ---------------------------------------------------------------------------
+
+describe('aplicarOperacionCantidad — contrato de "mantener" con valor', () => {
+  // Documenta el comportamiento que causó el hallazgo #3: cuando el modelo
+  // devuelve la combinación incoherente mantener+valor, el literal se DESCARTA.
+  // Recuperarlo es tarea de detectarCantidadPelada, no de esta función pura
+  // (que no tiene contexto para decidir a qué tipo pertenece el número).
+  it('mantener descarta el literal aunque no sea 0', () => {
+    expect(aplicarOperacionCantidad('mantener', 30, 20)).toBe(20);
+  });
+});
+
+describe('mencionaConfirmacion', () => {
+  it('atrapa el caso real del informe', () => {
+    expect(mencionaConfirmacion('Sí, confirmá.')).toBe(true);
+  });
+  it('atrapa la confirmación mezclada con otras palabras', () => {
+    expect(mencionaConfirmacion('dale, confirmalo por favor')).toBe(true);
+    expect(mencionaConfirmacion('listo, confirmame el pedido')).toBe(true);
+    expect(mencionaConfirmacion('ok confirmar')).toBe(true);
+  });
+  it('NO confunde una negación con una confirmación', () => {
+    expect(mencionaConfirmacion('no confirmes todavía')).toBe(false);
+    expect(mencionaConfirmacion('no, no lo confirmo')).toBe(false);
+    expect(mencionaConfirmacion('todavía no confirmo nada')).toBe(false);
+  });
+  it('NO confunde una pregunta con una confirmación', () => {
+    expect(mencionaConfirmacion('¿cuándo confirmás?')).toBe(false);
+    expect(mencionaConfirmacion('cómo confirmo?')).toBe(false);
+  });
+  it('no dispara si no hay verbo de confirmar', () => {
+    expect(mencionaConfirmacion('dale')).toBe(false);
+    expect(mencionaConfirmacion('20 de crema')).toBe(false);
+    expect(mencionaConfirmacion(null)).toBe(false);
+  });
+});
+
+describe('detectarCantidadPelada', () => {
+  it('atrapa los dos mensajes reales del informe', () => {
+    expect(detectarCantidadPelada('son 30 ahora')).toBe(30);
+    expect(detectarCantidadPelada('che, se me va la mano, son 40')).toBe(40);
+  });
+  it('el veto de delta es LOCAL: un "mas" en otra oración no bloquea', () => {
+    // Este es EL caso del informe. Un veto global lo mataría.
+    expect(detectarCantidadPelada('espera un toque, me pidieron mas. son 30 ahora')).toBe(30);
+  });
+  it('reconoce otras formas de reemplazo', () => {
+    expect(detectarCantidadPelada('que sean 30')).toBe(30);
+    expect(detectarCantidadPelada('ponele 25')).toBe(25);
+    expect(detectarCantidadPelada('mejor 50')).toBe(50);
+    expect(detectarCantidadPelada('30 en total')).toBe(30);
+  });
+  it('NO dispara ante un delta explícito pegado al número', () => {
+    expect(detectarCantidadPelada('sumale 30')).toBeNull();
+    expect(detectarCantidadPelada('que sean 5 más')).toBeNull();
+    expect(detectarCantidadPelada('quitale 3')).toBeNull();
+  });
+  it('NO confunde números de una dirección o aclaración', () => {
+    expect(detectarCantidadPelada('depto 6')).toBeNull();
+    expect(detectarCantidadPelada('es el piso 3')).toBeNull();
+  });
+  it('NO confunde unidades que no vendemos', () => {
+    expect(detectarCantidadPelada('que sean 2 kilos')).toBeNull();
+    expect(detectarCantidadPelada('ponele 3 bolas')).toBeNull();
+  });
+  it('NO confunde un desglose por sabores', () => {
+    expect(detectarCantidadPelada('que sean 10 de frutilla y 5 de menta')).toBeNull();
+  });
+  it('sin pista de cantidad no inventa un número', () => {
+    expect(detectarCantidadPelada('gracias 30')).toBeNull();
+    expect(detectarCantidadPelada('hola')).toBeNull();
+    expect(detectarCantidadPelada(null)).toBeNull();
+  });
+});
+
+describe('detectarDeltaPelado', () => {
+  it('atrapa el caso real: "sumale 10" sin tipo → delta sumar', () => {
+    expect(detectarDeltaPelado('sumale 10')).toEqual({ operacion: 'sumar', valor: 10 });
+  });
+  it('reconoce otras formas de sumar', () => {
+    expect(detectarDeltaPelado('agregale 5')).toEqual({ operacion: 'sumar', valor: 5 });
+    expect(detectarDeltaPelado('otros 20')).toEqual({ operacion: 'sumar', valor: 20 });
+    expect(detectarDeltaPelado('5 mas')).toEqual({ operacion: 'sumar', valor: 5 });
+  });
+  it('reconoce las formas de restar', () => {
+    expect(detectarDeltaPelado('sacale 3')).toEqual({ operacion: 'restar', valor: 3 });
+    expect(detectarDeltaPelado('quitale 4')).toEqual({ operacion: 'restar', valor: 4 });
+    expect(detectarDeltaPelado('bajale 2')).toEqual({ operacion: 'restar', valor: 2 });
+  });
+  it('la resta gana si aparecen las dos pistas', () => {
+    expect(detectarDeltaPelado('sacale 5, no le sumes')).toEqual({ operacion: 'restar', valor: 5 });
+  });
+  it('es LOCAL por cláusula, igual que detectarCantidadPelada', () => {
+    // El número del delta está en su propia cláusula; el resto no lo contamina.
+    expect(detectarDeltaPelado('ok, dale, sumale 15')).toEqual({ operacion: 'sumar', valor: 15 });
+  });
+  it('NO confunde números de dirección/aclaración ni unidades', () => {
+    expect(detectarDeltaPelado('sumale al depto 3')).toBeNull();
+    expect(detectarDeltaPelado('sumale 2 kilos')).toBeNull();
+  });
+  it('NO dispara sin una pista de delta (eso es un reemplazo, otra red)', () => {
+    expect(detectarDeltaPelado('son 30 ahora')).toBeNull();
+    expect(detectarDeltaPelado('que sean 30')).toBeNull();
+    expect(detectarDeltaPelado('10')).toBeNull();
+  });
+  it('NO confunde un desglose por sabores', () => {
+    expect(detectarDeltaPelado('sumale 10 de frutilla y 5 de menta')).toBeNull();
+  });
+  it('sin texto no inventa nada', () => {
+    expect(detectarDeltaPelado('')).toBeNull();
+    expect(detectarDeltaPelado(null)).toBeNull();
+  });
+});
+
+describe('traeDatosDePedido', () => {
+  it('detecta el pago aunque sea lo único que trae (caso del informe)', () => {
+    expect(traeDatosDePedido(ia({ metodo_pago: 'transferencia' }))).toBe(true);
+  });
+  it('detecta una operación de cantidad', () => {
+    expect(traeDatosDePedido(ia({ cantidad_crema: 20, cantidad_crema_operacion: 'reemplazar' }))).toBe(true);
+  });
+  it('detecta el retiro cuando el modelo puso el sentinela', () => {
+    expect(traeDatosDePedido(ia({ direccion: 'retira' }))).toBe(true);
+  });
+  it('detecta dirección y sabores', () => {
+    expect(traeDatosDePedido(ia({ direccion: 'Mitre 951' }))).toBe(true);
+    expect(traeDatosDePedido(ia({ obs_crema: 'chocolate', obs_crema_operacion: 'agregar' }))).toBe(true);
+  });
+  it('una consulta PURA no trae datos', () => {
+    expect(traeDatosDePedido(
+      ia({ intencion: 'consulta_negocio', pregunta_negocio: 'hasta que hora entregan?' }),
+    )).toBe(false);
+  });
+  it('una PREGUNTA sobre retirar no cuenta como dato del pedido', () => {
+    // No mira el texto crudo a propósito: "¿tengo que retirar o hacen envío?" es una
+    // consulta pura. Contarla como dato le seteaba direccion="retira" a un cliente
+    // que nunca lo pidió — falso positivo en la dirección peligrosa.
+    expect(traeDatosDePedido(
+      ia({ intencion: 'consulta_negocio', pregunta_negocio: 'tengo que retirar o hacen envio?' }),
+    )).toBe(false);
+  });
+  it('el placeholder "null" del modelo no cuenta como pago', () => {
+    expect(traeDatosDePedido(ia({ metodo_pago: 'null' }))).toBe(false);
+  });
+});
+
+describe('intencionesValidasPara / clampIntencionPorEstado', () => {
+  it('borrador ofrece confirmar pero no las de cancelación en curso', () => {
+    const v = intencionesValidasPara('borrador');
+    expect(v).toContain('confirmar');
+    expect(v).not.toContain('confirmar_cancelacion');
+    expect(v).not.toContain('rechazar_cancelacion');
+  });
+  it('esperando_cancelacion ofrece el sí/no pero no confirmar el pedido', () => {
+    const v = intencionesValidasPara('esperando_cancelacion');
+    expect(v).toContain('confirmar_cancelacion');
+    expect(v).toContain('rechazar_cancelacion');
+    expect(v).not.toContain('confirmar');
+  });
+  it('reactivar solo se ofrece si hay un pedido cancelado reciente', () => {
+    expect(intencionesValidasPara(null)).not.toContain('reactivar');
+    expect(intencionesValidasPara(null, { hayPedidoCanceladoReciente: true })).toContain('reactivar');
+  });
+
+  it('acota la intención HUÉRFANA que causó el loop del hallazgo #1', () => {
+    // confirmar_cancelacion en borrador no tiene handler: el único vive dentro
+    // del bloque de esperando_cancelacion. Sin el clamp caía al fallback y el
+    // bot reenviaba el mismo resumen para siempre.
+    expect(clampIntencionPorEstado('confirmar_cancelacion', 'borrador')).toBe('datos_pedido');
+    expect(clampIntencionPorEstado('rechazar_cancelacion', 'borrador')).toBe('datos_pedido');
+  });
+  it('acota confirmar en esperando_cancelacion (no lo convierte en cancelar)', () => {
+    expect(clampIntencionPorEstado('confirmar', 'esperando_cancelacion')).toBe('datos_pedido');
+  });
+  it('acota confirmar cuando el pedido ya está en cocina', () => {
+    expect(clampIntencionPorEstado('confirmar', 'pendiente')).toBe('datos_pedido');
+  });
+  it('deja pasar intacta una intención válida', () => {
+    expect(clampIntencionPorEstado('confirmar', 'borrador')).toBe('confirmar');
+    expect(clampIntencionPorEstado('confirmar_cancelacion', 'esperando_cancelacion')).toBe('confirmar_cancelacion');
+    expect(clampIntencionPorEstado('datos_pedido', null)).toBe('datos_pedido');
+  });
+});
+
+describe('sets del short-circuit', () => {
+  // El match es whole-message EXACTO contra el texto ya normalizado, así que una
+  // entrada con tilde, mayúscula o puntuación nunca puede matchear: sería código
+  // muerto. Es el modo de falla que dejó pasar "Sí, confirmá." (hallazgo #1).
+  it('toda entrada está en forma normalizada', () => {
+    for (const set of [CONFIRMACIONES, NEGACIONES, SALUDOS]) {
+      for (const entrada of set) {
+        expect(normalizarTextoShortCircuit(entrada)).toBe(entrada);
+      }
+    }
+  });
+  it('el imperativo voseo ahora entra por short-circuit', () => {
+    expect(intentarShortCircuit('Sí, confirmá.', 'borrador')).toBe('confirmar');
+    expect(intentarShortCircuit('confirmalo', 'borrador')).toBe('confirmar');
+  });
+  it('confirmaciones y negaciones no se pisan', () => {
+    for (const c of CONFIRMACIONES) expect(NEGACIONES.has(c)).toBe(false);
+  });
+});
+
+describe('traeSenalDeConfirmacion (veto de confirmación fantasma)', () => {
+  it('acepta el verbo confirmar y las afirmaciones sueltas', () => {
+    expect(traeSenalDeConfirmacion('sí, confirmá.')).toBe(true);
+    expect(traeSenalDeConfirmacion('dale')).toBe(true);
+    expect(traeSenalDeConfirmacion('sí, 20 de crema retiro efectivo')).toBe(true);
+    expect(traeSenalDeConfirmacion('listo, mandalo')).toBe(true);
+  });
+  it('repetir el pedido NO es una señal de confirmación', () => {
+    // El caso real: con el resumen pendiente, el cliente repite su pedido textual
+    // y el modelo lo lee como "confirmar". Repetir no es confirmar.
+    expect(traeSenalDeConfirmacion('ola, 20 de crema de chocolate, paso a retirar, efectivo')).toBe(false);
+    expect(traeSenalDeConfirmacion('20 de crema a Mitre 951, transferencia')).toBe(false);
+  });
+  it('NO cuenta palabras ambiguas que aparecen naturalmente en una oración', () => {
+    // Un falso positivo acá DESACTIVA el veto, que es la dirección peligrosa.
+    expect(traeSenalDeConfirmacion('20 de crema, va con efectivo')).toBe(false);
+    expect(traeSenalDeConfirmacion('esta bueno el helado de vainilla? mandame 10')).toBe(false);
+  });
+  it('no dispara con texto vacío', () => {
+    expect(traeSenalDeConfirmacion('')).toBe(false);
+    expect(traeSenalDeConfirmacion(null)).toBe(false);
+  });
+});
+
+describe('elegirRespuestaDatosFaltantes — unidad no soportada con pedido completo', () => {
+  it('explica que vendemos por unidad aunque no falte ningún dato', () => {
+    // Caso real de pruebas manuales: borrador completo (40 de crema, dirección,
+    // pago) y el cliente escribe "que sean 2 kilos". Antes la explicación estaba
+    // gateada por faltaCantidad, así que con el pedido completo nunca se alcanzaba
+    // y el mensaje caía al fallback ("no te entendí"), sin explicar nada.
+    const r = elegirRespuestaDatosFaltantes(false, false, false, 0, true, false, 0);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toMatch(/por unidad/i);
+      expect(r.mensaje).toMatch(/cuántas unidades/i);
+    }
+  });
+  it('sigue explicándolo cuando además falta la cantidad (comportamiento previo)', () => {
+    const r = elegirRespuestaDatosFaltantes(true, false, false, 0, true, false, 0);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') expect(r.mensaje).toMatch(/por unidad/i);
+  });
+  it('si además falta la dirección, cae a la lista y la pide', () => {
+    const r = elegirRespuestaDatosFaltantes(true, true, false, 0, true, false, 0);
+    expect(r.tipo).toBe('texto');
+    if (r.tipo === 'texto') expect(r.mensaje).toMatch(/Dirección de envío/);
+  });
+});
+
+describe('cantidadVieneDeUnidadNoSoportada', () => {
+  it('vetea el número cuando sale de una expresión en kilos (caso real)', () => {
+    // Con 40 de crema cargados, el modelo devolvió `reemplazar 2` para "que sean
+    // 2 kilos" y el pedido pasó de 40 unidades a 2. Corrupción silenciosa.
+    expect(cantidadVieneDeUnidadNoSoportada('que sean 2 kilos', 2)).toBe(true);
+    expect(cantidadVieneDeUnidadNoSoportada('mandame 3 potes', 3)).toBe(true);
+    expect(cantidadVieneDeUnidadNoSoportada('una porcion con 2 bolas', 2)).toBe(true);
+    expect(cantidadVieneDeUnidadNoSoportada('medio kilo, tipo 500 gramos', 500)).toBe(true);
+  });
+  it('el veto es POR CLÁUSULA: conserva un dato válido dicho aparte', () => {
+    // Los 30 son unidades legítimas; el "2 kilos" está en otra cláusula.
+    expect(cantidadVieneDeUnidadNoSoportada('que sean 30 unidades, no 2 kilos', 30)).toBe(false);
+    expect(cantidadVieneDeUnidadNoSoportada('que sean 30 unidades, no 2 kilos', 2)).toBe(true);
+  });
+  it('no vetea cuando no hay unidad rara', () => {
+    expect(cantidadVieneDeUnidadNoSoportada('que sean 30', 30)).toBe(false);
+    expect(cantidadVieneDeUnidadNoSoportada('40 de crema a Mitre 951', 40)).toBe(false);
+  });
+  it('no vetea un número distinto del que aparece con la unidad', () => {
+    expect(cantidadVieneDeUnidadNoSoportada('que sean 2 kilos', 40)).toBe(false);
+  });
+  it('tolera entradas vacías o inválidas', () => {
+    expect(cantidadVieneDeUnidadNoSoportada(null, 2)).toBe(false);
+    expect(cantidadVieneDeUnidadNoSoportada('que sean 2 kilos', 0)).toBe(false);
   });
 });

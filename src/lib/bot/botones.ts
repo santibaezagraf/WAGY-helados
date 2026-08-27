@@ -49,11 +49,18 @@ export const RESPUESTAS_RAPIDAS: Record<string, string> = {
  * Igual que las respuestas rápidas, el texto sigue el pipeline normal de texto
  * (QStash + LLM), que es quien sabe fusionarlo con el pedido en armado.
  *
+ * El id también puede llevar la OPERACIÓN, para el caso del delta pelado
+ * ("sumale 10" sobre un pedido con los dos tipos): "resp_tipo_agua_sumar_10" →
+ * "sumale 10 de agua", "resp_tipo_crema_restar_5" → "sacale 5 de crema". Sin
+ * operación en el id ("resp_tipo_agua_50") es un REEMPLAZO → "50 de agua". Cada
+ * texto canónico es exactamente lo que el modelo sabe interpretar como
+ * sumar/restar/reemplazar sobre ese tipo, ya sin ambigüedad de tipo.
+ *
  * Devuelve null si el id no es de esta familia (o si la cantidad no es válida).
  */
 export function parsearBotonTipoHelado(
   buttonId: string,
-): { tipo: 'agua' | 'crema'; cantidad: number; texto: string } | null {
+): { tipo: 'agua' | 'crema'; cantidad: number; operacion: 'sumar' | 'restar' | 'reemplazar'; texto: string } | null {
   const familias: Array<{ prefijo: string; tipo: 'agua' | 'crema' }> = [
     { prefijo: 'resp_tipo_agua_', tipo: 'agua' },
     { prefijo: 'resp_tipo_crema_', tipo: 'crema' },
@@ -61,9 +68,29 @@ export function parsearBotonTipoHelado(
 
   for (const { prefijo, tipo } of familias) {
     if (!buttonId.startsWith(prefijo)) continue;
-    const cantidad = Number(buttonId.slice(prefijo.length));
+    let resto = buttonId.slice(prefijo.length);
+
+    // Operación opcional prefijando la cantidad. Sin prefijo = reemplazo (compat
+    // con los ids históricos "resp_tipo_agua_50").
+    let operacion: 'sumar' | 'restar' | 'reemplazar' = 'reemplazar';
+    if (resto.startsWith('sumar_')) {
+      operacion = 'sumar';
+      resto = resto.slice('sumar_'.length);
+    } else if (resto.startsWith('restar_')) {
+      operacion = 'restar';
+      resto = resto.slice('restar_'.length);
+    }
+
+    const cantidad = Number(resto);
     if (!Number.isInteger(cantidad) || cantidad <= 0) return null;
-    return { tipo, cantidad, texto: `${cantidad} de ${tipo}` };
+
+    const texto =
+      operacion === 'sumar'
+        ? `sumale ${cantidad} de ${tipo}`
+        : operacion === 'restar'
+          ? `sacale ${cantidad} de ${tipo}`
+          : `${cantidad} de ${tipo}`;
+    return { tipo, cantidad, operacion, texto };
   }
 
   return null;

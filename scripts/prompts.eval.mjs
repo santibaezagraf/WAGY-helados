@@ -116,6 +116,39 @@ const CASOS = [
     pedidoActivo: borrador({ cantidad_agua: 25, cantidad_crema: 0 }),
     espera: { cantidad_agua: 30, cantidad_crema: 0 },
   },
+  // ---- NÚMERO PELADO (informe nightly 32740622175, hallazgo #3) ----
+  // El caso E de arriba está anclado a la pista léxica "mejor" y a un pedido con
+  // AGUA cargada. Estos cubren lo que realmente falló: crema cargada, sin pista
+  // léxica conocida, y con preámbulo conversacional. En producción la red
+  // determinista `detectarCantidadPelada` respalda esto; acá medimos el PROMPT solo.
+  {
+    nombre: 'pelado: "son 30 ahora" con crema cargada es reemplazo sobre crema',
+    mensaje: 'son 30 ahora',
+    pedidoActivo: borrador({ cantidad_agua: 0, cantidad_crema: 20 }),
+    espera: { cantidad_crema: 30, cantidad_agua: 0 },
+  },
+  {
+    nombre: 'pelado: "son 40" sin ninguna pista léxica sigue siendo reemplazo',
+    mensaje: 'che, se me va la mano, son 40',
+    pedidoActivo: borrador({ cantidad_agua: 0, cantidad_crema: 20 }),
+    espera: { cantidad_crema: 40, cantidad_agua: 0 },
+  },
+  {
+    // El "mas" está en OTRA oración ("me pidieron mas."): no convierte el 30 en
+    // un delta. Si el modelo lo lee como suma daría 50, que no es lo que pidió.
+    nombre: 'pelado: "me pidieron mas. son 30 ahora" es total (30), no delta (50)',
+    mensaje: 'espera un toque, me pidieron mas. son 30 ahora',
+    pedidoActivo: borrador({ cantidad_agua: 0, cantidad_crema: 20 }),
+    espera: { cantidad_crema: 30 },
+  },
+  {
+    // Con los DOS tipos cargados no se puede deducir a cuál se refiere: el modelo
+    // no debe adivinar, deja las cantidades quietas y manda el número a la señal.
+    nombre: 'pelado: con agua Y crema cargadas, el número va a cantidad_sin_tipo',
+    mensaje: 'mejor que sean 30',
+    pedidoActivo: borrador({ cantidad_agua: 10, cantidad_crema: 10 }),
+    espera: { cantidad_agua: 10, cantidad_crema: 10, cantidad_sin_tipo: 30 },
+  },
   // ---- TIPO DE HELADO SIN DECIR (agua o crema) ----
   // El cliente da la cantidad y el sabor, pero no el tipo. No se puede deducir
   // (frutilla existe en agua Y en crema), así que el modelo NO debe repartir la
@@ -428,6 +461,29 @@ const CASOS = [
     mensaje: 'No, no lo cancelo, dame el total ya',
     pedidoActivo: esperandoCancelacion({ cantidad_crema: 5, metodo_pago: 'efectivo', direccion: 'retira' }),
     espera: { intencion: 'rechazar_cancelacion' },
+  },
+
+  // ---- MENSAJE MIXTO: dato del pedido + pregunta de negocio ----
+  // Informe nightly 32740622175, hallazgo #2: el pago se descartaba en silencio
+  // cuando venía con una pregunta. El modelo debe copiar la pregunta en
+  // `pregunta_negocio` (ortogonal) Y extraer el pago igual. Ojo con el pedido
+  // PARCIAL: metodo_pago='' es el placeholder de "todavía no cargado".
+  {
+    nombre: 'mixto: "transferencia. y hasta que hora entregan?" guarda el pago Y copia la pregunta',
+    mensaje: 'transferencia. y hasta que hora entregan?',
+    pedidoActivo: borrador({ cantidad_crema: 20, direccion: 'retira', metodo_pago: '' }),
+    espera: { metodo_pago: 'transferencia', pregunta_negocio: /hora/i },
+  },
+
+  // ---- CONFIRMACIÓN POR TEXTO ----
+  // Informe nightly 32740622175, hallazgo #1: "Sí, confirmá." dejaba el pedido
+  // trabado en borrador. En producción lo atrapan el short-circuit ampliado y la
+  // red `mencionaConfirmacion`; acá verificamos que el modelo tampoco se pierda.
+  {
+    nombre: 'confirmar: "sí, confirmá." sobre un borrador completo es confirmar',
+    mensaje: 'sí, confirmá.',
+    pedidoActivo: borrador({ cantidad_crema: 20, direccion: 'retira', metodo_pago: 'efectivo' }),
+    espera: { intencion: 'confirmar' },
   },
 
   // ---- REACTIVAR (deshacer una cancelación reciente) ----

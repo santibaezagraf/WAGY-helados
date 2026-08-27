@@ -3,7 +3,7 @@ import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
-import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
+import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarDesambiguacionConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
 import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion, requiereAtencionActual } from '@/lib/bot/atencion-humana';
 import { esBorradorCompleto } from '@/lib/bot/borradores';
 import { registrarAlertaFallback, siguienteModelo } from '@/lib/bot/alertas';
@@ -173,7 +173,7 @@ export type ObsSlots = { agua: string | null; crema: string | null; general: str
 // `observaciones` (proyección plana) y `observaciones_detalle` (slots) los
 // computamos en TS a partir de los 6 campos crudos del modelo, así que no
 // vienen del schema directo.
-type PedidoIA = z.infer<typeof PedidoIASchema> & {
+export type PedidoIA = z.infer<typeof PedidoIASchema> & {
   datos_completos: boolean;
   observaciones: string | null;
   observaciones_detalle: ObsSlots;
@@ -203,6 +203,16 @@ export const CONFIRMACIONES = new Set([
   'esta bien', 'esta perfecto', 'todo bien', 'todo ok',
   'asi esta', 'asi va', 'asi mismo', 'tal cual',
   'si confirmo', 'si dale', 'si esta bien', 'dale confirmo', 'si confirmar',
+  // Imperativo voseo ("confirmá" → normaliza a "confirma"). Faltaba toda esta
+  // familia: "Sí, confirmá." caía al LLM y, cuando el modelo la clasificaba mal,
+  // no había ninguna red que la atrapara (hallazgo #1 del informe 32740622175).
+  // OJO: el Set es COMPARTIDO entre estados — en esperando_cancelacion un match
+  // devuelve confirmar_cancelacion. Estas entradas son del mismo verbo que ya
+  // estaba ('confirmar'/'confirmo'/'confirmalo'), así que la semántica por estado
+  // no cambia. Por eso NO se agrega 'mandalo'/'envialo': ahí significarían lo
+  // contrario (mandar el pedido, no confirmar la cancelación).
+  'confirma', 'si confirma', 'dale confirma', 'si confirmalo',
+  'confirmame', 'confirmamelo', 'confirmado', 'si confirmado',
 ]);
 
 export const NEGACIONES = new Set([
@@ -515,6 +525,71 @@ export function mencionaRechazoCancelacion(texto: string | null): boolean {
 }
 
 /**
+ * ¿El cliente está CONFIRMANDO explícitamente el borrador? Red determinista que
+ * respalda —no reemplaza— al modelo en estado `borrador`, mismo idioma que
+ * `mencionaRechazoCancelacion`.
+ *
+ * El caso real que la motiva (hallazgo #1 del informe 32740622175): tras rechazar
+ * una cancelación, el cliente escribió "Sí, confirmá." y el bot repitió el resumen
+ * en loop en vez de mandarlo a cocina. `CONFIRMACIONES` no lo atrapó porque el
+ * short-circuit matchea el MENSAJE COMPLETO exacto, y el modelo clasificó mal.
+ * Esta red trabaja sobre el texto crudo, así que tolera la confirmación mezclada
+ * con otras palabras ("dale, confirmalo por favor", "listo, confirmame el pedido").
+ *
+ * NO matchea una negación ("no confirmes", "todavía no confirmo") ni una pregunta
+ * ("¿cuándo confirmás?"). Pura y exportada para test.
+ */
+/**
+ * Intenciones en las que el cliente pidió algo concreto y distinto de "confirmá".
+ * Si el modelo eligió una de estas, su decisión manda y la red de confirmación no
+ * interviene (no queremos pisar un "cancelá" ni una consulta con un `confirmar`).
+ */
+const INTENCIONES_ACCIONABLES: Intencion[] = [
+  'confirmar', 'cancelar', 'modificar_sin_datos', 'consultar_precios', 'consulta_negocio',
+];
+
+export function mencionaConfirmacion(texto: string | null): boolean {
+  if (!texto) return false;
+  const n = texto
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, ''); // sin tildes
+
+  // Vetos primero: si hay negación o pregunta cerca del verbo, no es confirmación.
+  if (/\bno\b[^.]{0,15}\bconfirm/.test(n)) return false;
+  if (/\b(todavia|aun)\b[^.]{0,15}\bconfirm/.test(n)) return false;
+  if (/\b(cuando|como|donde|quien|que)\b[^.]{0,10}\bconfirm/.test(n)) return false;
+
+  return /\bconfirm(a|o|alo|ala|ame|amelo|arlo|arla|ar|ado)\b/.test(n);
+}
+
+/**
+ * Afirmaciones que, como palabra suelta dentro de un mensaje más largo, siguen
+ * leyéndose como un "sí". Deliberadamente NO incluye las ambiguas que aparecen
+ * naturalmente en una oración ("va", "vale", "bien", "bueno"): acá un falso
+ * positivo desactiva el veto de abajo, que es la dirección peligrosa.
+ */
+const AFIRMACIONES_SUELTAS = new Set([
+  'si', 'sip', 'sep', 'dale', 'ok', 'oka', 'oki', 'okey', 'okay',
+  'listo', 'perfecto', 'claro', 'obvio', 'joya', 'exacto', 'correcto',
+]);
+
+/**
+ * ¿Hay ALGUNA señal textual de que el cliente está afirmando/confirmando? Más
+ * amplia que `mencionaConfirmacion` (que solo mira el verbo "confirmar"): también
+ * acepta un "sí"/"dale"/"listo" suelto dentro de un mensaje más largo.
+ *
+ * Se usa para el veto de confirmación fantasma, no para disparar confirmaciones.
+ * Pura y exportada para test.
+ */
+export function traeSenalDeConfirmacion(texto: string | null): boolean {
+  if (!texto) return false;
+  if (mencionaConfirmacion(texto)) return true;
+  const n = normalizarTextoShortCircuit(texto);
+  if (!n) return false;
+  return n.split(' ').some(palabra => AFIRMACIONES_SUELTAS.has(palabra));
+}
+
+/**
  * Qué responder cuando el pedido en armado está incompleto. La regla: si falta
  * UN solo dato y es una elección cerrada, se pide con botones (pago) o con un
  * botón de atajo (retiro cuando falta la dirección); si faltan varios, lista de
@@ -525,12 +600,20 @@ export function mencionaRechazoCancelacion(texto: string | null): boolean {
  * que quedó sin asignar y el texto crudo del cliente (el sabor que mencionó es lo
  * que hace útil la redacción libre). `null` = no hay ambigüedad de tipo.
  */
-export type TipoHeladoAmbiguo = { cantidad: number; textoCliente: string };
+export type TipoHeladoAmbiguo = {
+  cantidad: number;
+  textoCliente: string;
+  // Operación a aplicar cuando el cliente elija el tipo. Ausente = 'reemplazar'
+  // (el caso original: "quiero 50 helados de frutilla" / "que sean 30"). 'sumar'/
+  // 'restar' vienen de un delta pelado ("sumale 10") sobre un pedido con los dos
+  // tipos: hay que preguntar el tipo, pero la respuesta suma/resta, no reemplaza.
+  operacion?: 'sumar' | 'restar' | 'reemplazar';
+};
 
 export type RespuestaDatosFaltantes =
   | { tipo: 'botones_pago' }
   | { tipo: 'boton_retira' }
-  | { tipo: 'botones_tipo_helado'; cantidad: number; mensaje: string }
+  | { tipo: 'botones_tipo_helado'; cantidad: number; operacion: 'sumar' | 'restar' | 'reemplazar'; mensaje: string }
   | { tipo: 'texto'; mensaje: string };
 
 // Variantes del saludo de "arranquemos tu pedido" (cuando faltan los 3 datos).
@@ -553,6 +636,7 @@ export function elegirRespuestaDatosFaltantes(
   cantidadEnUnidadNoSoportada = false,
   pagoNoSoportado = false,
   cantidadSinTipo = 0,
+  operacionSinTipo: 'sumar' | 'restar' | 'reemplazar' = 'reemplazar',
 ): RespuestaDatosFaltantes {
   // TIPO DE HELADO SIN DEFINIR: el cliente dijo CUÁNTOS quiere pero no si son de
   // agua o de crema, así que "me falta la cantidad" es falso (ya la dio) y
@@ -562,11 +646,26 @@ export function elegirRespuestaDatosFaltantes(
   // intenta primero una redacción libre acotada (que puede nombrar en qué tipo
   // está el sabor que pidió). Si además la cantidad venía en una unidad que no
   // vendemos, gana ese caso: no hay número que asignarle a ningún tipo.
-  if (faltaCantidad && cantidadSinTipo > 0 && !cantidadEnUnidadNoSoportada) {
+  //
+  // NO exige `faltaCantidad`: la señal también llega con cantidades YA cargadas,
+  // cuando el cliente corrige con un número pelado sobre un pedido que tiene los
+  // DOS tipos ("mejor que sean 30"). Ahí tampoco se puede adivinar a cuál se
+  // refiere, y descartarlo en silencio es justamente el bug que esto evita.
+  if (cantidadSinTipo > 0 && !cantidadEnUnidadNoSoportada) {
+    // El texto de la pregunta cambia según la operación: para un delta pelado
+    // ("sumale 10") no preguntamos "¿esos 10 los querés de agua o de crema?"
+    // (que suena a reemplazo), sino "¿esos 10 que querés sumar/sacar…?".
+    const mensaje =
+      operacionSinTipo === 'sumar'
+        ? `¿Esos ${cantidadSinTipo} que querés sumar, son de agua o de crema? 🍦`
+        : operacionSinTipo === 'restar'
+          ? `¿Esos ${cantidadSinTipo} que querés sacar, son de agua o de crema? 🍦`
+          : `¿Esos ${cantidadSinTipo} los querés de agua o de crema? 🍦`;
     return {
       tipo: 'botones_tipo_helado',
       cantidad: cantidadSinTipo,
-      mensaje: `¿Esos ${cantidadSinTipo} los querés de agua o de crema? 🍦`,
+      operacion: operacionSinTipo,
+      mensaje,
     };
   }
 
@@ -581,11 +680,17 @@ export function elegirRespuestaDatosFaltantes(
   if (!faltaCantidad && !faltaDireccion && faltaPago) return { tipo: 'botones_pago' };
   if (!faltaCantidad && faltaDireccion && !faltaPago) return { tipo: 'boton_retira' };
 
-  // Cuando SOLO falta la cantidad y el cliente ya la expresó en una unidad no
-  // soportada (kilo/pote/porción/bola/cucurucho), el "me falta la cantidad"
-  // genérico entra en loop porque el cliente cree que ya la dio. Le
-  // explicamos por qué no cuenta y le pedimos unidades explícitas.
-  if (faltaCantidad && !faltaDireccion && !faltaPago && cantidadEnUnidadNoSoportada) {
+  // El cliente expresó la cantidad en una unidad que no vendemos (kilo/pote/
+  // porción/bola/cucurucho). El "me falta la cantidad" genérico entra en loop
+  // porque el cliente cree que ya la dio: le explicamos por qué no cuenta y le
+  // pedimos unidades explícitas.
+  //
+  // NO exige `faltaCantidad`: también llega con un pedido YA completo, cuando el
+  // cliente intenta CORREGIR la cantidad en kilos ("que sean 2 kilos") sobre un
+  // borrador que ya tiene 40 unidades. Ahí el número tampoco se puede usar, y sin
+  // esta rama el mensaje caía al fallback y recibía un "no te entendí" que no
+  // explica nada.
+  if (!faltaDireccion && !faltaPago && cantidadEnUnidadNoSoportada) {
     return {
       tipo: 'texto',
       mensaje: "Los helados los vendemos por unidad (de agua o de crema), no por kilo/pote/porción 🍦 ¿Cuántas unidades querés? (ej: *10 de agua y 5 de crema*)",
@@ -640,14 +745,42 @@ export function mencionaMetodoPagoNoSoportado(texto: string | null): boolean {
 export function mencionaCantidadEnUnidadNoSoportada(texto: string | null): boolean {
   if (!texto) return false;
   const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  return (
-    /\b(kilos?|kilogramos?|kg)\b/.test(n) ||
-    /\bgramos?\b/.test(n) ||
-    /\bpotes?\b/.test(n) ||
-    /\bporcion(es)?\b/.test(n) ||
-    /\bbol(a|as|ita|itas)\b/.test(n) ||
-    /\bcucuruchos?\b/.test(n)
-  );
+  return UNIDADES_NO_SOPORTADAS.some(re => re.test(n));
+}
+
+const UNIDADES_NO_SOPORTADAS = [
+  /\b(kilos?|kilogramos?|kg)\b/,
+  /\bgramos?\b/,
+  /\bpotes?\b/,
+  /\bporcion(es)?\b/,
+  /\bbol(a|as|ita|itas)\b/,
+  /\bcucuruchos?\b/,
+];
+
+/**
+ * ¿El número que el modelo extrajo viene de una unidad que NO vendemos? Veto
+ * determinista sobre la cantidad, no sobre el mensaje de respuesta.
+ *
+ * El prompt le pide al modelo dejar en "mantener" las cantidades expresadas en
+ * kilos/potes/porciones/bolas, pero no siempre obedece: con 40 de crema cargados,
+ * "que sean 2 kilos" volvió como `cantidad_crema: 2, reemplazar` y el pedido pasó
+ * de 40 unidades a **2** ($16.000 → $800). Eso es corrupción silenciosa de datos:
+ * mucho peor que no entender el mensaje.
+ *
+ * Se evalúa POR CLÁUSULA, igual que `detectarCantidadPelada`: solo vetea si el
+ * número aparece en la misma cláusula que la unidad rara. Así "que sean 30
+ * unidades, no 2 kilos" conserva los 30, que es un dato válido que el cliente sí
+ * dio. Pura y exportada para test.
+ */
+export function cantidadVieneDeUnidadNoSoportada(texto: string | null, valor: number): boolean {
+  if (!texto || !Number.isFinite(valor) || valor <= 0) return false;
+  const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+  for (const clausula of n.split(/[.;,]/)) {
+    if (!UNIDADES_NO_SOPORTADAS.some(re => re.test(clausula))) continue;
+    if (new RegExp(`\\b${valor}\\b`).test(clausula)) return true;
+  }
+  return false;
 }
 
 /**
@@ -672,6 +805,219 @@ export function mencionaTipoHelado(texto: string | null): boolean {
   }
 
   return /\baguas?\b/.test(n) || /\bcremas?\b/.test(n);
+}
+
+// Palabras que hacen que un número NO sea una cantidad de helados: partes de una
+// dirección/aclaración, o unidades que no vendemos (el prompt ya deja esas en 0).
+const CONTEXTO_NO_CANTIDAD =
+  /(depto|dpto|departamento|piso|torre|timbre|nro|numero|calle|altura|km|kilo|gramo|kg|gr|pote|bola|porcion|cucurucho|copa)/;
+
+// Pistas de que el número es un DELTA y no un total. Si aparecen pegadas al
+// número, la operación la resuelve el modelo (sumar/restar), no esta red.
+const PISTAS_DELTA = /(mas|menos|sumale|sumal|suma|quitale|quital|saca|sacale|agrega|agregale|otros|otras)/;
+
+/**
+ * ¿El mensaje trae una cantidad "pelada" (un número sin decir si es de agua o de
+ * crema) que corrige el pedido? Red determinista que respalda al modelo, mismo
+ * idioma que `mencionaRetiro` / `mencionaTipoHelado`.
+ *
+ * El caso real que la motiva (hallazgo #3 del informe 32740622175): con 20 de
+ * crema cargados, "espera un toque, me pidieron mas. son 30 ahora" y después
+ * "che, se me va la mano, son 40" NO se aplicaron nunca. El modelo devolvía
+ * `mantener` (el prompt decía "mantener: no menciona ese tipo en el mensaje"),
+ * y `aplicarOperacionCantidad` descarta el literal en silencio cuando la
+ * operación es `mantener`.
+ *
+ * Devuelve el número, o null si no hay una cantidad pelada reconocible.
+ *
+ * Los vetos se aplican POR CLÁUSULA, no sobre todo el texto: solo descartan si la
+ * pista ("más", "sumale", "piso"…) está en la misma cláusula que el número. Es
+ * exactamente lo que hace que el caso real dispare — ese "mas" pertenece a otra
+ * oración ("me pidieron mas."), no al 30. Un veto global mataría el caso que
+ * vinimos a arreglar.
+ *
+ * Pura y exportada para test. Quien la llama decide a qué tipo aplicarla.
+ */
+export function detectarCantidadPelada(texto: string | null): number | null {
+  if (!texto) return null;
+  const n = texto
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+  // Un desglose por sabores ("10 de frutilla y 5 de menta") no es una cantidad
+  // pelada: son varios números que el modelo ya sabe sumar dentro de un tipo.
+  if ((n.match(/\d+\s+de\s+[a-z]/g) ?? []).length >= 2) return null;
+
+  // Pista ADELANTE del número ("son 30", "que sean 30", "ponele 30") o ATRÁS
+  // ("30 ahora", "30 en total"). Ambas formas aparecen en conversación real.
+  const patrones = [
+    /\b(?:son|serian|seran|sean|ponele|pone|poneme|mejor|hacelo|haceme|dejalo en)\s+(\d{1,4})\b/,
+    /\b(\d{1,4})\s+(?:ahora|en total|al final|entonces)\b/,
+  ];
+
+  // Partimos en cláusulas para que los vetos sean locales: "me pidieron mas." y
+  // "son 30 ahora" son dos cláusulas distintas, y ese "mas" no califica al 30.
+  for (const clausula of n.split(/[.;,]/)) {
+    for (const patron of patrones) {
+      const m = clausula.match(patron);
+      if (!m) continue;
+
+      if (PISTAS_DELTA.test(clausula)) continue;
+      if (CONTEXTO_NO_CANTIDAD.test(clausula)) continue;
+
+      const valor = Number.parseInt(m[1], 10);
+      if (Number.isFinite(valor) && valor > 0) return valor;
+    }
+  }
+
+  return null;
+}
+
+// Deltas que SUMAN / RESTAN sin nombrar el tipo. Complementan a PISTAS_DELTA:
+// aquélla solo marca "acá hay un delta, no lo trates como total"; estas dos
+// además dicen la DIRECCIÓN, que es lo que necesitamos para saber si el número
+// se suma o se resta al aplicar la respuesta del cliente.
+const PISTAS_DELTA_RESTAR = /\b(?:quitale|quital|quita|quitame|sacale|sacal|saca|sacame|restale|restame|resta|restar|bajale|baja|menos)\b/;
+const PISTAS_DELTA_SUMAR = /\b(?:sumale|sumal|suma|sumame|agregale|agregame|agrega|agregales|añadile|anadile|otros|otras|mas)\b/;
+
+/**
+ * ¿El mensaje trae un DELTA "pelado" (un número que se suma o resta al pedido,
+ * sin decir si es de agua o de crema)? El caso real: sobre un borrador completo
+ * con los dos tipos cargados, "sumale 10" — el cliente quiere AGREGAR 10, pero
+ * no dijo de qué tipo. El modelo deja la cantidad en `cantidad_sin_tipo` y no
+ * aplica nada; sin esta red el mensaje cae al fallback y recibe un "no te
+ * entendí" pese a ser una instrucción clarísima.
+ *
+ * Es la contraparte de `detectarCantidadPelada` (que resuelve REEMPLAZOS pelados
+ * como "son 30 ahora"): aquélla vetea justamente los deltas (PISTAS_DELTA), así
+ * que "sumale 10" le devuelve null. Acá los captamos y devolvemos la dirección.
+ *
+ * Mismos vetos por cláusula que sus hermanas (desglose por sabores y contexto de
+ * dirección/unidad no soportada). Pura y exportada para test. Quien la llama
+ * decide a qué tipo aplicarla (o si preguntar, cuando hay ambigüedad de tipo).
+ */
+export function detectarDeltaPelado(
+  texto: string | null,
+): { operacion: 'sumar' | 'restar'; valor: number } | null {
+  if (!texto) return null;
+  const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+  // Un desglose por sabores ("10 de frutilla y 5 de menta") no es un delta pelado.
+  if ((n.match(/\d+\s+de\s+[a-z]/g) ?? []).length >= 2) return null;
+
+  // Veto de dirección/unidad no soportada. Con límites de palabra a propósito:
+  // CONTEXTO_NO_CANTIDAD (sin \b) haría que "gr" de gramo matcheara dentro de
+  // "agregale" y "sumale" nunca dispararía. Acá el número lo detectamos suelto,
+  // así que necesitamos el borde. detectarCantidadPelada no sufre esto porque
+  // exige una pista líder ("son"/"sean"/"ponele") que nunca es un delta.
+  const contextoNoCantidad =
+    /\b(depto|dpto|departamento|piso|torre|timbre|nro|numero|calle|altura|km|kilos?|gramos?|kg|gr|potes?|bolas?|porciones?|cucuruchos?|copas?)\b/;
+
+  for (const clausula of n.split(/[.;,]/)) {
+    if (contextoNoCantidad.test(clausula)) continue;
+
+    const m = clausula.match(/\b(\d{1,4})\b/);
+    if (!m) continue;
+    const valor = Number.parseInt(m[1], 10);
+    if (!Number.isFinite(valor) || valor <= 0) continue;
+
+    // Restar primero: si aparecen las dos pistas ("saca 10, no menos"), la
+    // resta es la instrucción explícita y gana.
+    if (PISTAS_DELTA_RESTAR.test(clausula)) return { operacion: 'restar', valor };
+    if (PISTAS_DELTA_SUMAR.test(clausula)) return { operacion: 'sumar', valor };
+  }
+
+  return null;
+}
+
+/**
+ * ¿El mensaje trae datos concretos del pedido, además de lo que sea que el modelo
+ * haya elegido como `intencion`? Mira SOLO el output crudo del modelo.
+ *
+ * El caso real que la motiva (hallazgo #2 del informe 32740622175): "transferencia.
+ * y hasta que hora entregan?" sobre un borrador al que solo le faltaba el pago. El
+ * modelo clasificó `consulta_negocio`, cuyo handler CORTA el flujo con return antes
+ * de aplicar y persistir nada — el "transferencia" se descartó en silencio y el bot
+ * volvió a pedir el pago en el turno siguiente.
+ *
+ * El prompt ya pide usar `datos_pedido` cuando el mensaje además trae datos, pero
+ * es una regla soft. Esta es la red determinista equivalente a los overrides que ya
+ * existen para `saludo`+datos y `modificar_sin_datos`+cambios.
+ *
+ * A PROPÓSITO no mira el texto crudo: si el modelo extrajo un dato, es señal fuerte
+ * de que el mensaje lo traía. Una heurística de texto acá sería demasiado agresiva
+ * en la dirección peligrosa — "retirar" aparece naturalmente en preguntas ("¿tengo
+ * que retirar o hacen envío?"), y reclasificar eso como dato haría que una consulta
+ * PURA le setee `direccion="retira"` a un cliente que nunca lo pidió. Cuando el
+ * cliente sí dice que retira, el modelo pone el sentinela y `direccion` lo capta.
+ *
+ * Pura y exportada para test.
+ */
+export function traeDatosDePedido(pedido: PedidoIA): boolean {
+  if (normalizarMetodoPago(pedido.metodo_pago) !== null) return true;
+  if (pedido.cantidad_agua_operacion !== 'mantener') return true;
+  if (pedido.cantidad_crema_operacion !== 'mantener') return true;
+  if ((pedido.cantidad_sin_tipo ?? 0) > 0) return true;
+  if (pedido.direccion !== null) return true;
+  if (pedido.obs_agua_operacion !== 'mantener') return true;
+  if (pedido.obs_crema_operacion !== 'mantener') return true;
+  if (pedido.obs_general_operacion !== 'mantener') return true;
+  return false;
+}
+
+/**
+ * Intenciones que tienen sentido —y que tienen HANDLER— en un estado dado. Es la
+ * misma lista que `buildSystemPrompt` le muestra al modelo; se extrae acá para que
+ * el prompt y la validación no drifteen (se usa en los dos lados).
+ */
+export function intencionesValidasPara(
+  estado: string | null,
+  opciones?: { hayPedidoCanceladoReciente?: boolean },
+): Intencion[] {
+  const comunes: Intencion[] = ['saludo', 'consultar_precios', 'consulta_negocio', 'datos_pedido'];
+
+  if (estado === 'esperando_cancelacion') {
+    return ['confirmar_cancelacion', 'rechazar_cancelacion', ...comunes];
+  }
+  if (estado === 'borrador') {
+    return ['cancelar', 'confirmar', 'modificar_sin_datos', ...comunes];
+  }
+  if (estado === 'pendiente' || estado === 'enviado') {
+    // Pedido ya en cocina/despachado: no hay borrador que confirmar.
+    return ['cancelar', 'modificar_sin_datos', ...comunes];
+  }
+  // Sin pedido activo. "reactivar" solo se ofrece si hay algo que reactivar.
+  return [
+    'cancelar',
+    ...(opciones?.hayPedidoCanceladoReciente ? (['reactivar'] as Intencion[]) : []),
+    ...comunes,
+  ];
+}
+
+/**
+ * Acota la intención que devolvió el modelo a las válidas para el estado actual.
+ *
+ * `IntencionEnum` es GLOBAL (el schema no puede variar por estado), así que el
+ * modelo puede devolver, por ejemplo, `confirmar_cancelacion` estando en `borrador`.
+ * El único handler de esa intención está encerrado dentro del bloque de
+ * `esperando_cancelacion`, así que fuera de ahí es una intención HUÉRFANA: no
+ * matchea ningún handler y el mensaje cae al fallback de "reenviar el resumen",
+ * en loop y para siempre (hallazgo #1 del informe 32740622175).
+ *
+ * Coercionar a `datos_pedido` es seguro y no destructivo: es el catch-all que todos
+ * los estados manejan. Nunca convertimos una intención en otra ACCIONABLE (eso sería
+ * adivinar en la dirección peligrosa: cancelar o confirmar un pedido por nuestra
+ * cuenta). Recuperar la intención real es tarea de las redes deterministas, que
+ * miran el texto del cliente.
+ *
+ * Pura y exportada para test.
+ */
+export function clampIntencionPorEstado(
+  intencion: Intencion,
+  estado: string | null,
+  opciones?: { hayPedidoCanceladoReciente?: boolean },
+): Intencion {
+  return intencionesValidasPara(estado, opciones).includes(intencion) ? intencion : 'datos_pedido';
 }
 
 /**
@@ -825,9 +1171,13 @@ export function buildSystemPrompt(
   const esperandoCancelacion = pedidoActivo && pedidoActivo.estado === 'esperando_cancelacion';
 
   if (pedidoActivo && (tieneBorrador || yaExisteEnCocina || esperandoCancelacion)) {
-    const intencionesValidas = esperandoCancelacion
-      ? `"confirmar_cancelacion", "rechazar_cancelacion", "saludo", "consultar_precios", "consulta_negocio", "datos_pedido"`
-      : `"cancelar", "confirmar", "saludo", "modificar_sin_datos", "consultar_precios", "consulta_negocio", "datos_pedido"`;
+    // Misma fuente de verdad que `clampIntencionPorEstado`, que descarta lo que el
+    // modelo devuelva fuera de esta lista (el enum del schema es global y no puede
+    // variar por estado). Si divergieran, el modelo podría elegir una intención sin
+    // handler y el mensaje caería al fallback de reenviar el resumen, en loop.
+    const intencionesValidas = intencionesValidasPara(pedidoActivo.estado)
+      .map(i => `"${i}"`)
+      .join(', ');
 
     const slots = leerSlots(pedidoActivo);
 
@@ -869,12 +1219,12 @@ export function buildSystemPrompt(
       CAMPO "pregunta_negocio" (INDEPENDIENTE de la intención): si el mensaje incluye una pregunta o planteo REAL de negocio (horarios, si llegan/cobertura de una zona, cuánto demora la entrega, qué sabores hay disponibles, stock, promos, venta mayorista, un reclamo o problema con un pedido, facturación), copiá esa pregunta textual en "pregunta_negocio" — SIEMPRE, aunque además elijas "datos_pedido"/"confirmar"/etc. porque el mensaje trae datos del pedido. Dejala en null si no hay una pregunta de negocio real (bromas, off-topic o mensajes sin sentido NO son consulta de negocio).
 
       2. REGLAS DE ACTUALIZACIÓN DE DATOS (Combina el mensaje actual con los datos de arriba):
-      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, mantén la dirección actual: "${pedidoActivo.direccion}". Si el cliente dice que pasa a RETIRAR / lo pasa a buscar / retira en el local (cualquier conjugación: "retiro", "paso a retirar", "lo busco"), poné direccion="retira" (sentinela), aunque lo diga junto con otros datos.
+      - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, ${pedidoActivo.direccion ? `mantén la dirección actual: "${pedidoActivo.direccion}"` : `poné null (eso corresponde a la aclaración; este pedido TODAVÍA NO TIENE dirección cargada)`}. Si el cliente dice que pasa a RETIRAR / lo pasa a buscar / retira en el local (cualquier conjugación: "retiro", "paso a retirar", "lo busco"), poné direccion="retira" (sentinela), aunque lo diga junto con otros datos.
       - "aclaracion" + "aclaracion_operacion": Detalles extra de la ubicación (departamento, piso, torre, conjunto, color de casa). Ej: "depto 6 del conjunto violeta", "la casa de 2 pisos", "donde el tacho gris", "con el porton verde". NO fusiones vos el texto: solo extraé el dato de ESTE mensaje y elegí la operación; el sistema combina con lo actual (${pedidoActivo.aclaracion ? `"${pedidoActivo.aclaracion}"` : 'null'}).
         * "agregar": el cliente suma un detalle NUEVO sobre un objeto/atributo que NO estaba descrito. Devolvé SOLO el detalle nuevo en "aclaracion" (el sistema lo concatena con coma). Ej: actual "la casa es verde" + mensaje "con marco naranja" → aclaracion="con marco naranja", aclaracion_operacion="agregar" (color de casa y marco son cosas distintas). Otro: actual "depto 6" + mensaje "piso 3" → aclaracion="piso 3", aclaracion_operacion="agregar".
         * "reemplazar": el cliente CONTRADICE un detalle del actual. OJO: contradecir NO requiere que diga "no". Si vuelve a describir el MISMO objeto/atributo (el portón, la casa, la puerta, el piso, el color) con otro valor, ES una contradicción → reemplazar, no agregar. Devolvé el texto ya corregido COMPLETO en "aclaracion", reemplazando el valor viejo de ese atributo y conservando los demás detalles. Ej explícito: actual "casa marron, de 2 pisos" + mensaje "no, es verde" → aclaracion="casa verde, de 2 pisos". Ej implícito: actual "porton rojo, puerta gris" + mensaje "porton gris" → aclaracion="porton gris, puerta gris" (el portón ya estaba descrito como rojo; se pisa ese valor, la puerta se mantiene), aclaracion_operacion="reemplazar".
         * "mantener": el cliente no menciona ninguna aclaración en este mensaje. aclaracion=null, aclaracion_operacion="mantener".
-      - "metodo_pago": Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".
+      - "metodo_pago": "efectivo", "transferencia" o null. El cliente puede nombrarlos de formas distintas ("en billete", "cash", "mercado pago", "mp", "por transferencia"); mapealos SIEMPRE a una de esas 2 palabras exactas. ${pedidoActivo.metodo_pago ? `Si no menciona un cambio explícito, mantén el actual: "${pedidoActivo.metodo_pago}".` : `Este pedido TODAVÍA NO TIENE forma de pago cargada: si el mensaje la menciona —aunque sea al pasar y mezclada con otra cosa (ej. "transferencia. y hasta qué hora entregan?")— extraela. Solo poné null si el mensaje realmente no la menciona.`}
       - SABORES (campos "obs_agua" / "obs_crema" / "obs_general" + sus "_operacion"): NO armes el texto final ni pongas el prefijo "los de agua/crema"; extraé solo los sabores de ESTE mensaje en su slot y elegí la operación, TS combina y reconstruye. "de agua"/"de crema" es el TIPO, NO un sabor.
         * Slot: "obs_agua"/"obs_crema" = sabores que el cliente atribuye a ese tipo, sin prefijo (ej. "10 de frutilla y 5 de menta"). "obs_general" = detalles sin tipo ("sin coco") o sabores sin tipo declarado ("de dulce de leche").
         * Operación (igual que aclaracion, + "limpiar"): "reemplazar" si DEFINE los sabores de ese tipo ("los de agua que sean X"); "agregar" si suma un sabor (devolvé solo el nuevo); "mantener" si no menciona ese tipo (texto null); "limpiar" si pide sacarlos. Conservá desgloses numéricos tal cual; NUNCA inventes sabores.
@@ -884,10 +1234,12 @@ export function buildSystemPrompt(
         * "sumar": agrega al actual. Pistas: "más", "sumá", "agregá", "otro/s". Ej: "sumale 50", "5 más de agua", "que sean 25 más" (con "más" = delta 25, NO total).
         * "restar": quita. Pistas: "menos", "quitá", "sacá". Ej: "quitale 3", "5 menos de crema".
         * "reemplazar": valor FIJO, SIN "más"/"menos". Ej: "que sean 50", "cambialo a 20", "ahora 30 de crema". También el desglose ya sumado ("que los de agua sean 20 de frutilla y 40 de menta" → 60).
-        * "mantener": no menciona ese tipo en el mensaje. Valor = 0.
+        * "mantener": el mensaje no da NINGUNA cantidad para ese tipo, ni explícita ("20 de crema") ni implícita (ver NÚMERO PELADO). Valor = 0. NUNCA devuelvas "mantener" con un valor distinto de 0: si extraíste un número, elegí la operación que corresponda.
+        * NÚMERO PELADO (un número SIN decir el tipo, corrigiendo lo que ya hay): si el mensaje da una cantidad y NO dice "de agua" ni "de crema", mirá el pedido actual. Si hay EXACTAMENTE UN tipo con cantidad > 0, ese número se refiere a ESE tipo → "reemplazar" sobre él (y el otro tipo en "mantener"), SALVO que el número venga con una pista explícita de delta pegada ("5 más", "sumale 5", "5 menos"), que entonces es sumar/restar. El preámbulo conversacional no cambia nada: lo que importa es la palabra pegada al número. Si los DOS tipos tienen cantidad > 0, NO adivines: ver "SIN TIPO" abajo.
         * CAMBIO DE TIPO (reemplaza un tipo por el OTRO): cuando el cliente CORRIGE el tipo del pedido —"mejor N de <otro tipo>", "no, N de <otro tipo>", "en vez de eso N de <otro tipo>", "mejor que sean de <otro tipo>"— NO está sumando un segundo tipo: está cambiando el pedido al otro tipo. Poné el tipo NUEVO en "reemplazar" con la cantidad dicha, Y el tipo VIEJO en "reemplazar" con valor 0 (se limpia). Si NO da número nuevo ("mejor que sean de crema"), arrastrá la cantidad actual del tipo viejo al nuevo (nuevo=reemplazar con esa cantidad, viejo=reemplazar 0). Pistas de CAMBIO: "mejor", "no", "en vez de", "que sean de". Pistas de AGREGADO (esto NO es cambio, es "sumar" y CONSERVA el tipo viejo con "mantener"): "y", "sumale", "agregá", "también", "además", "más".
         Contraste clave (cada tipo es independiente; suponé actual agua=25, crema=0): "25 más de agua" = agua sumar 25 | "25 de agua" = agua reemplazar 25 | "5 menos de crema" = crema restar 5 | "mejor 30 pero de crema" = crema reemplazar 30 + agua reemplazar 0 (cambio de tipo) | "no, 30 de crema" = crema reemplazar 30 + agua reemplazar 0 (cambio de tipo) | "mejor que sean de crema" = crema reemplazar 25 + agua reemplazar 0 (cambio de tipo sin número, arrastra la cantidad) | "y sumale 30 de crema" = crema sumar 30 + agua mantener (agregado, conserva agua) | "mejor 30" = agua reemplazar 30 + crema mantener (corrige la cantidad del MISMO tipo, no toca el otro).
-        * SIN TIPO ("cantidad_sin_tipo"): si el mensaje da una cantidad, el pedido tiene agua=0 Y crema=0 y no dice "de agua" ni "de crema" ("50 helados de frutilla"), NO adivines (el sabor NO define el tipo): las dos cantidades en "mantener", el número en "cantidad_sin_tipo" y el sabor en "obs_general". Si ya hay cantidad en un tipo ("mejor 30") o la unidad no se vende (kilos/potes/porciones/bolas), cantidad_sin_tipo=0.
+        Contraste de NÚMERO PELADO (suponé ahora actual crema=20, agua=0): "son 30 ahora" = crema reemplazar 30 + agua mantener | "che, se me va la mano, son 40" = crema reemplazar 40 + agua mantener | "espera un toque, me pidieron mas. son 30 ahora" = crema reemplazar 30 (el "mas" está en OTRA oración y no está pegado al número: es total, no delta) | "que sean 30" = crema reemplazar 30 | "ponele 30" = crema reemplazar 30 | "sumale 30" = crema sumar 30 (acá SÍ hay pista de delta pegada al número) | "30 más" = crema sumar 30.
+        * SIN TIPO ("cantidad_sin_tipo"): si el mensaje da una cantidad, el pedido tiene agua=0 Y crema=0 y no dice "de agua" ni "de crema" ("50 helados de frutilla"), NO adivines (el sabor NO define el tipo): las dos cantidades en "mantener", el número en "cantidad_sin_tipo" y el sabor en "obs_general". Si hay EXACTAMENTE UN tipo con cantidad > 0, tampoco: ese número va a ESE tipo (ver NÚMERO PELADO arriba), cantidad_sin_tipo=0. PERO si los DOS tipos tienen cantidad > 0 y el cliente da un número pelado ("mejor que sean 30"), NO adivines a cuál se refiere: las dos cantidades en "mantener" y el número en "cantidad_sin_tipo" (el sistema le pregunta cuál). Si la unidad no se vende (kilos/potes/porciones/bolas), cantidad_sin_tipo=0.
         * Si el último turno del bot preguntó el tipo y el cliente lo responde ("de agua", "50 de crema"), poné en ese tipo la cantidad del mensaje o, si no la repite, la que preguntó el bot, con "reemplazar", y mové obs_general al slot de ese tipo ("agregar" + obs_general "limpiar").
         POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en "mantener" (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede sin definir.
 
@@ -901,7 +1253,7 @@ export function buildSystemPrompt(
     CONTEXTO: El cliente no tiene pedidos activos. Extrae una nueva orden desde cero.
 
     1. INTENCIÓN DEL MENSAJE (campo "intencion", elegí UNA opción):
-    Valores válidos en este contexto: "cancelar", ${hayPedidoCanceladoReciente ? `"reactivar", ` : ''}"saludo", "consultar_precios", "consulta_negocio", "datos_pedido".
+    Valores válidos en este contexto: ${intencionesValidasPara(null, { hayPedidoCanceladoReciente }).map(i => `"${i}"`).join(', ')}.
     - "cancelar": el cliente pide explícitamente cancelar/anular un pedido (puede estar refiriéndose a uno ya despachado, aunque no haya pedido activo).${hayPedidoCanceladoReciente ? `
     - "reactivar": el cliente acaba de cancelar un pedido y se ARREPIENTE: quiere recuperar ese mismo pedido tal cual estaba, SIN aportar datos nuevos (ej: "no, no lo canceles", "en realidad sí lo quiero", "reactivalo", "volvé a activar el pedido", "quiero el pedido que cancelé"). Si en cambio arranca un pedido NUEVO con datos concretos (cantidades/dirección/pago distintos), usá "datos_pedido".` : ''}
     - "saludo": el mensaje es ÚNICAMENTE un saludo (ej: "hola", "buenas"), sin datos del pedido.
@@ -983,7 +1335,7 @@ export async function pedirDatosFaltantes(
   // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
   // `seed` rota el saludo cuando faltan los 3 datos (ver elegirRespuestaDatosFaltantes),
   // para no repetir el mismo texto ante mensajes off-topic seguidos.
-  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo?.cantidad ?? 0);
+  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo?.cantidad ?? 0, tipoHeladoAmbiguo?.operacion ?? 'reemplazar');
   // Cuando entramos por la rama "saludo con borrador parcial", el caller
   // prepende un "¡Hola! 👋 …" al cuerpo así el cliente ve UNA sola burbuja en
   // vez de dos seguidas (saludo + pedido de datos). Vale para las tres formas
@@ -1003,17 +1355,26 @@ export async function pedirDatosFaltantes(
     // que pidió y de en qué tipos existe—, pero los sabores son un área que el bot
     // conoce, así que la redacción se la pedimos al modelo con contexto curado. Si
     // falla o se va de tema, va el texto determinista de `respuesta.mensaje`.
-    const libre = tipoHeladoAmbiguo
-      ? await redactarPreguntaTipoHelado(respuesta.cantidad, tipoHeladoAmbiguo.textoCliente, numeroCliente)
-      : null;
-    // La cantidad viaja en el ID del botón (y en su título), así que el click
-    // vuelve como el texto canónico "N de agua"/"N de crema": el turno siguiente
-    // no tiene que deducir el número del historial.
+    //
+    // Solo para REEMPLAZO ("quiero 50 helados de frutilla"): la redacción libre
+    // está pensada para nombrar en qué tipo está el sabor. Para un delta pelado
+    // ("sumale 10") no hay sabor que ubicar y la redacción tendería a leerlo como
+    // reemplazo, así que usamos el texto determinista (que ya dice "sumar/sacar").
+    const libre =
+      tipoHeladoAmbiguo && respuesta.operacion === 'reemplazar'
+        ? await redactarPreguntaTipoHelado(respuesta.cantidad, tipoHeladoAmbiguo.textoCliente, numeroCliente)
+        : null;
+    // La cantidad Y la operación viajan en el ID del botón (y la operación también
+    // en el título), así que el click vuelve como el texto canónico —"N de agua"
+    // para reemplazo, "sumale N de agua"/"sacale N de agua" para delta—: el turno
+    // siguiente no tiene que deducir el número ni la operación del historial.
+    const sufijoOp = respuesta.operacion === 'reemplazar' ? '' : `${respuesta.operacion}_`;
+    const signo = respuesta.operacion === 'sumar' ? '+' : respuesta.operacion === 'restar' ? '-' : '';
     return enviarMensajeConBotones(numeroCliente, `${prefijo}${libre ?? respuesta.mensaje}`, [
-      // (los prefijos los parsea `parsearBotonTipoHelado` en botones.ts, igual que
-      // los ids literales de RESPUESTAS_RAPIDAS que manda este mismo helper)
-      { id: `resp_tipo_agua_${respuesta.cantidad}`, title: `${respuesta.cantidad} de agua` },
-      { id: `resp_tipo_crema_${respuesta.cantidad}`, title: `${respuesta.cantidad} de crema` },
+      // (los prefijos + la operación los parsea `parsearBotonTipoHelado` en botones.ts,
+      // igual que los ids literales de RESPUESTAS_RAPIDAS que manda este mismo helper)
+      { id: `resp_tipo_agua_${sufijoOp}${respuesta.cantidad}`, title: `${signo}${respuesta.cantidad} de agua` },
+      { id: `resp_tipo_crema_${sufijoOp}${respuesta.cantidad}`, title: `${signo}${respuesta.cantidad} de crema` },
     ]);
   }
 
@@ -1165,6 +1526,12 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   }
 
   console.log(`📦 Claimed ${mensajesClaim.length} mensaje(s) nuevo(s) para ${numeroCliente}.`);
+
+  // Texto CRUDO del batch del cliente. Es la entrada de todas las redes
+  // deterministas (retiro, rechazo de cancelación, confirmación, cantidad pelada,
+  // unidad/pago no soportado): trabajan sobre lo que el cliente escribió, no sobre
+  // la extracción del modelo, que es justamente lo que vienen a respaldar.
+  const textoBatch = mensajesClaim.map(m => m.texto ?? '').join(' ');
 
   // Tildes azules + "escribiendo…" sobre el mensaje más reciente del batch.
   // Va acá (post-claim) y NO en el webhook a propósito: durante el debounce el
@@ -1381,6 +1748,13 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   //    devuelve "false" string en vez de false boolean). Reintentamos a mano.
   const MAX_ATTEMPTS = 3;
   let pedido: PedidoIA | null = null;
+  // Cantidad "pelada" que la red no pudo asignar porque el pedido tiene los DOS
+  // tipos cargados: se resuelve preguntándole al cliente cuál (ver más abajo).
+  let cantidadPeladaAmbigua = 0;
+  // Delta "pelado" ("sumale 10") sobre un pedido con los DOS tipos cargados:
+  // igual que el reemplazo pelado, pero la operación (sumar/restar) se propaga a
+  // los botones para que la respuesta del cliente sume/reste en vez de reemplazar.
+  let deltaPeladoAmbiguo: { operacion: 'sumar' | 'restar'; valor: number } | null = null;
   let lastError: unknown = null;
   let modeloIdx = 0; // índice en MODELOS_EXTRACCION; avanza ante un 429 (fallback)
   let attempt = 0; // reintentos por validación DENTRO del modelo actual
@@ -1436,18 +1810,109 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       const cantidadAguaActual = pedidoActivo?.cantidad_agua ?? 0;
       const cantidadCremaActual = pedidoActivo?.cantidad_crema ?? 0;
 
-      const cantidadAguaFinal = aplicarOperacionCantidad(
+      let cantidadAguaFinal = aplicarOperacionCantidad(
         object.cantidad_agua_operacion,
         object.cantidad_agua,
         cantidadAguaActual,
       );
-      const cantidadCremaFinal = aplicarOperacionCantidad(
+      let cantidadCremaFinal = aplicarOperacionCantidad(
         object.cantidad_crema_operacion,
         object.cantidad_crema,
         cantidadCremaActual,
       );
 
       console.log(`🧮 Cantidades: agua ${cantidadAguaActual} -> ${cantidadAguaFinal} (op: ${object.cantidad_agua_operacion}, valor: ${object.cantidad_agua}), crema ${cantidadCremaActual} -> ${cantidadCremaFinal} (op: ${object.cantidad_crema_operacion}, valor: ${object.cantidad_crema})`);
+
+      // VETO DE UNIDAD NO SOPORTADA: el modelo tomó el número de una expresión en
+      // kilos/potes/porciones y lo asignó como si fueran unidades. El prompt le pide
+      // dejarlo en "mantener", pero no siempre obedece: "que sean 2 kilos" sobre 40
+      // de crema volvió como `reemplazar 2` y el pedido pasó de 40 unidades a 2.
+      // Revertimos al valor actual; abajo el flujo le explica que vendemos por unidad.
+      for (const [tipo, valorLiteral, actual, final] of [
+        ['agua', object.cantidad_agua, cantidadAguaActual, cantidadAguaFinal],
+        ['crema', object.cantidad_crema, cantidadCremaActual, cantidadCremaFinal],
+      ] as const) {
+        if (final === actual) continue;
+        if (!cantidadVieneDeUnidadNoSoportada(textoBatch, valorLiteral)) continue;
+        console.warn(`⚖️ Veto: el modelo asignó ${valorLiteral} a ${tipo} tomándolo de una unidad que no vendemos ("${textoBatch}"). Revierto a ${actual}.`);
+        if (tipo === 'agua') cantidadAguaFinal = actual;
+        else cantidadCremaFinal = actual;
+      }
+
+      // TELEMETRÍA: "mantener" con un valor != 0 es una salida INCOHERENTE del
+      // modelo (dice "no hay cantidad para este tipo" pero igual extrajo un
+      // número). El literal se descarta en silencio, y ese silencio es lo que
+      // hizo invisible el hallazgo #3. Lo dejamos ruidoso.
+      for (const [tipo, op, valor] of [
+        ['agua', object.cantidad_agua_operacion, object.cantidad_agua],
+        ['crema', object.cantidad_crema_operacion, object.cantidad_crema],
+      ] as const) {
+        if (op === 'mantener' && valor !== 0) {
+          console.warn(`⚠️ Salida incoherente del modelo: cantidad_${tipo}_operacion="mantener" con valor=${valor}. El literal se descarta; la red de cantidad pelada puede recuperarlo.`);
+        }
+      }
+
+      // RED DE CANTIDAD PELADA (determinista, respalda al modelo): el cliente
+      // corrigió la cantidad sin nombrar el tipo ("son 30 ahora") y el merge no
+      // movió NADA. Sin esto la corrección se pierde en silencio y el bot repite
+      // el mismo pedido de datos faltantes (hallazgo #3 del informe 32740622175).
+      //
+      // Solo actúa si: hay pedido activo no despachado, el merge dejó las DOS
+      // cantidades intactas, y el cliente no nombró el tipo (si lo nombró, el
+      // modelo tenía toda la info y su decisión manda).
+      if (
+        pedidoActivo &&
+        !estaDespachado(pedidoActivo) &&
+        cantidadAguaFinal === cantidadAguaActual &&
+        cantidadCremaFinal === cantidadCremaActual &&
+        !mencionaTipoHelado(textoBatch)
+      ) {
+        const tiposCargados =
+          (cantidadAguaActual > 0 ? 1 : 0) + (cantidadCremaActual > 0 ? 1 : 0);
+        const pelada = detectarCantidadPelada(textoBatch);
+        if (pelada !== null) {
+          if (tiposCargados === 1) {
+            // Un solo tipo cargado: el número es inequívocamente de ESE tipo.
+            if (cantidadAguaActual > 0) {
+              cantidadAguaFinal = pelada;
+            } else {
+              cantidadCremaFinal = pelada;
+            }
+            console.log(`🔢 Red de cantidad pelada: "${textoBatch}" → ${pelada} sobre ${cantidadAguaActual > 0 ? 'agua' : 'crema'} (único tipo cargado).`);
+          } else if (tiposCargados === 2) {
+            // Los dos tipos cargados: NO adivinamos a cuál se refiere. Lo tratamos
+            // como tipo ambiguo y le preguntamos, misma maquinaria que
+            // `cantidad_sin_tipo` (los botones ya llevan la cantidad).
+            cantidadPeladaAmbigua = pelada;
+            console.log(`🔢 Red de cantidad pelada: ${pelada} con AMBOS tipos cargados. No adivino: le pregunto cuál.`);
+          }
+          // tiposCargados === 0 → lo cubre `cantidad_sin_tipo`, no tocamos nada.
+        } else {
+          // No es un REEMPLAZO pelado. ¿Es un DELTA pelado ("sumale 10")? El modelo
+          // lo dejó sin aplicar (por eso el merge no movió nada) porque no supo el
+          // tipo. `detectarCantidadPelada` justamente vetea los deltas, así que este
+          // caso solo lo capta `detectarDeltaPelado`.
+          const delta = detectarDeltaPelado(textoBatch);
+          if (delta !== null) {
+            if (tiposCargados === 1) {
+              // Un solo tipo cargado: el delta es inequívocamente de ESE tipo.
+              // Aplicamos con el mismo clamp a 0 que el merge del modelo.
+              if (cantidadAguaActual > 0) {
+                cantidadAguaFinal = aplicarOperacionCantidad(delta.operacion, delta.valor, cantidadAguaActual);
+              } else {
+                cantidadCremaFinal = aplicarOperacionCantidad(delta.operacion, delta.valor, cantidadCremaActual);
+              }
+              console.log(`🔢 Red de delta pelado: "${textoBatch}" → ${delta.operacion} ${delta.valor} sobre ${cantidadAguaActual > 0 ? 'agua' : 'crema'} (único tipo cargado).`);
+            } else if (tiposCargados === 2) {
+              // Los dos tipos cargados: NO adivinamos a cuál se refiere. Preguntamos,
+              // pero llevando la operación para que la respuesta sume/reste.
+              deltaPeladoAmbiguo = delta;
+              console.log(`🔢 Red de delta pelado: ${delta.operacion} ${delta.valor} con AMBOS tipos cargados. No adivino: le pregunto cuál.`);
+            }
+            // tiposCargados === 0 → no hay pedido sobre el cual sumar/restar.
+          }
+        }
+      }
 
       // Misma filosofía que las cantidades: el modelo extrajo el texto literal
       // + la operación; la fusión la hace TS de forma determinista. Si además
@@ -1538,7 +2003,35 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // cancelación, y (b) para forzar rechazar_cancelacion dentro de ese bloque.
     const rechazoCancelacionExplicito =
       pedidoActivo?.estado === 'esperando_cancelacion' &&
-      mencionaRechazoCancelacion(mensajesClaim.map(m => m.texto ?? '').join(' '));
+      mencionaRechazoCancelacion(textoBatch);
+
+    // #1 — CLAMP DE INTENCIÓN POR ESTADO. El enum del schema es global, así que el
+    // modelo puede devolver una intención que en este estado no tiene handler (ej.
+    // `confirmar_cancelacion` estando en `borrador`, cuyo único handler vive dentro
+    // del bloque de esperando_cancelacion). Esas intenciones HUÉRFANAS no matchean
+    // nada y el mensaje termina en el fallback de reenviar el resumen, en loop y
+    // para siempre. Las acotamos al catch-all, que todos los estados manejan.
+    const intencionCruda = pedido.intencion;
+    pedido.intencion = clampIntencionPorEstado(intencionCruda, pedidoActivo?.estado ?? null, {
+      hayPedidoCanceladoReciente: Boolean(ultimoPedidoCancelado),
+    });
+    if (pedido.intencion !== intencionCruda) {
+      console.log(`🧭 Intención "${intencionCruda}" no es válida con estado "${pedidoActivo?.estado ?? 'sin pedido'}". La acoto a "${pedido.intencion}".`);
+    }
+
+    // #2 — ¿El mensaje trae datos del pedido además de la consulta? Los handlers de
+    // consulta (precios / negocio) CORTAN el flujo con return antes de aplicar y
+    // persistir nada, así que sin esta señal un "transferencia. y hasta qué hora
+    // entregan?" perdía el pago en silencio (hallazgo #2 del informe 32740622175).
+    const traeDatos = traeDatosDePedido(pedido);
+    if (traeDatos && (pedido.intencion === 'consulta_negocio' || pedido.intencion === 'consultar_precios')) {
+      // El prompt ya pide `datos_pedido` en este caso, pero es una regla soft. Esta
+      // es la red determinista equivalente a las que ya existen para `saludo`+datos
+      // y `modificar_sin_datos`+cambios. La pregunta NO se pierde: el bloque
+      // ortogonal de `pregunta_negocio` (abajo) la responde o la delega igual.
+      console.log(`🛠️ OVERRIDE: intención "${pedido.intencion}" pero el mensaje trae datos del pedido. Reclasifico a datos_pedido para no descartarlos.`);
+      pedido.intencion = 'datos_pedido';
+    }
 
     // CONSULTA DE NEGOCIO EMBEBIDA (versión completa): el modelo copia en
     // `pregunta_negocio` toda pregunta real de negocio, INCLUSO cuando el
@@ -1549,6 +2042,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // pedido no parseaba, no pasaba nada). La intención `consulta_negocio`
     // (pregunta PURA) tiene su propio handler abajo que ya delega y corta, así
     // que la excluimos acá para no avisar dos veces.
+    // Nota: un mensaje MIXTO que el modelo clasificó `consulta_negocio` ya fue
+    // reclasificado a `datos_pedido` arriba, así que entra por acá — que es lo que
+    // corresponde, porque este bloque NO corta el flujo y el de abajo sí.
+    // ¿Ya contestamos/delegamos una pregunta de negocio embebida este turno? Si
+    // sí y el pedido no cambia, esa respuesta ES la respuesta del turno: no hay
+    // que mandarle encima la desambiguación "no te entendí" (contradictorio justo
+    // después de "ya le pasé tu consulta a una persona"). Caso real: una pregunta
+    // PURA ("hasta qué hora abren?") que el modelo clasificó `consulta_negocio`
+    // pero con `metodo_pago`/`direccion` ECO del pedido — `traeDatosDePedido`
+    // contó el eco y el override la mandó al path mixto (que no corta el flujo).
+    let respondiPreguntaNegocioEmbebida = false;
     const hayPreguntaNegocio = esPreguntaNegocioReal(pedido.pregunta_negocio);
     if (hayPreguntaNegocio && pedido.intencion !== 'consulta_negocio') {
       // Primero intentamos responderla NOSOTROS desde el contexto conocido
@@ -1567,6 +2071,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         console.log(`🙋 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") fuera del contexto conocido. Delego a un humano y sigo el flujo del pedido.`);
         await delegarAHumano(numeroCliente, seedDelegacion);
       }
+      respondiPreguntaNegocioEmbebida = true;
       // NO retornamos: si el mensaje trae datos del pedido, el flujo de armado
       // de abajo los procesa igual (resumen / pedir lo que falta).
     }
@@ -1606,7 +2111,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // no-determinismo vino null, usamos el texto crudo del batch como fallback.
       const preguntaTexto = esPreguntaNegocioReal(pedido.pregunta_negocio)
         ? pedido.pregunta_negocio!
-        : mensajesClaim.map(m => m.texto ?? '').join(' ').trim();
+        : textoBatch.trim();
       const respuestaNegocio = await intentarRespuestaNegocio(preguntaTexto, pedidoActivo, numeroCliente);
       if (respuestaNegocio) {
         console.log("💬 Consulta de negocio respondida desde el contexto conocido.");
@@ -1639,8 +2144,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // (un retiro no debe rellenarse con la dirección guardada). Usa el texto
     // crudo del batch del cliente, no la extracción del modelo.
     if (!pedido.direccion) {
-      const textoClienteCrudo = mensajesClaim.map(m => m.texto ?? '').join(' ');
-      if (mencionaRetiro(textoClienteCrudo)) {
+      if (mencionaRetiro(textoBatch)) {
         console.log('🛵 Retiro detectado en el mensaje del cliente. Seteo direccion="retira".');
         pedido.direccion = 'retira';
       }
@@ -1735,8 +2239,11 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // el modelo la dejó en 0 (por diseño del prompt) y sin esta señal pedirDatos
     // Faltantes respondería con el "me falta cantidad" genérico → loop porque el
     // cliente cree que ya la dio. Reutilizamos el texto crudo del batch de arriba.
-    const textoBatch = mensajesClaim.map(m => m.texto ?? '').join(' ');
-    const cantidadEnUnidadNoSoportada = faltaCantidad && mencionaCantidadEnUnidadNoSoportada(textoBatch);
+    // No se gatea con `faltaCantidad`: el cliente también puede intentar corregir
+    // en kilos un pedido que YA tiene cantidad ("que sean 2 kilos" sobre 40). Lo
+    // que descalifica la señal es que el mensaje SÍ haya movido algo: ahí la
+    // unidad rara era ruido al lado de un dato válido y no hay nada que explicar.
+    const cantidadEnUnidadNoSoportada = mencionaCantidadEnUnidadNoSoportada(textoBatch) && !hayCambiosReales;
     const pagoNoSoportado = faltaPago && mencionaMetodoPagoNoSoportado(textoBatch);
 
     // TIPO DE HELADO AMBIGUO: el modelo dejó la cantidad en `cantidad_sin_tipo`
@@ -1744,16 +2251,61 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // frutilla" — frutilla existe en los dos tipos, así que adivinar escribía un
     // pedido que el cliente nunca hizo). Veto determinista con `mencionaTipoHelado`:
     // si el texto crudo SÍ nombra el tipo, la señal es un no-determinismo del
-    // modelo y la ignoramos. Solo aplica si además NO quedó cantidad cargada
-    // (si el merge dejó cantidades, no hay nada que preguntar).
-    const cantidadSinTipo =
-      faltaCantidad && !mencionaTipoHelado(textoBatch)
+    // modelo y la ignoramos.
+    //
+    // Tres orígenes, misma pregunta al cliente:
+    //  (a) NO quedó ninguna cantidad cargada y el modelo puso el número en
+    //      `cantidad_sin_tipo` ("quiero 50 helados de frutilla").
+    //  (b) el cliente corrigió con un número pelado ("mejor que sean 30") sobre un
+    //      pedido que tiene LOS DOS tipos cargados: la red de cantidad pelada no
+    //      puede saber a cuál se refiere, así que en vez de descartarlo (que es lo
+    //      que pasaba antes, en silencio) preguntamos. → REEMPLAZO.
+    //  (c) el cliente mandó un DELTA pelado ("sumale 10") sobre un pedido con los
+    //      dos tipos: misma pregunta, pero la respuesta suma/resta en vez de
+    //      reemplazar (la operación viaja en `tipoHeladoAmbiguo.operacion`).
+    const cantidadSinTipo = mencionaTipoHelado(textoBatch)
+      ? 0
+      : faltaCantidad
         ? Math.max(0, Math.trunc(pedido.cantidad_sin_tipo ?? 0))
-        : 0;
-    const tipoHeladoAmbiguo: TipoHeladoAmbiguo | null =
+        : cantidadPeladaAmbigua;
+    let tipoHeladoAmbiguo: TipoHeladoAmbiguo | null =
       cantidadSinTipo > 0 ? { cantidad: cantidadSinTipo, textoCliente: textoBatch } : null;
+    // El delta pelado ambiguo solo aplica cuando NO hubo un reemplazo pelado (son
+    // mutuamente excluyentes por construcción: detectarDeltaPelado corre solo si
+    // detectarCantidadPelada devolvió null).
+    if (!tipoHeladoAmbiguo && deltaPeladoAmbiguo) {
+      tipoHeladoAmbiguo = {
+        cantidad: deltaPeladoAmbiguo.valor,
+        textoCliente: textoBatch,
+        operacion: deltaPeladoAmbiguo.operacion,
+      };
+    }
     if (tipoHeladoAmbiguo) {
-      console.log(`🍦 El cliente pidió ${cantidadSinTipo} helados sin decir el tipo. Le pregunto agua/crema en vez de adivinar.`);
+      const detalleOp = tipoHeladoAmbiguo.operacion && tipoHeladoAmbiguo.operacion !== 'reemplazar'
+        ? ` (${tipoHeladoAmbiguo.operacion})`
+        : '';
+      console.log(`🍦 El cliente pidió ${tipoHeladoAmbiguo.cantidad} helados sin decir el tipo${detalleOp}. Le pregunto agua/crema en vez de adivinar.`);
+    }
+
+    // #1 — RED DE CONFIRMACIÓN (determinista, respalda al modelo): el borrador está
+    // completo, el cliente no cambió nada y su texto dice explícitamente que
+    // confirma. Si el modelo no lo clasificó como `confirmar`, el mensaje termina en
+    // el fallback de reenviar el resumen y el pedido no llega nunca a cocina — el
+    // caso real fue "Sí, confirmá." después de rechazar una cancelación (hallazgo #1
+    // del informe 32740622175).
+    //
+    // Solo actúa si el modelo NO eligió ya una intención accionable: si acertó, o si
+    // el cliente pidió otra cosa (cancelar, modificar, una consulta), su decisión
+    // manda. Y nunca sobre un borrador incompleto: eso lo maneja `pedirDatosFaltantes`.
+    if (
+      pedidoActivo?.estado === 'borrador' &&
+      pedidoCompleto &&
+      !hayCambiosReales &&
+      !INTENCIONES_ACCIONABLES.includes(pedido.intencion) &&
+      mencionaConfirmacion(textoBatch)
+    ) {
+      console.log(`🛡️ Red determinista: confirmación explícita ("${textoBatch}") que el modelo clasificó "${pedido.intencion}". Reclasifico a confirmar.`);
+      pedido.intencion = 'confirmar';
     }
 
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
@@ -2053,6 +2605,29 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
     // 4. BORRADOR EN CURSO (completo, o incompleto todavía en armado).
     if (tieneBorrador) {
+      // VETO DE CONFIRMACIÓN FANTASMA. Caso real observado en pruebas manuales: con
+      // el resumen ya enviado, el cliente REPITE su pedido textual ("20 de crema,
+      // paso a retirar, efectivo"). El modelo lee "pregunté ¿está todo bien? y me
+      // responde lo mismo" y devuelve `confirmar`; como los datos son idénticos
+      // (`hayCambiosReales=false`), el pedido se iba a cocina sin que el cliente
+      // hubiera confirmado nada.
+      //
+      // Repetir el pedido NO es confirmarlo. Exigimos alguna señal textual de
+      // afirmación cuando el mensaje trae datos concretos. Un "sí"/"dale" pelado no
+      // trae datos, así que las confirmaciones legítimas no se ven afectadas; y el
+      // costo de un falso veto es una burbuja de más, contra mandar a cocina un
+      // pedido que el cliente no aprobó.
+      if (
+        pedido.intencion === 'confirmar' &&
+        !hayCambiosReales &&
+        traeDatos &&
+        !traeSenalDeConfirmacion(textoBatch)
+      ) {
+        console.log(`🛡️ Veto de confirmación fantasma: el modelo dijo "confirmar" pero el mensaje repite los datos del pedido sin ninguna señal de afirmación. Reenvío el resumen en vez de mandarlo a cocina.`);
+        await enviarResumenYPedirConfirmacion(numeroCliente, pedidoActivo, false);
+        return;
+      }
+
       // Confirmación explícita: solo válida si el borrador ya está completo.
       // Un borrador incompleto (armado en partes) no se puede confirmar: falta
       // algún dato, así que lo pedimos en vez de mandarlo a cocina.
@@ -2084,6 +2659,42 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           console.log(`⚠️ Race al confirmar: el pedido ${pedidoActivo.id} ya no está en 'borrador' o fue despachado.`);
           await enviarMensajeWhatsApp(numeroCliente, "Algo cambió con tu pedido. Escribime de nuevo y seguimos 🙏");
         }
+        return;
+      }
+
+      // TIPO AMBIGUO sobre un borrador COMPLETO: el cliente corrigió con un número
+      // pelado —un reemplazo ("mejor que sean 30") o un delta ("sumale 10")— y el
+      // pedido tiene los dos tipos cargados, así que no sabemos a cuál aplicarlo.
+      // El merge no cambió nada (por eso llegamos acá), y sin esta rama el mensaje
+      // caería al fallback de abajo y el número se perdería en silencio (recibiendo
+      // un "no te entendí" pese a ser una instrucción clara). Preguntamos el tipo
+      // —llevando la operación en los botones— antes de tocar el pedido.
+      if (tipoHeladoAmbiguo) {
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+        console.log("🍦 Número pelado ambiguo sobre borrador completo: pregunto el tipo en vez de adivinar.");
+        return;
+      }
+
+      // UNIDAD NO SOPORTADA sobre un borrador COMPLETO: el cliente quiso corregir la
+      // cantidad en kilos/potes/porciones ("que sean 2 kilos" sobre 40 unidades). El
+      // merge no movió nada porque ese número no es asignable, así que sin esta rama
+      // cae al fallback y se lleva un "no te entendí" que no le explica NADA — y el
+      // cliente cree que ya dio la cantidad. Le decimos por qué no cuenta.
+      if (cantidadEnUnidadNoSoportada && pedidoCompleto && !hayCambiosReales) {
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+        console.log("⚖️ Cantidad en unidad no soportada sobre borrador completo: explico que vendemos por unidad.");
+        return;
+      }
+
+      // PREGUNTA DE NEGOCIO PURA sobre un borrador (parcial o completo): ya la
+      // respondimos/delegamos arriba y el mensaje NO cambió nada del pedido. No hay
+      // que re-pedir los datos faltantes ni reenviar el resumen: sería una segunda
+      // burbuja de armado pisando la respuesta a la consulta ("Para armar tu pedido
+      // me falta…" justo después de "ya le pasé tu consulta a una persona"). El
+      // borrador queda como estaba; cuando el cliente quiera seguir, lo retomamos.
+      // (Corre antes del persist: sin cambios reales no hay nada que guardar.)
+      if (respondiPreguntaNegocioEmbebida && !hayCambiosReales) {
+        console.log("🤝 Pregunta de negocio pura sobre un borrador sin cambios: respondo la consulta y no re-pido datos ni reenvío el resumen.");
         return;
       }
 
@@ -2141,6 +2752,25 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // el resumen con los botones para devolverlo al punto de confirmación en
       // vez de dejarlo colgado. esModificacion=false: no hubo cambios, es el
       // mismo pedido re-ofrecido.
+      //
+      // ESCAPE ANTI-LOOP: si ya hay una ronda de botones VIVA (el bot mandó el
+      // resumen y el cliente contestó por texto sin resolverla), reenviar el mismo
+      // resumen es un bucle cerrado: mismo input → mismo output, sin salida. En ese
+      // caso mandamos una desambiguación con los mismos botones.
+      //
+      // Cuando el cliente viene de "No, modificar" (el caso legítimo de arriba) el
+      // flag ya fue consumido atómicamente por ejecutarBoton y el "¿qué querés
+      // cambiar?" no lleva botones, así que ahí sigue saliendo el resumen.
+      //
+      // (El caso "ya respondí una pregunta de negocio embebida sin cambios" se
+      // ataja arriba, antes del persist — cubre borrador parcial Y completo — así
+      // que acá no hace falta re-chequearlo.)
+      if (pedidoActivo.esperando_respuesta_boton) {
+        await enviarDesambiguacionConfirmacion(numeroCliente, pedidoActivo.id);
+        console.log("🤔 Borrador completo sin cambios con ronda de botones viva: desambiguo en vez de repetir el resumen.");
+        return;
+      }
+
       await enviarResumenYPedirConfirmacion(numeroCliente, pedidoActivo, false);
       console.log("↩️ Borrador completo sin cambios: reenvío el resumen para no dejar al cliente sin respuesta.");
       return;
@@ -2150,7 +2780,13 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
     // 5.a Pedido en cocina sin cambios reales: probablemente está saludando o
     //     iniciando una conversación nueva; avisamos que ya hay uno en curso.
+    //     Salvo que ya hayamos contestado su pregunta de negocio este turno: ahí
+    //     el aviso sería una segunda burbuja redundante sobre la respuesta.
     if (yaExisteEnCocina && !hayCambiosReales) {
+      if (respondiPreguntaNegocioEmbebida) {
+        console.log("🤝 Pregunta de negocio ya respondida sobre pedido en cocina sin cambios: no agrego el aviso de 'ya está en preparación'.");
+        return;
+      }
       console.log("ℹ️ Cliente con pedido en cocina sin cambios reales. Avisando que ya hay uno en preparación.");
       await enviarMensajeWhatsApp(numeroCliente, "¡Hola! 👋 Tu pedido ya está en preparación. ¿Querés modificar algo?");
       return;
@@ -2166,12 +2802,30 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         return;
       }
 
+      // PREGUNTA DE NEGOCIO PURA sin datos de pedido: el cliente solo consultó
+      // algo (ya se lo respondimos/delegamos arriba) y NO aportó ningún dato real
+      // del pedido. La dirección histórica se inyecta abajo por comodidad, pero no
+      // es un dato que el cliente haya dado hoy: por sí sola no inicia un pedido.
+      // Sin este corte, un cliente con dirección guardada recibía "Para armar tu
+      // pedido me falta: cantidad, pago" DESPUÉS de cada consulta, como si hubiera
+      // empezado a pedir. `traeDatos` mira el output CRUDO del modelo (antes de la
+      // inyección histórica), así que es exactamente "¿el cliente aportó datos?".
+      if (respondiPreguntaNegocioEmbebida && !traeDatos) {
+        console.log("🤝 Pregunta de negocio pura sin datos de pedido: no pido datos faltantes (la dirección histórica no cuenta como pedido iniciado).");
+        return;
+      }
+
       // PEDIDO NUEVO EN ARMADO: persistimos un borrador PARCIAL en cuanto hay
       // algún dato real, así los próximos turnos mergean determinísticamente
       // contra la DB en vez de re-extraer el historial (que perdía datos: ej.
       // la cantidad de crema se caía al pasar el método de pago). Placeholder
       // '' en las columnas NOT NULL para lo que todavía no se cargó.
-      const hayAlgunDato = !faltaCantidad || !faltaDireccion || !faltaPago;
+      //
+      // La dirección inyectada de historial NO cuenta como "el cliente aportó un
+      // dato": es una comodidad para cuando SÍ está pidiendo, no un pedido iniciado
+      // por sí sola. Sin esto, cualquier mensaje de un cliente con dirección
+      // guardada creaba un borrador parcial fantasma (solo la dirección histórica).
+      const hayAlgunDato = !faltaCantidad || !faltaPago || (!faltaDireccion && !direccionInyectadaDeHistorial);
       if (hayAlgunDato) {
         const { data: parcial, error: errorParcial } = await supabaseAdmin
           .from('pedidos')

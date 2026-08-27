@@ -38,6 +38,16 @@ describe('construirContextoNegocio', () => {
     expect(ctx).toMatch(/efectivo o transferencia/);
   });
 
+  it('incluye el bloque "qué sos" para poder contestar preguntas meta sin delegar', () => {
+    // Sin este bloque, "¿qué sabés hacer?" caía en la delegación a un humano
+    // (hallazgo menor del informe 32740622175): no es una consulta de negocio
+    // real, pero el contexto no tenía con qué responderla.
+    const ctx = construirContextoNegocio(null, null);
+    expect(ctx).toMatch(/QUÉ SOS Y QUÉ PODÉS HACER/);
+    expect(ctx).toMatch(/NO lo delegues/);
+    expect(ctx).toMatch(/tomás pedidos de helado/);
+  });
+
   it('incluye el bloque "LO QUE NO SABÉS" (escape hatch de delegación)', () => {
     const ctx = construirContextoNegocio(null, null);
     expect(ctx).toMatch(/LO QUE NO SABÉS/);

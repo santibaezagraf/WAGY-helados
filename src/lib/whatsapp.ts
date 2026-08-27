@@ -711,6 +711,47 @@ export async function enviarResumenYPedirConfirmacion(
 }
 
 /**
+ * Escape anti-loop del punto de confirmación: el borrador está completo, ya le
+ * mandamos el resumen con botones, y el cliente contestó por texto algo que no
+ * pudimos clasificar. Reenviar el resumen IDÉNTICO deja al cliente en un bucle
+ * cerrado —el mismo mensaje produce el mismo resultado para siempre— que fue
+ * exactamente el hallazgo #1 del informe 32740622175.
+ *
+ * En vez de eso mandamos una desambiguación corta con los MISMOS botones (así el
+ * click sigue funcionando) y volvemos a armar `esperando_respuesta_boton`.
+ *
+ * A diferencia del resumen, NO toca `resumen_pendiente`: esto no es un resumen y
+ * el cron de reenvío no debe reintentarlo.
+ */
+export async function enviarDesambiguacionConfirmacion(
+  numeroCliente: string,
+  pedidoId: number,
+): Promise<boolean> {
+  const ok = await enviarMensajeConBotones(
+    numeroCliente,
+    'Perdón, no te entendí 😅 ¿Confirmamos el pedido así como está, o querés cambiar algo?',
+    [
+      { id: `confirmar_borrador_${pedidoId}`, title: 'Sí, confirmar' },
+      { id: `modificar_borrador_${pedidoId}`, title: 'No, modificar' },
+    ],
+  );
+
+  if (ok) {
+    const { error } = await supabaseAdmin
+      .from('pedidos')
+      .update({ esperando_respuesta_boton: true })
+      .eq('id', pedidoId);
+    if (error) console.error('⚠️ No se pudo re-armar esperando_respuesta_boton:', error);
+  }
+
+  console.log(ok
+    ? '🤔 Desambiguación de confirmación enviada (evita reenviar el resumen idéntico).'
+    : `⚠️ Falló el envío de la desambiguación del pedido #${pedidoId}.`);
+
+  return ok;
+}
+
+/**
  * Mensaje "¿estás seguro de cancelar?" con botones. Lo usamos tanto cuando
  * el pedido recién pasa a esperando_cancelacion como cuando el cliente nos
  * contesta ambiguo en ese estado.
