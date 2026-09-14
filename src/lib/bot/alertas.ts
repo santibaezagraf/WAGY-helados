@@ -1,10 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
+import type { TipoUsoModelo } from '@/lib/bot/modelos';
 
 // Cliente service-role (igual que el resto del pipeline del bot): server-only,
-// bypassa RLS. SIN tipar con Database a propósito: `alertas_modelo` es una tabla
-// nueva que todavía no está en src/types/supabase.ts (no corrimos update-types),
-// misma decisión que atencion-humana.ts. El dashboard la lee con service-role
-// también (server action), así que no hace falta regenerar tipos para compilar.
+// bypassa RLS. SIN tipar con Database a propósito: `alertas_modelo`/`uso_modelo`
+// son tablas nuevas que todavía no están en src/types/supabase.ts (no corrimos
+// update-types), misma decisión que atencion-humana.ts. El dashboard las lee con
+// service-role también (server action), así que no hace falta regenerar tipos.
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
@@ -48,5 +49,48 @@ export async function registrarAlertaFallback(
     }
   } catch (e) {
     console.error('⚠️ Excepción registrando alerta de fallback (se ignora):', e);
+  }
+}
+
+/** Forma del `usage` que devuelve el AI SDK (v6). Los campos pueden faltar. */
+export type UsoTokens = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+/**
+ * I/O: registra el consumo de tokens de UNA llamada LLM exitosa, para que la
+ * página de estado de modelos muestre cuánto se lleva usado del TPD diario.
+ *
+ * Fail-OPEN y fire-and-forget (misma filosofía que `registrarAlertaFallback`):
+ * es telemetría de ops, no parte del flujo del pedido. El llamador la dispara con
+ * `void` y sigue; un fallo acá jamás debe frenar ni romper la respuesta al cliente.
+ * Solo se llama en el camino de éxito (un 429 no trae `usage`).
+ */
+export async function registrarUsoModelo(
+  modelo: string,
+  tipo: TipoUsoModelo,
+  usage: UsoTokens | null | undefined,
+  telefono: string | null,
+): Promise<void> {
+  try {
+    const input = Math.max(0, Math.round(usage?.inputTokens ?? 0));
+    const output = Math.max(0, Math.round(usage?.outputTokens ?? 0));
+    // Si el SDK no reporta total, lo derivamos de input+output.
+    const total = Math.max(0, Math.round(usage?.totalTokens ?? input + output));
+    const { error } = await supabaseAdmin.from('uso_modelo').insert({
+      modelo,
+      tipo,
+      tokens_input: input,
+      tokens_output: output,
+      tokens_total: total,
+      telefono,
+    });
+    if (error) {
+      console.error('⚠️ No se pudo registrar el uso de modelo (se ignora):', error.message);
+    }
+  } catch (e) {
+    console.error('⚠️ Excepción registrando uso de modelo (se ignora):', e);
   }
 }

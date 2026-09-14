@@ -1,9 +1,10 @@
 import { generateObject } from 'ai';
-import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { esRateLimit } from '@/lib/bot/procesar';
 import type { PedidoActivoContext } from '@/lib/bot/procesar';
-import { registrarAlertaFallback, siguienteModelo } from '@/lib/bot/alertas';
+import { registrarAlertaFallback, registrarUsoModelo, siguienteModelo } from '@/lib/bot/alertas';
+import { MODELOS_CONSULTA } from '@/lib/bot/modelos';
+import { crearModeloLLM } from '@/lib/bot/proveedor-llm';
 import {
   SABORES,
   ENVIOS,
@@ -32,17 +33,9 @@ import {
  * piso ante cualquier duda o falla.
  */
 
-const groq = createGroq();
-
-// Misma cadena y misma política de fallback que la extracción: ante un 429
-// (cuota TPD agotada) saltamos al siguiente modelo, que tiene cubeta separada.
-// (Ver nota en procesar.ts sobre MODELOS_EXTRACCION: kimi-k2/qwen3-32b ya no
-// existen en Groq, reemplazados por qwen3.6-27b.)
-const MODELOS_CONSULTA = [
-  'openai/gpt-oss-20b',
-  'openai/gpt-oss-120b',
-  'qwen/qwen3.6-27b',
-] as const;
+// La cadena de consulta (MODELOS_CONSULTA) y su política de fallback (ante un 429
+// saltamos al siguiente modelo, que tiene cubeta TPD separada) viven ahora en
+// @/lib/bot/modelos.ts, misma fuente de verdad que la extracción.
 
 // Timeout defensivo: esto corre en el worker de QStash (no en el webhook), pero
 // igual no queremos que una llamada colgada frene el resto del turno.
@@ -197,8 +190,8 @@ async function generarAcotado<T>(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
-      const { object } = await generateObject({
-        model: groq(modelo),
+      const { object, usage } = await generateObject({
+        model: crearModeloLLM(modelo),
         system,
         prompt,
         schema,
@@ -206,6 +199,8 @@ async function generarAcotado<T>(
         abortSignal: controller.signal,
       });
       clearTimeout(timeout);
+      // Telemetría de tokens (fail-open, no bloqueante), igual que la extracción.
+      void registrarUsoModelo(modelo, 'consulta', usage, telefono);
       return object;
     } catch (error) {
       clearTimeout(timeout);

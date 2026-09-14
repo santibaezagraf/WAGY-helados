@@ -1,12 +1,13 @@
 import { generateObject } from 'ai';
-import { createGroq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { Database, Json } from '@/types/supabase';
 import { enviarMensajeWhatsApp, enviarMensajeConBotones, enviarResumenYPedirConfirmacion, enviarDesambiguacionConfirmacion, enviarConfirmacionCancelacion, marcarLeidoYEscribiendo, mensajeConfirmacion } from '@/lib/whatsapp';
 import { atencionHumanaActiva, intervencionHumanaReciente, marcarRequiereAtencion, requiereAtencionActual } from '@/lib/bot/atencion-humana';
 import { esBorradorCompleto } from '@/lib/bot/borradores';
-import { registrarAlertaFallback, siguienteModelo } from '@/lib/bot/alertas';
+import { registrarAlertaFallback, registrarUsoModelo, siguienteModelo } from '@/lib/bot/alertas';
+import { MODELOS_EXTRACCION } from '@/lib/bot/modelos';
+import { crearModeloLLM } from '@/lib/bot/proveedor-llm';
 import { obtenerListaPreciosPublica, formatearPreciosWhatsApp, SABORES } from '@/lib/precios-publico';
 import { construirContextoNegocio, responderConsultaNegocio, elegirTextoDelegacion, redactarPreguntaTipoHelado } from '@/lib/bot/consultas-negocio';
 import { patchConEnviadoCoherente } from '@/lib/pedidos-estado';
@@ -16,32 +17,44 @@ const supabaseAdmin = createClient<Database>(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const groq = createGroq();
-
-// Cadena de modelos para la extracción. El PRIMARIO es el único que se testea en
-// el nightly (por eso el harness y /api/dev/test-ia lo dejan hardcodeado). Los
-// demás son FALLBACK solo de producción: si el primario se queda sin cuota
-// (429 / TPD), seguimos con el siguiente en vez de contestar "no te entendí".
-// Todos bancan structured output y tienen cubeta TPD SEPARADA en Groq, así que
-// si se agotó gpt-oss-20b es muy probable que el siguiente siga disponible.
-// (moonshotai/kimi-k2-instruct y qwen/qwen3-32b fueron dados de baja por Groq —
-// verificado 2026-08-22 contra GET /openai/v1/models — y reemplazados/quitados;
-// esRateLimit solo dispara el salto de modelo con un 429, así que un id muerto
-// (404) agotaba los 3 reintentos de validación en vano en vez de saltar.)
-const MODELOS_EXTRACCION = [
-  'openai/gpt-oss-20b',
-  'openai/gpt-oss-120b',
-  'qwen/qwen3.6-27b',
-] as const;
+// La cadena de modelos de extracción (MODELOS_EXTRACCION) vive ahora en
+// @/lib/bot/modelos.ts, fuente de verdad única que también lee la página de
+// estado de modelos. esRateLimit solo dispara el salto de modelo con un 429, así
+// que un id muerto (404) agotaría los reintentos de validación en vano en vez de
+// saltar — por eso la cadena solo lista modelos vigentes en Groq.
 
 // ¿El error del SDK es un rate limit (429)? Es la señal de "modelo sin cuota" que
 // dispara el fallback. Miramos statusCode (lo expone APICallError del AI SDK) y,
 // como red, el texto del mensaje por si el error llega envuelto de otra forma.
 export function esRateLimit(error: unknown): boolean {
-  const status = (error as { statusCode?: number } | null)?.statusCode;
-  if (status === 429) return true;
-  const msg = error instanceof Error ? error.message : String(error);
-  return /rate limit|tokens per day|\bTPD\b|\b429\b/i.test(msg);
+  // Recorremos la CADENA de errores, no solo el de arriba: el AI SDK envuelve los
+  // reintentos en un `AI_RetryError` cuyo `statusCode` es undefined y que guarda el
+  // error real en `lastError` (y a veces en `cause`). Mirar solo el tope daba false
+  // para un 429 legítimo → no se disparaba el fallback de modelo y el cliente
+  // terminaba con "no te entendí" pese a haber cadena disponible. Verificado
+  // 2026-08-28 contra Gemini: name=AI_RetryError, statusCode=undefined,
+  // lastError.statusCode=429.
+  const vistos = new Set<unknown>();
+  let actual: unknown = error;
+  for (let profundidad = 0; actual && profundidad < 5; profundidad++) {
+    if (vistos.has(actual)) break; // corta ciclos (cause que se apunta a sí mismo)
+    vistos.add(actual);
+
+    const e = actual as { statusCode?: number; message?: string; lastError?: unknown; cause?: unknown };
+    if (e.statusCode === 429) return true;
+
+    const msg = actual instanceof Error ? actual.message : String(actual);
+    // Groq dice "Rate limit reached ..."; Google dice "You exceeded your current
+    // quota ..." + "Quota exceeded for metric ...generate_content_free_tier_requests".
+    // La regex vieja solo cubría a Groq (y "rate-limits" con guion, que aparece en la
+    // URL de doc de Google, NO matchea /rate limit/), así que Google pasaba de largo.
+    if (/rate.?limit|tokens per day|\bTPD\b|\b429\b|quota|resource_exhausted|too many requests/i.test(msg)) {
+      return true;
+    }
+
+    actual = e.lastError ?? e.cause;
+  }
+  return false;
 }
 
 /**
@@ -1795,13 +1808,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     const modelo = MODELOS_EXTRACCION[modeloIdx];
     attempt++;
     try {
-      const { object } = await generateObject({
-        model: groq(modelo),
+      const { object, usage } = await generateObject({
+        model: crearModeloLLM(modelo),
         system: SYSTEM_PROMPT,
         prompt: `Conversación reciente (el último turno del bot da contexto al mensaje del cliente):\n${historialParaIA}`,
         schema: PedidoIASchema,
         temperature: 0,
       });
+
+      // Telemetría de tokens (fail-open, no bloqueante): alimenta la página de
+      // estado de modelos con el consumo real vs. el TPD diario de Groq.
+      void registrarUsoModelo(modelo, 'extraccion', usage, numeroCliente);
 
       // Aplicamos las operaciones de cantidad de forma determinista en TS.
       // El modelo solo identificó la intención (sumar/restar/reemplazar/mantener)

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { PriceListModal } from "@/components/pedidos/price-list-modal"
 import { AddGastoModal } from "@/components/gastos/add-gasto-modal"
 import * as React from "react"
-import { Tags, BarChart3, Receipt, MessageCircle, ShieldAlert } from "lucide-react"
+import { Tags, BarChart3, Receipt, MessageCircle, ShieldAlert, Cpu } from "lucide-react"
 import { useRouter, usePathname } from "next/navigation"
 import Link from "next/link"
 import { createClient } from "@/lib/supabase-client"
@@ -236,6 +236,15 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
               >
                 <BarChart3 className="h-4 w-4" />
                 <span className="hidden sm:inline">Balances</span>
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => router.push('/modelos')}
+                className="gap-2 bg-white text-indigo-600 hover:bg-slate-100 font-medium"
+                title="Estado de los modelos LLM y uso de tokens"
+              >
+                <Cpu className="h-4 w-4" />
+                <span className="hidden sm:inline">Modelos</span>
               </Button>
               <Button
                 size="sm"

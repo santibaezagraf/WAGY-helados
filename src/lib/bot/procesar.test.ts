@@ -643,6 +643,39 @@ describe('esRateLimit', () => {
     expect(esRateLimit(null)).toBe(false);
     expect(esRateLimit(undefined)).toBe(false);
   });
+
+  // Regresión (2026-08-28): con Gemini el fallback NO se disparaba. El AI SDK
+  // envuelve los reintentos en AI_RetryError, cuyo statusCode es undefined y que
+  // guarda el 429 real en `lastError`; además el texto de Google no dice "rate
+  // limit" sino "exceeded your current quota" (el único "rate-limits" está con
+  // guion, dentro de la URL de doc). Mirando solo el error de arriba daba false y
+  // el cliente recibía "no te entendí" con la cadena entera todavía disponible.
+  it('detecta el 429 ANIDADO en lastError de un AI_RetryError (forma real de Gemini)', () => {
+    const err = Object.assign(new Error('Failed after 3 attempts. Last error: quota'), {
+      name: 'AI_RetryError',
+      statusCode: undefined,
+      lastError: { statusCode: 429, message: 'You exceeded your current quota' },
+    });
+    expect(esRateLimit(err)).toBe(true);
+  });
+  it('detecta el 429 anidado en `cause` (otra forma de envoltura del SDK)', () => {
+    const err = Object.assign(new Error('algo salió mal'), {
+      cause: { statusCode: 429, message: 'RESOURCE_EXHAUSTED' },
+    });
+    expect(esRateLimit(err)).toBe(true);
+  });
+  it('detecta la redacción de cuota de Google aunque no diga "rate limit" ni traiga statusCode', () => {
+    const err = new Error(
+      'You exceeded your current quota. * Quota exceeded for metric: ' +
+        'generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20',
+    );
+    expect(esRateLimit(err)).toBe(true);
+  });
+  it('no entra en loop infinito si `cause` se apunta a sí mismo', () => {
+    const err: { message: string; cause?: unknown } = { message: 'boom' };
+    err.cause = err;
+    expect(esRateLimit(err)).toBe(false);
+  });
 });
 
 // Red determinista que veta la señal `cantidad_sin_tipo` del modelo: si el cliente

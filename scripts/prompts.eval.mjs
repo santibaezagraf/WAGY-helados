@@ -2,8 +2,13 @@
 //
 // Dispara casos reales contra el endpoint dev /api/dev/test-ia, que reusa el
 // MISMO buildSystemPrompt + aplicarOperacion* que el flujo de producción. No hay
-// mocks: pega contra Groq de verdad, así que refleja lo que la DB terminaría
+// mocks: pega contra el LLM de verdad, así que refleja lo que la DB terminaría
 // guardando. Es la red de seguridad para los recortes/cambios de prompt (#4, #4b, #6).
+//
+// PROVEEDOR: el endpoint usa el primario de la cadena del proveedor ACTIVO (toggle
+// LLM_PROVIDER en .env.local): Groq gpt-oss-20b por default, gemini-3.6-flash con
+// LLM_PROVIDER=google. Cada respuesta trae `proveedor`/`modelo` para no confundirse.
+// Así este mismo suite compara Groq vs Gemini cambiando una env var y reiniciando dev.
 //
 // CÓMO CORRERLO:
 //   1. En una terminal:  npm run dev      (deja el server en localhost:3000)
@@ -13,10 +18,11 @@
 //   EVAL_URL=http://localhost:3000   base del server
 //   EVAL_FILTER=cantidad             corre solo los casos cuyo nombre matchea
 //   EVAL_REPEAT=3                    repite cada caso N veces (mide flakiness del modelo)
-//   EVAL_DELAY_MS=20000             pausa entre casos. Default 20s: el free-tier de Groq
-//                                   tiene 8000 TPM y cada caso pide ~3700 tokens, así que
-//                                   disparar en ráfaga agota el cupo (los fallos son del
-//                                   límite, no del prompt). Ponelo en 0 si tenés Dev Tier.
+//   EVAL_DELAY_MS=20000             pausa entre casos. Default 20s pensado para el free-tier
+//                                   de Groq (8000 TPM, ~3700 tokens/caso → ráfaga agota el
+//                                   cupo). El free-tier de Gemini limita por RPM (~10-15),
+//                                   así que 20s (3 req/min) también entra holgado. Ponelo en
+//                                   0 si tenés tier pago. (Un 429 es cuota, no falla de prompt.)
 //
 // NOTA: el endpoint NO pasa por intentarShortCircuit (eso es heurística pura y
 // determinista). Este suite evalúa el camino del LLM, que es el que tiene riesgo.
@@ -588,18 +594,36 @@ async function llamarEndpoint(caso) {
   return res.json();
 }
 
+/**
+ * ¿El error es la cuota DIARIA agotada (no algo transitorio)? Reintentar acá es
+ * inútil —no se recupera hasta el reset del día— y encima caro: cada intento
+ * quema 3 llamadas del retry interno del SDK. Detectarlo permite cortar la
+ * corrida entera en vez de escupir 47 fallos idénticos.
+ * El free tier de Gemini son 20 requests/día POR MODELO (quotaId
+ * GenerateRequestsPerDayPerProjectPerModel-FreeTier), así que se agota rápido.
+ */
+function esCuotaDiariaAgotada(err) {
+  return /free_tier_requests|requestsperday|exceeded your current quota|per day/i.test(err);
+}
+
 async function correrCaso(caso) {
-  // El free-tier de Groq tiene un límite de tokens-por-minuto bajo (8000 TPM).
-  // Disparar casos en ráfaga lo agota: el error NO es del prompt sino del cupo.
-  // Lo tratamos como transitorio y reintentamos el caso con pausas crecientes.
+  // Errores TRANSITORIOS (no del prompt): los tratamos como reintentables con
+  // pausas crecientes. Cubre ambos proveedores:
+  //   - Groq free-tier: límite de tokens-por-minuto bajo (8000 TPM); una ráfaga lo agota.
+  //   - Google/Gemini: 429 por RPM y 503 (modelo sobrecargado).
+  // La cuota DIARIA agotada NO entra acá: no es transitoria, corta la corrida.
   let data;
   for (let intento = 1; intento <= 4; intento++) {
     data = await llamarEndpoint(caso);
-    const esRateLimit = !data.ok && /rate limit|rate_limit|TPM|tokens per minute/i.test(String(data.error ?? ''));
-    if (!esRateLimit) break;
+    const err = String(data.error ?? '');
+    if (!data.ok && esCuotaDiariaAgotada(err)) {
+      return { ok: false, fallos: [`cuota diaria agotada: ${err}`], data, cuotaAgotada: true };
+    }
+    const esTransitorio = !data.ok && /rate limit|rate_limit|TPM|tokens per minute|429|resource_exhausted|too many requests|503|overloaded|unavailable/i.test(err);
+    if (!esTransitorio) break;
     if (intento < 4) {
       const espera = 4000 * intento; // 4s, 8s, 12s
-      console.log(`       ⏳ rate limit de Groq, reintentando en ${espera / 1000}s...`);
+      console.log(`       ⏳ error transitorio del LLM (cuota por minuto / sobrecarga), reintentando en ${espera / 1000}s...`);
       await sleep(espera);
     }
   }
@@ -634,6 +658,7 @@ async function main() {
 
   let pasados = 0;
   let fallados = 0;
+  let proveedorReportado = false;
 
   for (const [idx, caso] of casos.entries()) {
     if (DELAY_MS > 0 && idx > 0) await sleep(DELAY_MS);
@@ -654,9 +679,28 @@ async function main() {
         throw e;
       }
       latencyAcum += r.latencyMs ?? 0;
+      // Reportamos el proveedor/modelo la primera vez que lo vemos (lo devuelve el
+      // endpoint), para que quede claro contra qué LLM se corrió esta tanda.
+      if (!proveedorReportado && r.data?.proveedor) {
+        console.log(`   Proveedor: ${r.data.proveedor} · modelo: ${r.data.modelo}\n`);
+        proveedorReportado = true;
+      }
       if (!r.ok) {
         okEnTodas = false;
         r.fallos.forEach(f => fallosVistos.add(f));
+      }
+      // Cuota diaria agotada: cortamos la corrida entera. Seguir solo produciría
+      // el mismo error en todos los casos restantes (y quemaría más intentos).
+      if (r.cuotaAgotada) {
+        const restantes = casos.length - idx - 1;
+        console.log(`  ⛔ ${caso.nombre}`);
+        console.log(`\n⛔ CUOTA DIARIA AGOTADA en ${r.data?.proveedor ?? '?'}/${r.data?.modelo ?? '?'} — corto acá.`);
+        console.log(`   ${pasados} pasaron, ${fallados} fallaron, ${restantes + 1} sin correr.`);
+        console.log(`   El free tier de Gemini da 20 requests/día POR MODELO, y este suite necesita ${casos.length}.`);
+        console.log(`   Opciones: correr un subconjunto (EVAL_FILTER=...), cambiar de modelo,`);
+        console.log(`   volver a Groq (comentá LLM_PROVIDER en .env.local) o pasar a tier pago.\n`);
+        process.exitCode = 1;
+        return;
       }
     }
 

@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { generateObject } from 'ai';
-import { createGroq } from '@ai-sdk/groq';
 import {
   PedidoIASchema,
   buildSystemPrompt,
@@ -13,6 +12,8 @@ import {
   type ObsSlots,
   type PedidoActivoContext,
 } from '@/lib/bot/procesar';
+import { crearModeloLLM } from '@/lib/bot/proveedor-llm';
+import { MODELOS_EXTRACCION, PROVEEDOR_LLM } from '@/lib/bot/modelos';
 
 /**
  * Endpoint de DESARROLLO. Sirve para verificar end-to-end (sin Meta ni QStash)
@@ -56,7 +57,12 @@ import {
  *   Invoke-RestMethod -Method Post -Body $body -ContentType 'application/json' `
  *     http://localhost:3000/api/dev/test-ia | ConvertTo-Json -Depth 5
  */
-const groq = createGroq();
+// Modelo PRIMARIO de la cadena de extracción del PROVEEDOR ACTIVO (toggle
+// LLM_PROVIDER en .env.local): Groq gpt-oss-20b por default, gemini-3.6-flash con
+// LLM_PROVIDER=google. Acá NO hacemos fallback de cadena a propósito —igual que el
+// nightly— para que un 429/error del primario surja en vez de enmascararse: el
+// punto del eval es medir el modelo que corre en producción, no la red de fallback.
+const MODELO_PRIMARIO = MODELOS_EXTRACCION[0];
 
 export async function POST(request: Request) {
   if (process.env.NODE_ENV === 'production') {
@@ -83,7 +89,7 @@ export async function POST(request: Request) {
   const start = Date.now();
   try {
     const { object, usage } = await generateObject({
-      model: groq('openai/gpt-oss-20b'),
+      model: crearModeloLLM(MODELO_PRIMARIO),
       system: systemPrompt,
       prompt: `Mensaje(s) del cliente: "${mensaje}"`,
       schema: PedidoIASchema,
@@ -130,6 +136,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       latencyMs: Date.now() - start,
+      proveedor: PROVEEDOR_LLM,
+      modelo: MODELO_PRIMARIO,
       contexto: pedidoActivo
         ? { modo: 'modificacion', estado: pedidoActivo.estado, cantidades_actuales: { agua: cantidadAguaActual, crema: cantidadCremaActual } }
         : { modo: 'pedido_nuevo' },
@@ -153,8 +161,10 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: false,
       latencyMs: Date.now() - start,
+      proveedor: PROVEEDOR_LLM,
+      modelo: MODELO_PRIMARIO,
       error: String(error),
-      hint: 'Si dice "tools not supported" o el modelo no banca structured outputs, probá cambiar a openai/gpt-oss-120b o moonshotai/kimi-k2-instruct.',
+      hint: `Falló ${PROVEEDOR_LLM}/${MODELO_PRIMARIO}. Si es 429 es cuota (esperá o cambiá EVAL_DELAY_MS); si es 503 en Google el modelo está sobrecargado (reintentá); si dice "tools not supported" el modelo no banca structured output.`,
     }, { status: 200 });
   }
 }

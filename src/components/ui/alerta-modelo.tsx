@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import Link from "next/link"
 import { AlertTriangle, X } from "lucide-react"
 import { createClient } from "@/lib/supabase-client"
 import {
@@ -91,7 +92,12 @@ export function AlertaModelo() {
   return (
     <div className="flex items-start gap-2 border-b border-amber-300 bg-amber-50 px-4 py-2 text-amber-900 sm:px-6 lg:px-8">
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-      <div className="min-w-0 flex-1 text-xs sm:text-sm">
+      {/* Todo el bloque de texto lleva a la página de estado de modelos. */}
+      <Link
+        href="/modelos"
+        className="group min-w-0 flex-1 text-xs hover:underline sm:text-sm"
+        title="Ver estado de modelos y uso de tokens"
+      >
         <span className="font-semibold">
           {cadenaAgotada
             ? "El bot se quedó sin modelos de extracción (toda la cadena sin cuota)."
@@ -103,9 +109,12 @@ export function AlertaModelo() {
             ? <> → se pasó a <code className="font-mono">{ultima.modelo_fallback}</code>.</>
             : <> y no quedaban alternativas.</>}
           {alertas.length > 1 && ` (${alertas.length} saltos en las últimas 24h)`}
-          {" "}Revisá la cuota de Groq (TPD por modelo).
+          {" "}
+          <span className="font-medium underline decoration-amber-400 underline-offset-2 group-hover:decoration-amber-600">
+            Ver estado de modelos →
+          </span>
         </span>
-      </div>
+      </Link>
       <button
         type="button"
         onClick={marcarVisto}
