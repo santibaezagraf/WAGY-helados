@@ -66,7 +66,7 @@ jobs:
       # (llama-3.3-70b-versatile fue dado de baja en Groq; se usa un modelo de la
       # cadena MODELOS_EXTRACCION/MODELOS_CONSULTA del bot, confirmado vigente
       # contra GET /openai/v1/models el 2026-08-22.)
-      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.6-27b'
+      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.8-27b'
     steps:
       - uses: actions/checkout@v4
 
@@ -84,6 +84,14 @@ jobs:
           echo "$NEXT_PUBLIC_SUPABASE_URL" | grep -q "oqrufwtuwvogdfhojips" \
             || { echo "::error::NEXT_PUBLIC_SUPABASE_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
           echo "OK: modo test + staging."
+
+      - name: Verificar que los modelos LLM sigan existiendo
+        # Cuesta 0 tokens de inferencia (dos GET al listado de modelos) y corre
+        # ANTES de todo lo demás. Es la tercera vez que un modelo dado de baja
+        # rompe la suite sin aviso —llama-3.3-70b, kimi-k2/qwen3-32b, qwen3.6-27b—
+        # y la última hizo perder un pedido completo en el escenario, con un
+        # diagnóstico que costó reconstruir. Mejor fallar acá, con el id exacto.
+        run: node scripts/verificar-modelos.mjs
 
       - name: Instalar Supabase CLI
         uses: supabase/setup-cli@v1

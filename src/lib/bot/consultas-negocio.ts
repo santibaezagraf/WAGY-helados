@@ -1,6 +1,6 @@
 import { generateObject } from 'ai';
 import { z } from 'zod';
-import { esRateLimit } from '@/lib/bot/procesar';
+import { esRateLimit, esModeloInexistente } from '@/lib/bot/procesar';
 import type { PedidoActivoContext } from '@/lib/bot/procesar';
 import { registrarAlertaFallback, registrarUsoModelo, siguienteModelo } from '@/lib/bot/alertas';
 import { MODELOS_CONSULTA } from '@/lib/bot/modelos';
@@ -253,10 +253,15 @@ async function generarAcotado<T>(
       return object;
     } catch (error) {
       clearTimeout(timeout);
-      // Solo saltamos de modelo ante 429 (cuota); cualquier otro error → fail-safe.
-      if (esRateLimit(error)) {
+      // Saltamos de modelo por cuota (429) o porque el proveedor lo dio de baja
+      // (404): reintentar un id inexistente nunca sirve. Cualquier otro error →
+      // fail-safe (delegación a humano / texto determinista).
+      const sinCuota = esRateLimit(error);
+      const noExiste = !sinCuota && esModeloInexistente(error);
+      if (sinCuota || noExiste) {
         const fallback = siguienteModelo(idx, MODELOS_CONSULTA);
-        console.warn(`⚠️ ${etiqueta}: "${modelo}" sin cuota (429). Fallback → ${fallback ?? 'ninguno'}.`);
+        const motivo = sinCuota ? 'sin cuota (429)' : 'NO EXISTE (404, dado de baja — actualizá modelos.ts)';
+        console.warn(`⚠️ ${etiqueta}: "${modelo}" ${motivo}. Fallback → ${fallback ?? 'ninguno'}.`);
         void registrarAlertaFallback(modelo, fallback, telefono);
         continue; // probamos el siguiente modelo de la cadena
       }

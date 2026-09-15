@@ -34,32 +34,49 @@ export const PROVEEDOR_LLM: 'groq' | 'google' =
 const EXTRACCION_GROQ = [
   'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
-  'qwen/qwen3.6-27b',
+  'qwen/qwen3.8-27b',
 ] as const;
 const CONSULTA_GROQ = [
   'openai/gpt-oss-20b',
   'openai/gpt-oss-120b',
-  'qwen/qwen3.6-27b',
+  'qwen/qwen3.8-27b',
 ] as const;
 
-// Google (Gemini): primario flash (rápido/barato, análogo a gpt-oss-20b), con
-// fallback a otros modelos del free tier de AI Studio —cada modelo tiene su propio
-// límite RPM/RPD, así que saltar ante 429 también ayuda—. Todos bancan structured
-// output (generateObject). Los ids son los nativos de Gemini (sin prefijo de org).
-// Verificado 2026-08-27 contra generateContent con la key de AI Studio: las 2.5
-// están dadas de baja para cuentas NUEVAS (404 → usar la línea 3.x), y gemini-3.7
-// / gemini-flash-latest devolvían 503 (sobrecargados), así que el primario es la
-// 3.6 que Google recomienda y que respondía 200. Evitamos los alias `-latest`
-// porque se mueven solos hacia el modelo más nuevo (hoy 3.7, sobrecargado).
+// Google (Gemini): primario un *-flash-lite. Cambio 2026-09-15: la cadena
+// original (3.6-flash → 3.5-flash → 3.5-flash-lite) se agotaba en ~20 requests
+// porque los modelos "flash" NO -lite del free tier de AI Studio tienen un RPD
+// (requests/día) mucho más bajo que los -lite —medido contra la key real:
+// gemini-3.6-flash devolvió 429 con quotaId
+// "GenerateRequestsPerDayPerProjectPerModel-FreeTier", quotaValue "20"—, y ese
+// eval necesita ~66 llamadas para una corrida completa. Los `*-flash-lite` en
+// cambio muestran (aistudio.google.com/app/rate-limit, panel del proyecto,
+// 2026-09-15 — no medido por 429 como el dato de arriba, es lo que reporta la
+// página oficial): 500 RPD / 15 RPM / 250k TPM. 25× más cupo diario que la
+// cadena vieja, alcanza para correr el eval completo varias veces por día.
+// Ambos ids existen y responden 200 hoy (2026-09-15, verificado contra
+// generateContent con la key real) — no fueron dados de baja como pasó con la
+// línea 2.5. Se deja gemini-3.5-flash como segundo escalón (no-lite, RPD bajo
+// medido) solo por si algún día hace falta más capacidad de razonamiento que
+// las lite y se acepta gastarlo rápido; NO se agrega 3.6-flash de vuelta —ver
+// nota arriba, es la que se agotó en la corrida real.
+//
+// Alcance de este cambio (decisión 2026-09-15): esta cadena SOLO corre con
+// LLM_PROVIDER=google (pruebas). El fallback de PRODUCCIÓN sigue siendo 100%
+// Groq sin tocar — cruzar proveedores en el camino real de clientes (agregar
+// estos modelos DESPUÉS de qwen3.8-27b en la cadena que corre siempre) queda
+// pendiente como mejora futura: requeriría que `crearModeloLLM` (proveedor-llm.ts)
+// elija el SDK por-modelo (ya existe `proveedorDeModelo` para eso) en vez de por
+// el toggle global, y que GOOGLE_GENERATIVE_AI_API_KEY pase a ser obligatoria en
+// producción (hoy es opcional, solo para el toggle de test).
 const EXTRACCION_GOOGLE = [
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
+  'gemini-3.5-flash',
 ] as const;
 const CONSULTA_GOOGLE = [
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
+  'gemini-3.5-flash',
 ] as const;
 
 /** Cadena de extracción del pedido (`generateObject` con PedidoIASchema). */
@@ -137,29 +154,42 @@ const LIMITES_MODELO: Record<string, LimiteModelo> = {
   'openai/gpt-oss-120b': {
     proveedor: 'groq', metrica: 'tokens', limiteDiario: LIMITE_TPD, etiquetaMetrica: 'tokens/día (TPD)',
   },
-  'qwen/qwen3.6-27b': {
+  'qwen/qwen3.8-27b': {
     proveedor: 'groq', metrica: 'tokens', limiteDiario: LIMITE_TPD, etiquetaMetrica: 'tokens/día (TPD)',
   },
   // Gemini — free tier de AI Studio. La métrica diaria que ata es RPD.
   //
-  // ⚠️ RPD = 20, MEDIDO (no estimado) el 2026-08-28 con la key real: al agotarse,
-  // la API devuelve 429 con
+  // Los "flash" NO -lite tienen un RPD bajo, MEDIDO (no estimado) el 2026-08-28
+  // contra la key real: al agotarse, gemini-3.6-flash devolvió 429 con
   //   quotaId:    "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
   //   quotaValue: "20"
-  // y NO se recupera esperando (es por día, no por minuto). Acá decía 1.500 RPD
-  // —el número histórico de la doc— y es 75× optimista: con eso la barra de uso
-  // del dashboard marcaría ~1% cuando en realidad la cuota ya está quemada.
-  // Es "per project per model", así que cada modelo de la cadena tiene su propia
-  // cubeta de 20 (por eso el fallback ante 429 sirve), pero el total del día son
-  // ~60 requests entre los tres. Verificá en https://aistudio.google.com/rate-limit.
-  'gemini-3.6-flash': {
-    proveedor: 'google', metrica: 'requests', limiteDiario: 20, etiquetaMetrica: 'requests/día (RPD)', rpm: 10, tpm: 250_000,
+  // y no se recupera esperando (es por día, no por minuto). gemini-3.5-flash
+  // comparte la misma familia de límite (no confirmado con 429 propio, pero
+  // mismo tier que 3.6 en la doc) — se deja igual por precaución hasta medirlo.
+  //
+  // Los *-flash-lite en cambio muestran 500 RPD / 15 RPM / 250k TPM en
+  // aistudio.google.com/app/rate-limit (panel del proyecto, 2026-09-15) — DECLARADO
+  // por la página oficial, no confirmado por 429 propio (verificarlo requeriría
+  // agotar las 500 requests del día, no vale la pena solo para confirmar el techo).
+  // Si algún día se ve un 429 antes de la request #500, actualizar este número.
+  // Es "per project per model" (cubeta separada por modelo, por eso el fallback
+  // ante 429 sirve).
+  'gemini-3.1-flash-lite': {
+    proveedor: 'google', metrica: 'requests', limiteDiario: 500, etiquetaMetrica: 'requests/día (RPD)', rpm: 15, tpm: 250_000,
+  },
+  'gemini-3.5-flash-lite': {
+    proveedor: 'google', metrica: 'requests', limiteDiario: 500, etiquetaMetrica: 'requests/día (RPD)', rpm: 15, tpm: 250_000,
   },
   'gemini-3.5-flash': {
     proveedor: 'google', metrica: 'requests', limiteDiario: 20, etiquetaMetrica: 'requests/día (RPD)', rpm: 10, tpm: 250_000,
   },
-  'gemini-3.5-flash-lite': {
-    proveedor: 'google', metrica: 'requests', limiteDiario: 20, etiquetaMetrica: 'requests/día (RPD)', rpm: 15, tpm: 250_000,
+  // Ya NO está en la cadena activa (ver nota arriba, es la que se agotó en la
+  // corrida real de npm run eval), pero se deja su límite conocido para que el
+  // dashboard —que une MODELOS_CONOCIDOS con lo que ya se usó en el pasado, vía
+  // uso_modelo_diario— no le muestre 0 RPD (el default de "modelo desconocido")
+  // a un uso histórico real de 20 RPD.
+  'gemini-3.6-flash': {
+    proveedor: 'google', metrica: 'requests', limiteDiario: 20, etiquetaMetrica: 'requests/día (RPD)', rpm: 10, tpm: 250_000,
   },
 };
 

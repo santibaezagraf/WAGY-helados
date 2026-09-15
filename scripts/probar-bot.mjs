@@ -28,7 +28,7 @@
 //                                      bot bajo prueba comparten la misma cubeta TPD de
 //                                      200k y la corrida se queda sin tokens antes de
 //                                      terminar. Apuntalo a otro modelo de la cadena
-//                                      (ej. qwen/qwen3.6-27b) y el primario queda entero
+//                                      (ej. qwen/qwen3.8-27b) y el primario queda entero
 //                                      para el bot. El nightly ya lo hace; en local se
 //                                      pone en .env.local.
 //                                      Si es de razonamiento híbrido (qwen3.x), su bloque
@@ -60,7 +60,7 @@ const MAX_TURNOS = Math.max(1, parseInt(process.env.PROBAR_MAX_TURNOS || '12', 1
 // ⚠️ Acoplamiento a mano: este id no se puede importar de modelos.ts (es TS y
 // esto es .mjs suelto), así que si algún día la cadena cambia y este modelo pasa
 // a ser el primario, la colisión vuelve en silencio. El chequeo de abajo avisa.
-const MODELO_CLIENTE = process.env.PROBAR_MODELO_CLIENTE || 'qwen/qwen3.6-27b';
+const MODELO_CLIENTE = process.env.PROBAR_MODELO_CLIENTE || 'qwen/qwen3.8-27b';
 const SOLO_GUIONADOS = process.env.PROBAR_SOLO_GUIONADOS === '1';
 const SOLO_EXPLORATORIOS = process.env.PROBAR_SOLO_EXPLORATORIOS === '1';
 const ENDPOINT = `${BASE_URL}/api/dev/simular-conversacion`;

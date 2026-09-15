@@ -13,6 +13,17 @@
 // La política de fallback ante 429 (saltar al siguiente id de la cadena, cada uno
 // con su propia cubeta de cuota) es idéntica para ambos proveedores, así que
 // `esRateLimit` / `siguienteModelo` no cambian.
+//
+// PENDIENTE (decisión 2026-09-15, no implementado a propósito): un fallback
+// CRUZADO de producción —que la cadena de Groq, agotados sus 3 modelos, siga
+// con los `*-flash-lite` de Google en vez de responder "no te entendí"— es
+// tentador ahora que se midió que esos modelos tienen 500 RPD (vs. los 20 RPD de
+// los "flash" no-lite, ver modelos.ts). Pero es un cambio de alcance mayor al de
+// este toggle: `crearModeloLLM` debería elegir el SDK POR ID de modelo (ya existe
+// `proveedorDeModelo` en modelos.ts para eso) en vez de por `PROVEEDOR_LLM`
+// global, y GOOGLE_GENERATIVE_AI_API_KEY pasaría a ser obligatoria en producción
+// (hoy solo hace falta para probar con el toggle). Se decidió posponerlo: primero
+// correr los evals por separado contra cada proveedor.
 
 import { createGroq } from '@ai-sdk/groq';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
