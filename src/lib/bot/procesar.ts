@@ -1247,6 +1247,64 @@ export function traeDatosDePedido(pedido: PedidoIA): boolean {
   return false;
 }
 
+// Números escritos con letras, para que "veinte de crema" corrobore igual que "20".
+const NUMEROS_ESCRITOS =
+  /\b(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|mil|docena|docenas)\b/;
+
+// Pistas textuales de método de pago, incluidos los sinónimos que el prompt mapea.
+const PISTAS_PAGO =
+  /\b(efectivo|cash|billete|billetes|plata|transferencia|transferir|transfiero|transferi|transfer|mp|mercado\s*pago|alias|cbu|debito|credito|tarjeta)\b/;
+
+/**
+ * ¿El TEXTO CRUDO respalda los datos que el modelo dice haber extraído?
+ *
+ * Contrapeso de [[traeDatosDePedido]], que a propósito mira solo el output del
+ * modelo. Ese criterio es el correcto para un mensaje que el modelo clasificó
+ * como pedido, pero es demasiado crédulo para SACAR un mensaje de la categoría
+ * "consulta pura": ahí un solo campo alucinado alcanza para reclasificarlo a
+ * `datos_pedido`, y el camino mixto NO corta el flujo — la consulta se responde
+ * y encima sale una segunda burbuja de armado que la contradice.
+ *
+ * Caso real (informe nightly 35012068144, pasada Gemini): a la pregunta pura
+ * "¿Cuántos son el mínimo?" el modelo le colgó una cantidad inexistente, y el
+ * cliente recibió "Esa la dejo para alguien del equipo 🙏" e inmediatamente
+ * "Ahí no te sigo 😅 Pero el pedido te lo armo ya. Necesito: …".
+ *
+ * La corroboración es POR SEÑAL (la cantidad pide un número, el pago pide una
+ * palabra de pago, …) y deliberadamente LAXA: un falso negativo acá descarta un
+ * dato que el cliente sí dio —el bug que `traeDatosDePedido` vino a arreglar—,
+ * así que alcanza con que una sola de las señales emitidas tenga respaldo.
+ *
+ * Pura y exportada para test.
+ */
+export function datosCorroboradosEnTexto(pedido: PedidoIA, texto: string): boolean {
+  const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const hayNumero = /\d/.test(n) || NUMEROS_ESCRITOS.test(n);
+
+  const hayCantidad =
+    pedido.cantidad_agua_operacion !== 'mantener' ||
+    pedido.cantidad_crema_operacion !== 'mantener' ||
+    (pedido.cantidad_sin_tipo ?? 0) > 0;
+  if (hayCantidad && hayNumero) return true;
+
+  if (normalizarMetodoPago(pedido.metodo_pago) !== null && PISTAS_PAGO.test(n)) return true;
+
+  // Una dirección real trae altura; el sentinela de retiro trae el verbo.
+  if (pedido.direccion !== null && (hayNumero || mencionaRetiro(texto))) return true;
+
+  const hayObs =
+    pedido.obs_agua_operacion !== 'mantener' ||
+    pedido.obs_crema_operacion !== 'mantener' ||
+    pedido.obs_general_operacion !== 'mantener';
+  if (hayObs) {
+    if (mencionaTipoHelado(texto)) return true;
+    const sinTildes = (t: string) => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if ([...SABORES.agua, ...SABORES.crema].some((sabor) => n.includes(sinTildes(sabor)))) return true;
+  }
+
+  return false;
+}
+
 // ─── La pregunta que el propio cambio ya contesta ────────────────────────────
 //
 // Caso real de la corrida 34900965360: con el pedido ya confirmado, "Ah no, me
@@ -2490,8 +2548,21 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // consulta (precios / negocio) CORTAN el flujo con return antes de aplicar y
     // persistir nada, así que sin esta señal un "transferencia. y hasta qué hora
     // entregan?" perdía el pago en silencio (hallazgo #2 del informe 32740622175).
-    const traeDatos = traeDatosDePedido(pedido);
-    if (traeDatos && (pedido.intencion === 'consulta_negocio' || pedido.intencion === 'consultar_precios')) {
+    //
+    // Para SACAR un mensaje de la categoría "consulta pura" no alcanza con que el
+    // modelo haya emitido un campo: exigimos que el TEXTO CRUDO lo respalde. Sin
+    // eso, un solo campo alucinado sobre una pregunta pura la manda al camino
+    // mixto (que NO corta el flujo) y el cliente recibe la respuesta a su consulta
+    // MÁS una burbuja de armado que la contradice.
+    const esConsultaPura =
+      pedido.intencion === 'consulta_negocio' || pedido.intencion === 'consultar_precios';
+    const traeDatosCrudo = traeDatosDePedido(pedido);
+    const traeDatos =
+      traeDatosCrudo && (!esConsultaPura || datosCorroboradosEnTexto(pedido, textoBatch));
+    if (traeDatosCrudo && !traeDatos) {
+      console.log(`🔍 El modelo extrajo datos sobre una "${pedido.intencion}" pero el texto no los respalda. La trato como consulta pura.`);
+    }
+    if (traeDatos && esConsultaPura) {
       // El prompt ya pide `datos_pedido` en este caso, pero es una regla soft. Esta
       // es la red determinista equivalente a las que ya existen para `saludo`+datos
       // y `modificar_sin_datos`+cambios. La pregunta NO se pierde: el bloque

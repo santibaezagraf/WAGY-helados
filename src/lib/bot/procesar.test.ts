@@ -28,6 +28,7 @@ import {
   detectarCantidadPelada,
   detectarDeltaPelado,
   traeDatosDePedido,
+  datosCorroboradosEnTexto,
   intencionesValidasPara,
   clampIntencionPorEstado,
   limpiarSaboresNoValidos,
@@ -920,6 +921,76 @@ describe('traeDatosDePedido', () => {
   });
   it('el placeholder "null" del modelo no cuenta como pago', () => {
     expect(traeDatosDePedido(ia({ metodo_pago: 'null' }))).toBe(false);
+  });
+});
+
+describe('datosCorroboradosEnTexto', () => {
+  it('la cantidad alucinada sobre una pregunta pura no se corrobora (caso del informe)', () => {
+    // Informe nightly 35012068144, pasada Gemini: a "¿Cuántos son el mínimo?" el
+    // modelo le colgó una cantidad, el override la reclasificó a datos_pedido y el
+    // cliente recibió la delegación MÁS un "no te entendí, necesito estos datos".
+    expect(datosCorroboradosEnTexto(
+      ia({ cantidad_sin_tipo: 20 }),
+      '¿Cuántos son el mínimo?',
+    )).toBe(false);
+  });
+
+  it('el eco del pago del pedido activo sobre una pregunta pura no se corrobora', () => {
+    expect(datosCorroboradosEnTexto(
+      ia({ metodo_pago: 'transferencia' }),
+      'hasta qué hora abren?',
+    )).toBe(false);
+  });
+
+  it('un mensaje mixto real SÍ se corrobora (no perdemos el dato)', () => {
+    // El caso que `traeDatosDePedido` vino a arreglar: el pago no puede perderse.
+    expect(datosCorroboradosEnTexto(
+      ia({ metodo_pago: 'transferencia' }),
+      'transferencia. y hasta qué hora entregan?',
+    )).toBe(true);
+  });
+
+  it('corrobora la cantidad con dígitos y con número escrito', () => {
+    expect(datosCorroboradosEnTexto(
+      ia({ cantidad_crema: 20, cantidad_crema_operacion: 'reemplazar' }),
+      'ponele 20 de crema',
+    )).toBe(true);
+    expect(datosCorroboradosEnTexto(
+      ia({ cantidad_crema: 20, cantidad_crema_operacion: 'reemplazar' }),
+      'ponele veinte de crema',
+    )).toBe(true);
+  });
+
+  it('corrobora la dirección por la altura y el retiro por el verbo', () => {
+    expect(datosCorroboradosEnTexto(ia({ direccion: 'Mitre 951' }), 'Mitre 951')).toBe(true);
+    expect(datosCorroboradosEnTexto(ia({ direccion: 'retira' }), 'paso a retirar')).toBe(true);
+  });
+
+  it('corrobora los sabores por el nombre del sabor o por el tipo', () => {
+    expect(datosCorroboradosEnTexto(
+      ia({ obs_crema: 'chocolate', obs_crema_operacion: 'agregar' }),
+      'los de chocolate',
+    )).toBe(true);
+    expect(datosCorroboradosEnTexto(
+      ia({ obs_general: 'sin azúcar', obs_general_operacion: 'agregar' }),
+      'que sean de crema',
+    )).toBe(true);
+  });
+
+  it('una obs alucinada sin sabor ni tipo en el texto no se corrobora', () => {
+    expect(datosCorroboradosEnTexto(
+      ia({ obs_general: 'algo', obs_general_operacion: 'agregar' }),
+      'hacen envíos a Palermo?',
+    )).toBe(false);
+  });
+
+  it('alcanza con que UNA de las señales emitidas tenga respaldo', () => {
+    // Laxo a propósito: el falso negativo (descartar un dato real) es la dirección
+    // peligrosa acá, así que una sola señal corroborada valida todo el mensaje.
+    expect(datosCorroboradosEnTexto(
+      ia({ metodo_pago: 'efectivo', cantidad_sin_tipo: 30 }),
+      'pago en efectivo',
+    )).toBe(true);
   });
 });
 
