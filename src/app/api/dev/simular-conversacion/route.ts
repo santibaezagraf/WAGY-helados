@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
-import { procesarMensajesDeCliente } from '@/lib/bot/procesar';
+import { procesarMensajesDeCliente, drenarFalloExtraccionTest } from '@/lib/bot/procesar';
 import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS, type BotonAccion } from '@/lib/bot/botones';
 import { drenarSalidaTest, type SalidaCapturada } from '@/lib/whatsapp';
+import { MODELOS_EXTRACCION, MODELOS_CONSULTA, PROVEEDOR_LLM } from '@/lib/bot/modelos';
 
 /**
  * Endpoint de DESARROLLO — "driver" del bot para el harness de testeo
@@ -95,6 +96,26 @@ async function leerMensajes(telefono: string, limite = 30) {
   return data ?? [];
 }
 
+/**
+ * Metadatos de la corrida, sin gastar un solo token: qué cadena de modelos va a
+ * usar el bot bajo prueba. El harness lo consulta para avisar si el modelo del
+ * cliente-agente coincide con el PRIMARIO del bot — si coinciden, comparten la
+ * cubeta TPD y la corrida se queda sin tokens a mitad de camino. Sin esto, el
+ * harness tendría que duplicar a mano el id del primario (no puede importar
+ * `modelos.ts`, que es TS, desde un .mjs suelto).
+ */
+export async function GET() {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ error: 'dev only' }, { status: 403 });
+  }
+  return NextResponse.json({
+    proveedor: PROVEEDOR_LLM,
+    primarioExtraccion: MODELOS_EXTRACCION[0],
+    modelosExtraccion: MODELOS_EXTRACCION,
+    modelosConsulta: MODELOS_CONSULTA,
+  });
+}
+
 export async function POST(request: Request) {
   if (process.env.NODE_ENV === 'production') {
     return NextResponse.json({ error: 'dev only' }, { status: 403 });
@@ -149,6 +170,18 @@ export async function POST(request: Request) {
         }
         const respuestas = await inyectarTextoYProcesar(telefono, textos);
         const pedido = await leerPedido(telefono);
+        // Si la extracción murió con la cadena agotada, el bot ya mandó su
+        // "no te entendí" — pero eso NO es un fallo de comportamiento y el
+        // harness tiene que poder distinguirlo (ver drenarFalloExtraccionTest).
+        const falloExtraccion = drenarFalloExtraccionTest(telefono);
+        if (falloExtraccion) {
+          return NextResponse.json({
+            ok: false,
+            error: `extraccion_fallida: ${falloExtraccion}`,
+            falloExtraccion,
+            telefono, respuestas, pedido,
+          });
+        }
         return NextResponse.json({ ok: true, telefono, respuestas, pedido });
       }
 
@@ -163,6 +196,15 @@ export async function POST(request: Request) {
         if (botonId && RESPUESTAS_RAPIDAS[botonId]) {
           const respuestas = await inyectarTextoYProcesar(telefono, [RESPUESTAS_RAPIDAS[botonId]]);
           const pedido = await leerPedido(telefono);
+          const falloRapida = drenarFalloExtraccionTest(telefono);
+          if (falloRapida) {
+            return NextResponse.json({
+              ok: false,
+              error: `extraccion_fallida: ${falloRapida}`,
+              falloExtraccion: falloRapida,
+              telefono, respuestas, pedido, via: 'respuesta_rapida',
+            });
+          }
           return NextResponse.json({ ok: true, telefono, respuestas, pedido, via: 'respuesta_rapida' });
         }
 

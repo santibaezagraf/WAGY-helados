@@ -70,9 +70,15 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { mensaje, pedidoActivo, hayPedidoCanceladoReciente } = body as {
+  const { mensaje, pedidoActivo, hayPedidoCanceladoReciente, reasoningEffort } = body as {
     mensaje?: string;
     pedidoActivo?: PedidoActivoContext;
+    // Passthrough SOLO de medición (dev): permite comparar el costo/calidad de la
+    // extracción con distinto esfuerzo de razonamiento sin tocar producción.
+    // gpt-oss-20b es un modelo de razonamiento y gasta ~85% de los tokens de
+    // salida en el bloque de reasoning (754 de 891, medido) para una extracción
+    // con temperature 0 y schema cerrado. Ausente = comportamiento de producción.
+    reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
     // Habilita la intención "reactivar" en el prompt de pedido nuevo, igual que
     // el flujo real cuando el cliente canceló hace poco. Solo aplica sin pedidoActivo.
     hayPedidoCanceladoReciente?: boolean;
@@ -94,6 +100,12 @@ export async function POST(request: Request) {
       prompt: `Mensaje(s) del cliente: "${mensaje}"`,
       schema: PedidoIASchema,
       temperature: 0,
+      // Por defecto, EL MISMO esfuerzo de razonamiento que producción (ver el
+      // bloque en procesar.ts): si el eval midiera con otro, estaría midiendo un
+      // bot distinto del que atiende clientes — justo el tipo de divergencia que
+      // este endpoint existe para evitar. El campo del body lo pisa solo para
+      // experimentar.
+      providerOptions: { groq: { reasoningEffort: reasoningEffort ?? 'low' } },
     });
 
     // Aplicamos las operaciones de cantidad como lo hace el flujo real,

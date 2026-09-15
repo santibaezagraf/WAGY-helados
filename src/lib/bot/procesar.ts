@@ -19,9 +19,11 @@ const supabaseAdmin = createClient<Database>(
 
 // La cadena de modelos de extracción (MODELOS_EXTRACCION) vive ahora en
 // @/lib/bot/modelos.ts, fuente de verdad única que también lee la página de
-// estado de modelos. esRateLimit solo dispara el salto de modelo con un 429, así
-// que un id muerto (404) agotaría los reintentos de validación en vano en vez de
-// saltar — por eso la cadena solo lista modelos vigentes en Groq.
+// estado de modelos. El salto de modelo lo disparan DOS señales: `esRateLimit`
+// (429, el modelo se quedó sin cuota) y `esModeloInexistente` (404, el proveedor
+// lo dio de baja). Antes solo la primera, y "la cadena solo lista modelos
+// vigentes" era toda la mitigación del segundo caso — mitigación que falló tres
+// veces (llama-3.3-70b, kimi-k2/qwen3-32b, qwen3.6-27b).
 
 // ¿El error del SDK es un rate limit (429)? Es la señal de "modelo sin cuota" que
 // dispara el fallback. Miramos statusCode (lo expone APICallError del AI SDK) y,
@@ -55,6 +57,92 @@ export function esRateLimit(error: unknown): boolean {
     actual = e.lastError ?? e.cause;
   }
   return false;
+}
+
+/**
+ * ¿El error dice que el modelo NO EXISTE (o no tenemos acceso)? Groq y Google dan
+ * de baja modelos sin aviso, y hasta la corrida 34928105031 eso se trataba como un
+ * error de validación cualquiera: 3 reintentos contra el mismo id muerto y después
+ * "no te entendí", con la cadena entera sin usar. Un modelo que no existe tampoco
+ * va a existir en el reintento 2, así que corresponde SALTAR al siguiente, igual
+ * que ante un 429.
+ *
+ * Caso real (corrida 34928105031): `qwen/qwen3.6-27b` era el tercer eslabón de la
+ * cadena y Groq ya lo había dado de baja. Un 429 transitorio en los dos primeros
+ * bastaba para llegar al tercero, y ahí el turno moría — el cliente perdía un
+ * pedido completo aunque la cuota de los otros modelos se recuperara al minuto.
+ *
+ * Los patrones son deliberadamente específicos del "modelo inexistente" y no un
+ * "not found" genérico, que podría aparecer dentro de un error de validación del
+ * schema. Aun así, la dirección del error importa: un falso POSITIVO solo saltea
+ * un modelo que servía (el siguiente responde igual), mientras que un falso
+ * NEGATIVO es exactamente el bug que esto viene a arreglar — turno perdido.
+ *
+ * Mismo recorrido de la cadena de errores que `esRateLimit` (el AI SDK envuelve
+ * en `AI_RetryError` y guarda el real en `lastError`/`cause`). Pura y exportada
+ * para test.
+ */
+export function esModeloInexistente(error: unknown): boolean {
+  const vistos = new Set<unknown>();
+  let actual: unknown = error;
+  for (let profundidad = 0; actual && profundidad < 5; profundidad++) {
+    if (vistos.has(actual)) break;
+    vistos.add(actual);
+
+    const e = actual as { statusCode?: number; message?: string; lastError?: unknown; cause?: unknown };
+    if (e.statusCode === 404) return true;
+
+    const msg = actual instanceof Error ? actual.message : String(actual);
+    // Groq: "The model `x` does not exist or you do not have access to it."
+    // Google: "models/x is not found for API version v1beta".
+    // También los avisos de baja, que a veces llegan como 400 con texto.
+    if (
+      /model.{0,40}does not exist|do not have access to it|model_not_found|model_decommissioned|models?\/[\w.-]+ is not found|no longer (available|supported)|has been (deprecated|decommissioned|retired)/i
+        .test(msg)
+    ) {
+      return true;
+    }
+
+    actual = e.lastError ?? e.cause;
+  }
+  return false;
+}
+
+// ─── Por qué murió la extracción (solo para el harness) ──────────────────────
+//
+// Cuando la cadena entera se agota, el cliente recibe "no te entendí" y el
+// endpoint dev responde ok:true con ese texto — indistinguible de un fallo de
+// COMPORTAMIENTO del bot. En la corrida 34928105031 eso hizo que el informe
+// reportara una regresión que no existía (el escenario `formato-no-es-sabor`
+// extraía perfecto; lo que había pasado es que se agotó la cuota y el último
+// eslabón de la cadena estaba dado de baja). Además dejaba muerto el retry
+// anti-rate-limit de `probar-bot.mjs`, que espera un `ok:false`.
+//
+// Mismo idioma que `drenarSalidaTest` en whatsapp.ts: buffer en memoria por
+// teléfono, solo bajo BOT_TEST_MODE, drenado por el endpoint dev. Con el flag
+// apagado esto es inerte.
+
+export type MotivoFalloExtraccion = 'sin_cuota' | 'modelo_inexistente' | 'validacion';
+
+/** Traduce el último error de la cadena al motivo que le sirve al harness. Pura y exportada para test. */
+export function clasificarFalloExtraccion(error: unknown): MotivoFalloExtraccion {
+  if (esRateLimit(error)) return 'sin_cuota';
+  if (esModeloInexistente(error)) return 'modelo_inexistente';
+  return 'validacion';
+}
+
+const bufferFallosTest = new Map<string, MotivoFalloExtraccion>();
+
+function registrarFalloExtraccionTest(telefono: string, motivo: MotivoFalloExtraccion): void {
+  if (process.env.BOT_TEST_MODE !== '1') return;
+  bufferFallosTest.set(telefono, motivo);
+}
+
+/** Lee y limpia el motivo del último fallo de extracción. Solo lo usa el endpoint dev de testeo. */
+export function drenarFalloExtraccionTest(telefono: string): MotivoFalloExtraccion | null {
+  const motivo = bufferFallosTest.get(telefono) ?? null;
+  bufferFallosTest.delete(telefono);
+  return motivo;
 }
 
 /**
@@ -2127,6 +2215,22 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         prompt: `Conversación reciente (el último turno del bot da contexto al mensaje del cliente):\n${historialParaIA}`,
         schema: PedidoIASchema,
         temperature: 0,
+        // ESFUERZO DE RAZONAMIENTO BAJO. gpt-oss-20b es un modelo de razonamiento
+        // y por defecto gasta ~85% de los tokens de salida en el bloque de
+        // reasoning — para una extracción con `temperature: 0`, schema cerrado y
+        // un prompt que ya enumera las reglas caso por caso, ese razonamiento
+        // largo no aporta: MEDIDO sobre los 6 caminos difíciles (delta, cantidad
+        // pelada, kilos, mixto, sin-tipo, off-topic) da −62% de tokens de salida
+        // y MÁS aciertos, no menos (6/6 vs 5/6: con el default, "que sean 2 kilos"
+        // fallaba la validación del schema tras agotar los reintentos).
+        //
+        // 'low' es el mínimo que acepta Groq para este modelo: 'none' existe para
+        // otros (el cliente-agente del harness lo usa) pero acá la API rechaza el
+        // request con "reasoning_effort must be one of low, medium, or high".
+        //
+        // `providerOptions` va namespaceado por proveedor, así que los modelos
+        // Gemini de la cola de la cadena simplemente lo ignoran.
+        providerOptions: { groq: { reasoningEffort: 'low' } },
       });
 
       // Telemetría de tokens (fail-open, no bloqueante): alimenta la página de
@@ -2314,9 +2418,18 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // 429 = se agotó la cuota de ESTE modelo (rate limit / TPD). No tiene
       // sentido reintentarlo: saltamos al siguiente de la cadena (que tiene su
       // propia cubeta) para no dejar al cliente sin respuesta.
-      if (esRateLimit(iaError)) {
+      // DOS motivos para saltar de modelo, no uno: sin cuota (429) o dado de baja
+      // por el proveedor (404). Reintentar un id que no existe es siempre en vano,
+      // y hacerlo 3 veces y después rendirse es cómo se perdió un pedido completo
+      // en la corrida 34928105031.
+      const sinCuota = esRateLimit(iaError);
+      const noExiste = !sinCuota && esModeloInexistente(iaError);
+      if (sinCuota || noExiste) {
         const fallback = siguienteModelo(modeloIdx, MODELOS_EXTRACCION);
-        console.warn(`🚧 Rate limit (429) en "${modelo}". Fallback a "${fallback ?? '(cadena agotada)'}".`);
+        const motivo = sinCuota
+          ? 'Rate limit (429)'
+          : 'MODELO INEXISTENTE (404, dado de baja por el proveedor — actualizá la cadena en modelos.ts)';
+        console.warn(`🚧 ${motivo} en "${modelo}". Fallback a "${fallback ?? '(cadena agotada)'}".`);
         // Telemetría de ops: registramos el salto para que el dashboard avise que
         // el primario está caído. Fail-open y no bloqueante — un fallo acá no
         // debe frenar la respuesta al cliente (que ya está en camino degradado).
@@ -2335,6 +2448,13 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   if (!pedido) {
     console.error("❌ Falló la extracción structured tras toda la cadena de modelos:", lastError);
+    // Modo test: dejamos registrado POR QUÉ murió. Para un cliente real da igual
+    // (recibe el mismo "no te entendí"), pero para el harness es la diferencia
+    // entre "el bot se portó mal" y "se acabó la cuota" — y hasta la corrida
+    // 34928105031 eran indistinguibles: el endpoint respondía ok:true con el
+    // texto de disculpa, así que el retry anti-rate-limit de probar-bot.mjs
+    // nunca podía dispararse y el informe reportó una regresión inexistente.
+    registrarFalloExtraccionTest(numeroCliente, clasificarFalloExtraccion(lastError));
     await enviarMensajeWhatsApp(numeroCliente, "Disculpá, no te entendí 😅 ¿Me lo repetís? Por ejemplo: *20 de agua y 10 de crema, Mitre 950, efectivo* 🙏");
     return;
   }

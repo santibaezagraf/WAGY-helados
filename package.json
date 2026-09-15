@@ -12,6 +12,7 @@
     "probar-bot": "node --env-file=.env.local scripts/probar-bot.mjs",
     "migrar-todo": "node --env-file=.env.local scripts/db-push-todos.mjs",
     "reconciliar-migraciones": "node --env-file=.env.local scripts/reconciliar-migraciones.mjs",
+    "verificar-modelos": "node --env-file=.env.local scripts/verificar-modelos.mjs",
     "minar": "node scripts/minar-expresiones.mjs",
     "update-types": "npx supabase gen types typescript --project-id \"bhexbncbuieuxklegnjm\" --schema public > src/types/supabase.ts",
     "update-types:local": "npx supabase gen types typescript --local > src/types/supabase.ts"

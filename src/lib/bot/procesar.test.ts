@@ -18,6 +18,8 @@ import {
   estaDespachado,
   dentroDePlazoModificacionCocina,
   esRateLimit,
+  esModeloInexistente,
+  clasificarFalloExtraccion,
   esPreguntaNegocioReal,
   mencionaTipoHelado,
   normalizarMetodoPago,
@@ -1286,5 +1288,71 @@ describe('elegirRespuestaDatosFaltantes: rondas consecutivas (off-topic)', () =>
       expect(r.mensaje).toContain('Para armar tu pedido me falta:');
       expect(r.mensaje).not.toMatch(/😅/);
     }
+  });
+});
+
+describe('esModeloInexistente', () => {
+  it('detecta el 404 de Groq por modelo dado de baja (el caso de la corrida 34928105031)', () => {
+    // Texto literal que devolvió Groq para qwen/qwen3.6-27b.
+    expect(esModeloInexistente(new Error(
+      'The model `qwen/qwen3.6-27b` does not exist or you do not have access to it.',
+    ))).toBe(true);
+  });
+
+  it('detecta el formato de Google', () => {
+    expect(esModeloInexistente(new Error(
+      'models/gemini-2.5-flash is not found for API version v1beta',
+    ))).toBe(true);
+  });
+
+  it('detecta por statusCode 404 aunque el texto no diga nada', () => {
+    expect(esModeloInexistente({ statusCode: 404, message: 'Not Found' })).toBe(true);
+  });
+
+  it('atraviesa el AI_RetryError que envuelve el error real', () => {
+    // Mismo motivo que en esRateLimit: el SDK envuelve los reintentos y deja el
+    // error real en `lastError`; mirar solo el tope daba false.
+    const envuelto = Object.assign(new Error('Failed after 3 attempts'), {
+      name: 'AI_RetryError',
+      lastError: Object.assign(new Error('The model `x` does not exist or you do not have access to it.'), { statusCode: 404 }),
+    });
+    expect(esModeloInexistente(envuelto)).toBe(true);
+  });
+
+  it('NO confunde un rate limit ni un error de validación con un modelo inexistente', () => {
+    // Si se solapara con el 429 daría lo mismo (los dos saltan de modelo), pero un
+    // error de validación NO debe saltar: ahí el reintento al mismo modelo es lo
+    // correcto, porque es no-determinismo del modelo, no un id muerto.
+    expect(esModeloInexistente(new Error('Rate limit reached for model x'))).toBe(false);
+    expect(esModeloInexistente({ statusCode: 429, message: 'Too Many Requests' })).toBe(false);
+    expect(esModeloInexistente(new Error('Type validation failed: value did not match schema'))).toBe(false);
+    expect(esModeloInexistente(new Error('required property not found in response'))).toBe(false);
+    expect(esModeloInexistente(null)).toBe(false);
+  });
+
+  it('no se cuelga con un ciclo de causes', () => {
+    const a = new Error('a') as Error & { cause?: unknown };
+    a.cause = a;
+    expect(esModeloInexistente(a)).toBe(false);
+  });
+});
+
+describe('clasificarFalloExtraccion', () => {
+  it('separa cuota de modelo muerto y de fallo real del bot', () => {
+    // El harness usa esto para decidir si reintenta, si aborta, o si lo reporta
+    // como regresión. Confundirlos es lo que hizo que el informe de la corrida
+    // 34928105031 marcara una regresión inexistente.
+    expect(clasificarFalloExtraccion({ statusCode: 429 })).toBe('sin_cuota');
+    expect(clasificarFalloExtraccion(new Error('Rate limit reached'))).toBe('sin_cuota');
+    expect(clasificarFalloExtraccion(new Error('The model `x` does not exist or you do not have access to it.')))
+      .toBe('modelo_inexistente');
+    expect(clasificarFalloExtraccion(new Error('Type validation failed'))).toBe('validacion');
+  });
+
+  it('ante un error desconocido asume fallo del bot, no infraestructura', () => {
+    // Dirección segura: si no sabemos qué pasó, que se vea como problema del bot
+    // y alguien lo mire, en vez de silenciarlo como "era la cuota".
+    expect(clasificarFalloExtraccion(null)).toBe('validacion');
+    expect(clasificarFalloExtraccion(new Error('boom'))).toBe('validacion');
   });
 });

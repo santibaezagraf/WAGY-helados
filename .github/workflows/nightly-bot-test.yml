@@ -11,6 +11,17 @@
 # Todos los transcripts quedan como artifact descargable para que Claude Code los
 # juzgue a demanda (le pasás el artifact y te arma el informe ✅/⚠️/❓).
 #
+# PROVEEDOR LLM (input `modelo`, ver más abajo): el bot bajo prueba pasa por
+# `procesarMensajesDeCliente`, o sea que corre la cadena MODELOS_EXTRACCION/
+# MODELOS_CONSULTA real de @/lib/bot/modelos.ts — 'groq' es esa cadena default
+# (Groq x3 + Google de cola, igual que producción); 'gemini' fuerza
+# `LLM_PROVIDER=google` (cadena PURA de Gemini, sin Groq — ver modelos.ts). Cada
+# proveedor corre en su PROPIO reinicio del dev server, porque el toggle se lee
+# una sola vez al importar el módulo (cambiar el env var a mitad de proceso no
+# tiene efecto). El cliente-agente de los exploratorios (PROBAR_MODELO_CLIENTE)
+# siempre corre en Groq, sin importar el proveedor del bot bajo prueba — no es
+# el sistema bajo prueba, solo genera texto de cliente.
+#
 # ── Secrets a cargar (repo → Settings → Secrets and variables → Actions) ──
 #   STAGING_SUPABASE_URL                 = https://oqrufwtuwvogdfhojips.supabase.co
 #   STAGING_SUPABASE_ANON_KEY            = <anon key de staging>
@@ -21,6 +32,11 @@
 #                                           Se usa para aplicar las migraciones pendientes a staging antes de testear —
 #                                           sin esto, staging driftea en silencio y el bot queda mudo, invisible.)
 #   GROQ_API_KEY                         = <tu Groq API key>
+#   GOOGLE_GENERATIVE_AI_API_KEY         = <tu API key de Google AI Studio>
+#                                          (REQUERIDA: el default del input `modelo` es 'todos', así que el
+#                                           scheduled de todos los sábados corre también la pasada Gemini. Sin
+#                                           esta key esa pasada falla entera — ver el paso "Verificar que los
+#                                           modelos LLM sigan existiendo" y el fail-fast dentro del loop abajo.)
 # (Son claves de STAGING, no de prod: si se filtran, rotás staging sin drama.)
 #
 # Probalo a mano primero: pestaña Actions → "nightly-bot-test" → Run workflow.
@@ -44,26 +60,47 @@ on:
           - todos
           - solo-guionados
           - solo-exploratorios
+      modelo:
+        description: 'Qué proveedor de LLM ejercitar en el bot bajo prueba'
+        required: false
+        default: 'todos'
+        type: choice
+        options:
+          - todos
+          - groq
+          - gemini
 
 jobs:
   guionados:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 'todos' (default, incl. el scheduled) corre la suite completa DOS veces
+    # (una por proveedor) en el mismo job, secuencial — casi el doble que antes.
+    timeout-minutes: 150
     env:
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
       BOT_TEST_MODE: '1'
-      PROBAR_DELAY_MS: '6000'
+      # 31s por turno = el TPM REAL del primario (8000 tokens/min segun el header
+      # x-ratelimit-limit-tokens, ~3459 por extraccion con reasoningEffort=low).
+      # Los 6000 anteriores iban a
+      # 5x el TPM: el exceso lo absorbia la cadena de fallback, o sea que la suite
+      # medía modelos distintos segun el minuto y un 429 transitorio podia caer en
+      # el ultimo eslabon. Ver la corrida 34928105031.
+      PROBAR_DELAY_MS: '31000'
       # El cliente-agente de los exploratorios NO es el sistema bajo prueba (solo
       # improvisa mensajes de cliente con generateText), así que corre en OTRO modelo
       # Groq para no gastar el bucket TPD de gpt-oss-20b, que queda entero para el
-      # bot real. El bot bajo prueba sigue siendo gpt-oss-20b (hardcodeado en procesar.ts).
+      # bot real. Sin esto comparten cubeta y la corrida se queda sin tokens.
+      # (El bot bajo prueba arranca en gpt-oss-20b pero NO está fijado ahí: pasa por
+      # procesarMensajesDeCliente, o sea que recorre la cadena MODELOS_EXTRACCION
+      # completa ante un 429, igual que producción.)
       # (llama-3.3-70b-versatile fue dado de baja en Groq; se usa un modelo de la
       # cadena MODELOS_EXTRACCION/MODELOS_CONSULTA del bot, confirmado vigente
       # contra GET /openai/v1/models el 2026-08-22.)
-      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.6-27b'
+      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.8-27b'
     steps:
       - uses: actions/checkout@v4
 
@@ -81,6 +118,14 @@ jobs:
           echo "$NEXT_PUBLIC_SUPABASE_URL" | grep -q "oqrufwtuwvogdfhojips" \
             || { echo "::error::NEXT_PUBLIC_SUPABASE_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
           echo "OK: modo test + staging."
+
+      - name: Verificar que los modelos LLM sigan existiendo
+        # Cuesta 0 tokens de inferencia (dos GET al listado de modelos) y corre
+        # ANTES de todo lo demás. Es la tercera vez que un modelo dado de baja
+        # rompe la suite sin aviso —llama-3.3-70b, kimi-k2/qwen3-32b, qwen3.6-27b—
+        # y la última hizo perder un pedido completo en el escenario, con un
+        # diagnóstico que costó reconstruir. Mejor fallar acá, con el id exacto.
+        run: node scripts/verificar-modelos.mjs
 
       - name: Instalar Supabase CLI
         uses: supabase/setup-cli@v1
@@ -101,46 +146,81 @@ jobs:
             || { echo "::error::STAGING_DB_URL no apunta a staging (abortado para no tocar prod)"; exit 1; }
           supabase db push --db-url "$STAGING_DB_URL"
 
-      - name: Levantar server + correr suites
+      - name: Levantar server + correr suites (por proveedor)
         env:
           SUITE: ${{ inputs.suite || 'todos' }}
+          MODELO: ${{ inputs.modelo || 'todos' }}
         run: |
-          npm run dev > devserver.log 2>&1 &
-          DEV_PID=$!
-
-          # Esperar a que el endpoint responda (hasta ~120s).
-          listo=0
-          for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST http://localhost:3000/api/dev/simular-conversacion \
-              -H 'content-type: application/json' \
-              -d '{"accion":"estado","telefono":"540000000099"}' || true)
-            if [ "$code" = "200" ]; then listo=1; break; fi
-            if [ "$code" = "403" ]; then
-              echo "::error::El endpoint dio 403 (¿BOT_TEST_MODE apagado?)"; cat devserver.log; kill $DEV_PID 2>/dev/null; exit 1
-            fi
-            sleep 3
-          done
-          if [ "$listo" != "1" ]; then
-            echo "::error::El dev server no respondió a tiempo"; cat devserver.log; kill $DEV_PID 2>/dev/null; exit 1
-          fi
+          case "$MODELO" in
+            groq) PROVEEDORES="groq" ;;
+            gemini) PROVEEDORES="gemini" ;;
+            *) PROVEEDORES="groq gemini" ;;
+          esac
+          echo "Proveedor(es) a ejercitar: $PROVEEDORES"
 
           set +e
-          RES_GUIONADOS=0
+          FALLO_GLOBAL=0
 
-          # 1) GUIONADOS — gatean el CI (salvo solo-exploratorios).
-          if [ "$SUITE" != "solo-exploratorios" ]; then
-            PROBAR_SOLO_GUIONADOS=1 PROBAR_FAIL_ON_RED=1 node scripts/probar-bot.mjs
-            RES_GUIONADOS=$?
-          fi
+          for PROVEEDOR in $PROVEEDORES; do
+            echo "::group::=== Proveedor: $PROVEEDOR ==="
 
-          # 2) EXPLORATORIOS — NO gatean (salvo solo-guionados).
-          if [ "$SUITE" != "solo-guionados" ]; then
-            PROBAR_SOLO_EXPLORATORIOS=1 PROBAR_MAX_TURNOS=6 node scripts/probar-bot.mjs || true
-          fi
+            if [ "$PROVEEDOR" = "gemini" ]; then
+              if [ -z "$GOOGLE_GENERATIVE_AI_API_KEY" ]; then
+                echo "::error::Falta el secret GOOGLE_GENERATIVE_AI_API_KEY (necesario para la pasada gemini)."
+                FALLO_GLOBAL=1
+                echo "::endgroup::"
+                continue
+              fi
+              export LLM_PROVIDER=google
+            else
+              unset LLM_PROVIDER
+            fi
 
-          kill $DEV_PID 2>/dev/null
-          exit $RES_GUIONADOS
+            npm run dev > "devserver-${PROVEEDOR}.log" 2>&1 &
+            DEV_PID=$!
+
+            # Esperar a que el endpoint responda (hasta ~120s).
+            listo=0
+            for i in $(seq 1 40); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST http://localhost:3000/api/dev/simular-conversacion \
+                -H 'content-type: application/json' \
+                -d '{"accion":"estado","telefono":"540000000099"}' || true)
+              if [ "$code" = "200" ]; then listo=1; break; fi
+              if [ "$code" = "403" ]; then
+                echo "::error::[$PROVEEDOR] El endpoint dio 403 (¿BOT_TEST_MODE apagado?)"; cat "devserver-${PROVEEDOR}.log"
+                kill $DEV_PID 2>/dev/null; FALLO_GLOBAL=1; echo "::endgroup::"; continue 2
+              fi
+              sleep 3
+            done
+            if [ "$listo" != "1" ]; then
+              echo "::error::[$PROVEEDOR] El dev server no respondió a tiempo"; cat "devserver-${PROVEEDOR}.log"
+              kill $DEV_PID 2>/dev/null; FALLO_GLOBAL=1; echo "::endgroup::"; continue
+            fi
+
+            RES_GUIONADOS=0
+
+            # 1) GUIONADOS — gatean el CI (salvo solo-exploratorios).
+            if [ "$SUITE" != "solo-exploratorios" ]; then
+              PROBAR_SOLO_GUIONADOS=1 PROBAR_FAIL_ON_RED=1 node scripts/probar-bot.mjs
+              RES_GUIONADOS=$?
+            fi
+
+            # 2) EXPLORATORIOS — NO gatean (salvo solo-guionados).
+            if [ "$SUITE" != "solo-guionados" ]; then
+              PROBAR_SOLO_EXPLORATORIOS=1 PROBAR_MAX_TURNOS=6 node scripts/probar-bot.mjs || true
+            fi
+
+            kill $DEV_PID 2>/dev/null
+
+            if [ "$RES_GUIONADOS" != "0" ]; then
+              echo "::error::[$PROVEEDOR] Guionados en rojo."
+              FALLO_GLOBAL=1
+            fi
+            echo "::endgroup::"
+          done
+
+          exit $FALLO_GLOBAL
 
       - name: Subir transcripts (para juicio con Claude Code)
         if: always()
