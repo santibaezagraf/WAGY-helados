@@ -17,8 +17,10 @@
 // Variables opcionales:
 //   PROBAR_URL=http://localhost:3000   base del server
 //   PROBAR_FILTER=cancelar             corre solo escenarios cuyo nombre matchea
-//   PROBAR_DELAY_MS=15000              pausa entre turnos (cada turno pega a Groq;
-//                                      el free-tier tiene 8000 TPM). 0 en Dev Tier.
+//   PROBAR_DELAY_MS=31000              pausa entre turnos. El default respeta el TPM
+//                                      del primario (8000 TPM medido / ~4093 tokens
+//                                      por turno = 1 llamada cada 31s). Bajalo para
+//                                      corridas filtradas; 0 en Dev Tier.
 //   PROBAR_PREFIX=54000                prefijo de los teléfonos de test (debe
 //                                      coincidir con BOT_TEST_PREFIX del server)
 //   PROBAR_MAX_TURNOS=12               tope de turnos por escenario (red de seguridad)
@@ -47,7 +49,19 @@ import { limpiarMensajeCliente, validarMensajeCliente } from './cliente-agente.m
 
 const BASE_URL = process.env.PROBAR_URL || 'http://localhost:3000';
 const FILTER = process.env.PROBAR_FILTER || '';
-const DELAY_MS = Math.max(0, parseInt(process.env.PROBAR_DELAY_MS || '15000', 10));
+// Pausa entre turnos. El default sale del TPM REAL del primario, no de una
+// corazonada: Groq devuelve x-ratelimit-limit-tokens=8000 (medido 2026-09-15) y
+// una extracción cuesta ~4093 tokens (3202 de prompt + 891 de salida, medidos),
+// o sea que entra UNA llamada cada ~31s. El 15000 anterior iba al doble del TPM
+// y el 6000 del CI a 5×: ese exceso lo absorbía la cadena de fallback, y así es
+// como un 429 transitorio terminaba cayendo en el modelo muerto de la corrida
+// 34928105031. Para una corrida filtrada de 1-2 escenarios se puede bajar sin
+// riesgo (son pocas llamadas); el default protege la corrida completa.
+const DELAY_MS = Math.max(0, parseInt(process.env.PROBAR_DELAY_MS || '31000', 10));
+
+// Costo medido de una extracción (tokens de entrada + salida). Solo alimenta la
+// estimación que se imprime al arrancar.
+const TOKENS_POR_TURNO = 4093;
 const PREFIX = process.env.PROBAR_PREFIX || '54000';
 const MAX_TURNOS = Math.max(1, parseInt(process.env.PROBAR_MAX_TURNOS || '12', 10));
 // El cliente-agente NO es el sistema bajo prueba: solo improvisa mensajes de
@@ -72,8 +86,20 @@ const groq = createGroq();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// POST al endpoint con auto-retry ante rate-limit de Groq (mismo criterio que
-// el eval): el bot corre Groq de verdad y en free-tier choca contra el TPM.
+// POST al endpoint con auto-retry cuando el bot se quedó SIN CUOTA.
+//
+// Hasta la corrida 34928105031 este retry era código muerto: miraba un
+// `ok:false` con texto de rate-limit, pero `/api/dev/simular-conversacion`
+// NUNCA devolvía eso — `procesarMensajesDeCliente` se traga el 429, manda su
+// "no te entendí" y el endpoint respondía `ok:true` con esa burbuja. O sea que
+// una corrida sin cuota era indistinguible de un bot que se porta mal, y el
+// informe de esa corrida reportó una regresión que no existía.
+//
+// Ahora el endpoint expone `falloExtraccion` con el motivo:
+//   - 'sin_cuota'          → transitorio, se reintenta con backoff.
+//   - 'modelo_inexistente' → NO se reintenta: hay que arreglar la cadena
+//                            (npm run verificar-modelos lo detecta antes).
+//   - 'validacion'         → es un fallo REAL del bot; se devuelve tal cual.
 async function llamar(payload, reintentos = 4) {
   for (let intento = 1; intento <= reintentos; intento++) {
     let data;
@@ -90,15 +116,60 @@ async function llamar(payload, reintentos = 4) {
       }
       throw error;
     }
-    const esRateLimit = data && data.ok === false && /rate limit|rate_limit|TPM|tokens per minute/i.test(String(data.error || ''));
-    if (esRateLimit && intento < reintentos) {
-      const espera = 4000 * intento;
-      console.log(`   ⏳ rate-limit de Groq, reintento ${intento}/${reintentos - 1} en ${espera}ms…`);
+    if (data?.falloExtraccion === 'sin_cuota' && intento < reintentos) {
+      // Backoff largo a propósito: el TPM de Groq se repone por minuto, así que
+      // esperar 4s no alcanza. Arranca en 20s y crece.
+      const espera = 20000 * intento;
+      console.log(`   ⏳ sin cuota de Groq, reintento ${intento}/${reintentos - 1} en ${Math.round(espera / 1000)}s…`);
       await sleep(espera);
       continue;
     }
     return data;
   }
+}
+
+/**
+ * Nota legible para el transcript cuando el turno no se pudo evaluar por culpa
+ * de la infraestructura (cuota/modelo), no del bot. Es lo que impide que el juez
+ * vuelva a leer un "no te entendí" por falta de cuota como una regresión.
+ * Devuelve null si el turno sí es evaluable. Pura y exportada para test.
+ */
+export function notaDeFalloExtraccion(data, turno) {
+  const motivo = data?.falloExtraccion;
+  if (!motivo) return null;
+  if (motivo === 'sin_cuota') {
+    return `Turno ${turno}: ⚠️ NO EVALUABLE — se agotó la cuota de Groq en toda la cadena de modelos (se reintentó y siguió sin cuota). El "no te entendí" de este turno es de infraestructura, NO del bot.`;
+  }
+  if (motivo === 'modelo_inexistente') {
+    return `Turno ${turno}: ⚠️ NO EVALUABLE — algún modelo de la cadena no existe en el proveedor (dado de baja). Corré "npm run verificar-modelos" y actualizá modelos.ts.`;
+  }
+  return `Turno ${turno}: la extracción falló por validación del schema tras agotar los reintentos. Esto SÍ es un fallo del bot.`;
+}
+
+/**
+ * Estimación del costo de una corrida: cuántas llamadas al LLM, cuántos tokens y
+ * cuánto va a tardar. Los clicks de botón no cuentan (se resuelven inline, 0
+ * tokens); los exploratorios no tienen turnos fijos, así que se usa el tope, y
+ * cada turno suyo son DOS llamadas (el cliente-agente improvisa y el bot procesa).
+ *
+ * Es aproximada a propósito —las consultas de negocio agregan llamadas que no se
+ * pueden prever—, pero alcanza para decidir si conviene correr la suite completa
+ * hoy o filtrar: una corrida entera se come ~92% del TPD de un modelo.
+ * Pura y exportada para test.
+ */
+export function estimarCorrida(escenarios, delayMs, tokensPorTurno = TOKENS_POR_TURNO, tpd = 200000, maxTurnos = MAX_TURNOS) {
+  let llamadas = 0;
+  for (const e of escenarios) {
+    if (e.tipo === 'exploratorio') llamadas += maxTurnos * 2;
+    else llamadas += (e.turnos ?? []).filter((t) => !t.boton).length;
+  }
+  const tokens = llamadas * tokensPorTurno;
+  return {
+    llamadas,
+    tokens,
+    porcentajeTPD: Math.round((tokens / tpd) * 100),
+    minutos: Math.ceil((llamadas * delayMs) / 60000),
+  };
 }
 
 // Chequeo automático (mecánico) del estado final contra `espera`. Los criterios
@@ -177,7 +248,11 @@ async function correrGuionado(escenario, telefono) {
       const textos = turno.textos ?? [turno.texto];
       transcript.push({ rol: 'cliente', texto: textos.join('  ⏎  ') });
       const data = await llamar({ accion: 'enviarTexto', telefono, textos });
-      if (data?.error) notas.push(`Turno ${i + 1}: el endpoint devolvió error: ${data.error}`);
+      // Un fallo de extracción por cuota/modelo NO es un fallo del bot: se anota
+      // aparte y bien visible para que el juez no lo lea como regresión.
+      const notaFallo = notaDeFalloExtraccion(data, i + 1);
+      if (notaFallo) notas.push(notaFallo);
+      else if (data?.error) notas.push(`Turno ${i + 1}: el endpoint devolvió error: ${data.error}`);
       volcarRespuestas(data?.respuestas, transcript);
       if (data?.pedido) ultimoPedido = data.pedido;
     }
@@ -440,7 +515,15 @@ async function main() {
   const nGuionados = seleccionados.filter((e) => e.tipo === 'guionado').length;
   const nExplor = seleccionados.filter((e) => e.tipo === 'exploratorio').length;
   console.log(`▶️  Corriendo ${seleccionados.length} escenario(s) contra ${BASE_URL} (${nGuionados} guionado(s), ${nExplor} exploratorio(s))`);
-  console.log(`   delay entre turnos: ${DELAY_MS}ms · prefijo teléfonos: ${PREFIX} · modelo cliente: ${MODELO_CLIENTE}\n`);
+  console.log(`   delay entre turnos: ${DELAY_MS}ms · prefijo teléfonos: ${PREFIX} · modelo cliente: ${MODELO_CLIENTE}`);
+  // Estimación por adelantado: el free-tier de Groq es chico y una corrida
+  // completa se come casi el TPD entero de un modelo. Mejor saberlo ANTES de
+  // arrancar que descubrirlo a mitad de camino con un "no te entendí".
+  const est = estimarCorrida(seleccionados, DELAY_MS);
+  console.log(
+    `   estimado: ~${est.llamadas} llamada(s) al LLM · ~${est.tokens.toLocaleString()} tokens ` +
+    `(~${est.porcentajeTPD}% del TPD de un modelo) · ~${est.minutos} min\n`,
+  );
 
   // Solo si hay exploratorios: los guionados no usan el cliente-agente y no
   // tienen por qué gastar una llamada a Groq ni depender de ese modelo.
@@ -514,7 +597,16 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error('❌ Error fatal:', error);
-  process.exitCode = 1; // no process.exit(): deja drenar los sockets keep-alive en Windows
-});
+// Solo corre la suite cuando se invoca como SCRIPT. Sin esta guarda, cualquier
+// `import` del módulo lanza la corrida entera: `scripts/probar-bot.test.mjs`
+// importa `notaDeFalloExtraccion` y `npm test` terminaba disparando los 27
+// escenarios contra localhost:3000 — quemando tokens de Groq si había un dev
+// server con BOT_TEST_MODE levantado.
+const invocadoComoScript = process.argv[1] && /probar-bot\.mjs$/.test(process.argv[1]);
+
+if (invocadoComoScript) {
+  main().catch((error) => {
+    console.error('❌ Error fatal:', error);
+    process.exitCode = 1; // no process.exit(): deja drenar los sockets keep-alive en Windows
+  });
+}

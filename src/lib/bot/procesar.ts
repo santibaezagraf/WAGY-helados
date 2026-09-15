@@ -108,6 +108,43 @@ export function esModeloInexistente(error: unknown): boolean {
   return false;
 }
 
+// ─── Por qué murió la extracción (solo para el harness) ──────────────────────
+//
+// Cuando la cadena entera se agota, el cliente recibe "no te entendí" y el
+// endpoint dev responde ok:true con ese texto — indistinguible de un fallo de
+// COMPORTAMIENTO del bot. En la corrida 34928105031 eso hizo que el informe
+// reportara una regresión que no existía (el escenario `formato-no-es-sabor`
+// extraía perfecto; lo que había pasado es que se agotó la cuota y el último
+// eslabón de la cadena estaba dado de baja). Además dejaba muerto el retry
+// anti-rate-limit de `probar-bot.mjs`, que espera un `ok:false`.
+//
+// Mismo idioma que `drenarSalidaTest` en whatsapp.ts: buffer en memoria por
+// teléfono, solo bajo BOT_TEST_MODE, drenado por el endpoint dev. Con el flag
+// apagado esto es inerte.
+
+export type MotivoFalloExtraccion = 'sin_cuota' | 'modelo_inexistente' | 'validacion';
+
+/** Traduce el último error de la cadena al motivo que le sirve al harness. Pura y exportada para test. */
+export function clasificarFalloExtraccion(error: unknown): MotivoFalloExtraccion {
+  if (esRateLimit(error)) return 'sin_cuota';
+  if (esModeloInexistente(error)) return 'modelo_inexistente';
+  return 'validacion';
+}
+
+const bufferFallosTest = new Map<string, MotivoFalloExtraccion>();
+
+function registrarFalloExtraccionTest(telefono: string, motivo: MotivoFalloExtraccion): void {
+  if (process.env.BOT_TEST_MODE !== '1') return;
+  bufferFallosTest.set(telefono, motivo);
+}
+
+/** Lee y limpia el motivo del último fallo de extracción. Solo lo usa el endpoint dev de testeo. */
+export function drenarFalloExtraccionTest(telefono: string): MotivoFalloExtraccion | null {
+  const motivo = bufferFallosTest.get(telefono) ?? null;
+  bufferFallosTest.delete(telefono);
+  return motivo;
+}
+
 /**
  * ¿El `pregunta_negocio` que devolvió el modelo es una pregunta REAL a delegar?
  * El modelo a veces stringifica el null como el TEXTO "null" (o "none"/"undefined"),
@@ -2395,6 +2432,13 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
   if (!pedido) {
     console.error("❌ Falló la extracción structured tras toda la cadena de modelos:", lastError);
+    // Modo test: dejamos registrado POR QUÉ murió. Para un cliente real da igual
+    // (recibe el mismo "no te entendí"), pero para el harness es la diferencia
+    // entre "el bot se portó mal" y "se acabó la cuota" — y hasta la corrida
+    // 34928105031 eran indistinguibles: el endpoint respondía ok:true con el
+    // texto de disculpa, así que el retry anti-rate-limit de probar-bot.mjs
+    // nunca podía dispararse y el informe reportó una regresión inexistente.
+    registrarFalloExtraccionTest(numeroCliente, clasificarFalloExtraccion(lastError));
     await enviarMensajeWhatsApp(numeroCliente, "Disculpá, no te entendí 😅 ¿Me lo repetís? Por ejemplo: *20 de agua y 10 de crema, Mitre 950, efectivo* 🙏");
     return;
   }

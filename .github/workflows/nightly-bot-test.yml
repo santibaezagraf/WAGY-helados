@@ -48,14 +48,21 @@ on:
 jobs:
   guionados:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Una corrida completa de guionados son ~45 turnos a 31s = ~24 min, mas los
+    # exploratorios, el build y las migraciones. Con 30 se cortaba a la mitad.
+    timeout-minutes: 75
     env:
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       BOT_TEST_MODE: '1'
-      PROBAR_DELAY_MS: '6000'
+      # 31s por turno = el TPM REAL del primario (8000 tokens/min segun el header
+      # x-ratelimit-limit-tokens, ~4093 por extraccion). Los 6000 anteriores iban a
+      # 5x el TPM: el exceso lo absorbia la cadena de fallback, o sea que la suite
+      # medía modelos distintos segun el minuto y un 429 transitorio podia caer en
+      # el ultimo eslabon. Ver la corrida 34928105031.
+      PROBAR_DELAY_MS: '31000'
       # El cliente-agente de los exploratorios NO es el sistema bajo prueba (solo
       # improvisa mensajes de cliente con generateText), así que corre en OTRO modelo
       # Groq para no gastar el bucket TPD de gpt-oss-20b, que queda entero para el

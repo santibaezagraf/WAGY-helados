@@ -19,6 +19,7 @@ import {
   dentroDePlazoModificacionCocina,
   esRateLimit,
   esModeloInexistente,
+  clasificarFalloExtraccion,
   esPreguntaNegocioReal,
   mencionaTipoHelado,
   normalizarMetodoPago,
@@ -1333,5 +1334,25 @@ describe('esModeloInexistente', () => {
     const a = new Error('a') as Error & { cause?: unknown };
     a.cause = a;
     expect(esModeloInexistente(a)).toBe(false);
+  });
+});
+
+describe('clasificarFalloExtraccion', () => {
+  it('separa cuota de modelo muerto y de fallo real del bot', () => {
+    // El harness usa esto para decidir si reintenta, si aborta, o si lo reporta
+    // como regresión. Confundirlos es lo que hizo que el informe de la corrida
+    // 34928105031 marcara una regresión inexistente.
+    expect(clasificarFalloExtraccion({ statusCode: 429 })).toBe('sin_cuota');
+    expect(clasificarFalloExtraccion(new Error('Rate limit reached'))).toBe('sin_cuota');
+    expect(clasificarFalloExtraccion(new Error('The model `x` does not exist or you do not have access to it.')))
+      .toBe('modelo_inexistente');
+    expect(clasificarFalloExtraccion(new Error('Type validation failed'))).toBe('validacion');
+  });
+
+  it('ante un error desconocido asume fallo del bot, no infraestructura', () => {
+    // Dirección segura: si no sabemos qué pasó, que se vea como problema del bot
+    // y alguien lo mire, en vez de silenciarlo como "era la cuota".
+    expect(clasificarFalloExtraccion(null)).toBe('validacion');
+    expect(clasificarFalloExtraccion(new Error('boom'))).toBe('validacion');
   });
 });

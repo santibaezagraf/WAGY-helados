@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { Database } from '@/types/supabase';
-import { procesarMensajesDeCliente } from '@/lib/bot/procesar';
+import { procesarMensajesDeCliente, drenarFalloExtraccionTest } from '@/lib/bot/procesar';
 import { ejecutarBoton, parsearBotonId, RESPUESTAS_RAPIDAS, type BotonAccion } from '@/lib/bot/botones';
 import { drenarSalidaTest, type SalidaCapturada } from '@/lib/whatsapp';
 import { MODELOS_EXTRACCION, MODELOS_CONSULTA, PROVEEDOR_LLM } from '@/lib/bot/modelos';
@@ -170,6 +170,18 @@ export async function POST(request: Request) {
         }
         const respuestas = await inyectarTextoYProcesar(telefono, textos);
         const pedido = await leerPedido(telefono);
+        // Si la extracción murió con la cadena agotada, el bot ya mandó su
+        // "no te entendí" — pero eso NO es un fallo de comportamiento y el
+        // harness tiene que poder distinguirlo (ver drenarFalloExtraccionTest).
+        const falloExtraccion = drenarFalloExtraccionTest(telefono);
+        if (falloExtraccion) {
+          return NextResponse.json({
+            ok: false,
+            error: `extraccion_fallida: ${falloExtraccion}`,
+            falloExtraccion,
+            telefono, respuestas, pedido,
+          });
+        }
         return NextResponse.json({ ok: true, telefono, respuestas, pedido });
       }
 
@@ -184,6 +196,15 @@ export async function POST(request: Request) {
         if (botonId && RESPUESTAS_RAPIDAS[botonId]) {
           const respuestas = await inyectarTextoYProcesar(telefono, [RESPUESTAS_RAPIDAS[botonId]]);
           const pedido = await leerPedido(telefono);
+          const falloRapida = drenarFalloExtraccionTest(telefono);
+          if (falloRapida) {
+            return NextResponse.json({
+              ok: false,
+              error: `extraccion_fallida: ${falloRapida}`,
+              falloExtraccion: falloRapida,
+              telefono, respuestas, pedido, via: 'respuesta_rapida',
+            });
+          }
           return NextResponse.json({ ok: true, telefono, respuestas, pedido, via: 'respuesta_rapida' });
         }
 
