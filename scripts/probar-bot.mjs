@@ -76,6 +76,13 @@ const MAX_TURNOS = Math.max(1, parseInt(process.env.PROBAR_MAX_TURNOS || '12', 1
 // queda sin tokens a mitad de camino. Apuntándolo a otro modelo de la cadena, el
 // primario queda entero para el bot y el presupuesto del día se duplica.
 //
+// La otra colisión de cubeta no se ve desde acá: cuando el nightly corre con
+// `modelo=todos`, el MISMO día ejecuta dos pasadas (groq y gemini). El workflow
+// le pasa un id DISTINTO a cada una (PROBAR_MODELO_CLIENTE_GROQ / _GEMINI) para
+// que no se repartan los 200k del cliente-agente entre las dos — en la corrida
+// 35012068144 la segunda pasada arrancó con la cubeta ya casi vacía y cortó 2 de
+// los 5 exploratorios a mitad de conversación.
+//
 // ⚠️ Acoplamiento a mano: este id no se puede importar de modelos.ts (es TS y
 // esto es .mjs suelto), así que si algún día la cadena cambia y este modelo pasa
 // a ser el primario, la colisión vuelve en silencio. El chequeo de abajo avisa.

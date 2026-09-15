@@ -100,7 +100,22 @@ jobs:
       # (llama-3.3-70b-versatile fue dado de baja en Groq; se usa un modelo de la
       # cadena MODELOS_EXTRACCION/MODELOS_CONSULTA del bot, confirmado vigente
       # contra GET /openai/v1/models el 2026-08-22.)
-      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.8-27b'
+      #
+      # UNO POR PASADA: con `modelo=todos` el job corre las dos suites DOS veces
+      # (groq y gemini) en la misma corrida y el mismo día. Con un solo id las dos
+      # pasadas compartían la cubeta TPD del cliente-agente, y en la corrida
+      # 35012068144 la segunda (gemini) se la encontró casi agotada —`Used
+      # 199256/200000`— cortando 2 de los 5 exploratorios a mitad de conversación.
+      # No es un bug del bot: es presupuesto del harness. Con un id por pasada
+      # cada una arranca con su propia cubeta de 200k y no hay que recortar turnos.
+      #
+      # La asignación no es arbitraria: en la pasada `gemini` el bot corre 100%
+      # sobre Google (cadena PURA, ver modelos.ts), así que Groq entero queda libre
+      # y el cliente-agente puede usar gpt-oss-120b sin competirle a nadie. En la
+      # pasada `groq` se mantiene qwen3.8-27b, que es el TERCER eslabón de la
+      # cadena: el bot solo lo toca si los dos anteriores agotaron cuota.
+      PROBAR_MODELO_CLIENTE_GROQ: 'qwen/qwen3.8-27b'
+      PROBAR_MODELO_CLIENTE_GEMINI: 'openai/gpt-oss-120b'
     steps:
       - uses: actions/checkout@v4
 
@@ -172,9 +187,12 @@ jobs:
                 continue
               fi
               export LLM_PROVIDER=google
+              export PROBAR_MODELO_CLIENTE="$PROBAR_MODELO_CLIENTE_GEMINI"
             else
               unset LLM_PROVIDER
+              export PROBAR_MODELO_CLIENTE="$PROBAR_MODELO_CLIENTE_GROQ"
             fi
+            echo "Cliente-agente de los exploratorios: $PROBAR_MODELO_CLIENTE"
 
             npm run dev > "devserver-${PROVEEDOR}.log" 2>&1 &
             DEV_PID=$!
