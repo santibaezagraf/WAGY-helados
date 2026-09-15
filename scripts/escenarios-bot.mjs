@@ -24,6 +24,8 @@
 //   cantidad_agua / cantidad_crema     números esperados
 //   direccionContiene  substring esperado en la dirección (o 'retira')
 //   metodo_pago        'efectivo' | 'transferencia'
+//   observacionesContiene / observacionesNoContiene   substring que los sabores
+//                      persistidos deben (o no deben) tener
 //   criterios          lista de afirmaciones en lenguaje natural que el juez verifica
 
 export const ESCENARIOS = [
@@ -504,6 +506,66 @@ export const ESCENARIOS = [
       criterios: [
         'El bot NO acepta la cantidad en kilos ni inventa un número de unidades: la cantidad sigue en 40.',
         'Le explica que los helados se venden POR UNIDAD (no por kilo/pote/porción) y le pide las unidades. NO responde un genérico "no te entendí".',
+      ],
+    },
+  },
+
+  {
+    nombre: 'formato-no-es-sabor',
+    tipo: 'guionado',
+    // Hallazgo de la corrida 34900965360: en rioplatense "palito" es el producto
+    // (el helado de agua en palo), no un sabor. El modelo lo copiaba tal cual al
+    // slot de sabores y el pedido quedaba con `observaciones: "palitos"` — un dato
+    // inventado que viajaba al resumen, al dashboard y a la cocina. El cliente del
+    // exploratorio lo reclamó tres veces y el bot no tuvo forma de corregirlo.
+    persona: 'Cliente que le dice "palitos" a los helados, como se les dice acá.',
+    turnos: [
+      { texto: 'hola, quiero 20 palitos de crema, paso a retirar y pago en efectivo' },
+      { texto: 'de chocolate' },
+    ],
+    espera: {
+      estadoFinal: 'borrador',
+      cantidad_crema: 20,
+      cantidad_agua: 0,
+      direccionContiene: 'retira',
+      metodo_pago: 'efectivo',
+      // Lo central: "palitos" NUNCA queda guardado como sabor, y el sabor real sí.
+      observacionesNoContiene: 'palito',
+      observacionesContiene: 'chocolate',
+      criterios: [
+        'El bot entiende "20 palitos de crema" como 20 helados de crema: la cantidad y el tipo se cargan bien.',
+        'La palabra "palitos" NO queda guardada como sabor ni aparece en el resumen como si lo fuera.',
+        'Como el cliente nombró el formato pero no el sabor, el bot se lo pregunta y le lista los sabores de crema que existen, en vez de dejar el pedido sin sabor y sin avisar.',
+        'Cuando el cliente responde "de chocolate", ese sí queda como sabor de los de crema.',
+      ],
+    },
+  },
+
+  {
+    nombre: 'cambio-con-pregunta-retorica',
+    tipo: 'guionado',
+    // Hallazgo de la corrida 34900965360: con el pedido ya confirmado, el cliente
+    // corrige la dirección y cierra con "Me los mandan ahí no?". El bot mandaba DOS
+    // burbujas contradictorias en la misma tanda — "esa te la responde una persona"
+    // y, acto seguido, el resumen actualizado con la dirección nueva (que ya era la
+    // respuesta) — y encima prendía requiere_atencion por algo que resolvió solo.
+    persona: 'Cliente que se equivocó de dirección y pregunta si igual se lo mandan bien.',
+    turnos: [
+      { texto: 'hola, 24 de agua de frutilla para Av. Rivadavia 1234, 3B, pago con transferencia' },
+      { boton: 'confirmar_borrador' },
+      { texto: 'Ah no, me equivoqué con la dirección. Es en Av. Corrientes 5678, 2A. Me los mandan ahí no?' },
+      { boton: 'confirmar_borrador' },
+    ],
+    espera: {
+      estadoFinal: 'pendiente',
+      cantidad_agua: 24,
+      cantidad_crema: 0,
+      direccionContiene: 'Av. Corrientes 5678',
+      metodo_pago: 'transferencia',
+      criterios: [
+        'El cambio de dirección post-confirmación se aplica: el pedido queda en Av. Corrientes 5678 (2A), sin perder cantidad, sabor ni pago, y sin duplicar el pedido.',
+        'El bot NO manda una burbuja de "te responde una persona" por el "¿me los mandan ahí no?": esa pregunta la contesta el propio resumen actualizado que sale a continuación. Dos burbujas donde la segunda contradice a la primera es la falla a detectar.',
+        'Tampoco debería quedar marcada la conversación como que requiere atención humana por esa pregunta.',
       ],
     },
   },
