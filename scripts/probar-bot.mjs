@@ -23,6 +23,14 @@
 //                                      coincidir con BOT_TEST_PREFIX del server)
 //   PROBAR_MAX_TURNOS=12               tope de turnos por escenario (red de seguridad)
 //   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo Groq del cliente-agente (exploratorios).
+//                                      ⚠️ CONVIENE PISARLO. El default coincide con el
+//                                      PRIMARIO del bot, así que el cliente simulado y el
+//                                      bot bajo prueba comparten la misma cubeta TPD de
+//                                      200k y la corrida se queda sin tokens antes de
+//                                      terminar. Apuntalo a otro modelo de la cadena
+//                                      (ej. qwen/qwen3.6-27b) y el primario queda entero
+//                                      para el bot. El nightly ya lo hace; en local se
+//                                      pone en .env.local.
 //                                      Si es de razonamiento híbrido (qwen3.x), su bloque
 //                                      <think> se apaga vía providerOptions y, por si acaso,
 //                                      se filtra en cliente-agente.mjs. Hay preflight: si Groq
@@ -42,7 +50,17 @@ const FILTER = process.env.PROBAR_FILTER || '';
 const DELAY_MS = Math.max(0, parseInt(process.env.PROBAR_DELAY_MS || '15000', 10));
 const PREFIX = process.env.PROBAR_PREFIX || '54000';
 const MAX_TURNOS = Math.max(1, parseInt(process.env.PROBAR_MAX_TURNOS || '12', 10));
-const MODELO_CLIENTE = process.env.PROBAR_MODELO_CLIENTE || 'openai/gpt-oss-20b';
+// El cliente-agente NO es el sistema bajo prueba: solo improvisa mensajes de
+// cliente. Por eso el default NO PUEDE SER el primario del bot (hoy
+// `MODELOS_EXTRACCION[0]` = 'openai/gpt-oss-20b' en src/lib/bot/modelos.ts): con
+// los dos en el mismo modelo comparten la cubeta TPD de 200k y la corrida se
+// queda sin tokens a mitad de camino. Apuntándolo a otro modelo de la cadena, el
+// primario queda entero para el bot y el presupuesto del día se duplica.
+//
+// ⚠️ Acoplamiento a mano: este id no se puede importar de modelos.ts (es TS y
+// esto es .mjs suelto), así que si algún día la cadena cambia y este modelo pasa
+// a ser el primario, la colisión vuelve en silencio. El chequeo de abajo avisa.
+const MODELO_CLIENTE = process.env.PROBAR_MODELO_CLIENTE || 'qwen/qwen3.6-27b';
 const SOLO_GUIONADOS = process.env.PROBAR_SOLO_GUIONADOS === '1';
 const SOLO_EXPLORATORIOS = process.env.PROBAR_SOLO_EXPLORATORIOS === '1';
 const ENDPOINT = `${BASE_URL}/api/dev/simular-conversacion`;
@@ -225,11 +243,39 @@ Reglas de salida:
   return limpiarMensajeCliente(text);
 }
 
+/**
+ * ¿El cliente-agente está corriendo en el MISMO modelo que el primario del bot?
+ * Si sí, los dos comen de la misma cubeta TPD (200k en el free tier de Groq) y la
+ * corrida se queda sin tokens antes de terminar. El id del primario se le pregunta
+ * al server (GET del endpoint de simulación, 0 tokens) en vez de duplicarlo acá,
+ * así no se desincroniza cuando cambie la cadena en modelos.ts.
+ *
+ * Solo avisa: no aborta. Puede haber una razón para querer los dos iguales, y un
+ * fallo de esta consulta no debería tumbar la corrida.
+ */
+async function avisarSiColisionaConElBot() {
+  try {
+    const r = await fetch(ENDPOINT, { method: 'GET' });
+    if (!r.ok) return;
+    const { primarioExtraccion, proveedor } = await r.json();
+    if (!primarioExtraccion || primarioExtraccion !== MODELO_CLIENTE) return;
+    console.log(
+      `\n⚠️  El cliente-agente usa "${MODELO_CLIENTE}", el MISMO modelo primario del bot (${proveedor}).\n` +
+      '   Van a compartir la cubeta de cuota y es probable que la corrida se quede sin tokens.\n' +
+      '   Elegí otro modelo de la cadena con PROBAR_MODELO_CLIENTE.\n'
+    );
+  } catch {
+    // El server puede no estar listo o ser una versión vieja sin GET: no es motivo
+    // para frenar nada.
+  }
+}
+
 // Chequeo previo del modelo del cliente-agente. Groq da de baja modelos sin
 // aviso (le pasó a llama-3.3-70b-versatile) y el síntoma era pésimo: los 5
 // escenarios fallaban en el turno 1 y quedaba una nota por escenario en vez de
 // un error claro. Una llamada mínima acá lo convierte en un abort ruidoso.
 async function preflightModeloCliente() {
+  await avisarSiColisionaConElBot();
   process.stdout.write(`🔎 Preflight del modelo del cliente-agente (${MODELO_CLIENTE})… `);
   try {
     await generateText({

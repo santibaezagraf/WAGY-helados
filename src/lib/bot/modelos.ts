@@ -5,12 +5,19 @@
 // así el dashboard muestra exactamente la cadena que corre en producción sin
 // duplicar (y sin poder desincronizarse).
 //
-// Cadena de FALLBACK: el PRIMARIO (índice 0) es el único que se testea en el
-// nightly (por eso el harness y /api/dev/test-ia lo dejan hardcodeado). Los demás
-// son fallback SOLO de producción: si el primario se queda sin cuota (429 / TPD),
+// Cadena de FALLBACK: si el PRIMARIO (índice 0) se queda sin cuota (429 / TPD),
 // seguimos con el siguiente en vez de contestar "no te entendí". Todos bancan
 // structured output y tienen cubeta TPD SEPARADA en Groq, así que si se agotó el
 // primario es muy probable que el siguiente siga disponible.
+//
+// Quién recorre la cadena y quién no: el fallback vive en el loop de extracción
+// de procesar.ts y en `generarAcotado` de consultas-negocio.ts, así que TODO lo
+// que pase por `procesarMensajesDeCliente` la hereda — incluido
+// /api/dev/simular-conversacion y, por lo tanto, `npm run probar-bot` y el
+// nightly, que llaman al camino de producción en vez de instanciar su propio
+// modelo. El único fijado al primario a propósito es /api/dev/test-ia (`npm run
+// eval`): ese suite mide el prompt contra EL modelo que atiende clientes, así que
+// un 429 ahí tiene que verse, no taparse.
 // (moonshotai/kimi-k2-instruct y qwen/qwen3-32b fueron dados de baja por Groq —
 // verificado 2026-08-22 contra GET /openai/v1/models — reemplazados/quitados.)
 

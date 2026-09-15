@@ -59,7 +59,10 @@ jobs:
       # El cliente-agente de los exploratorios NO es el sistema bajo prueba (solo
       # improvisa mensajes de cliente con generateText), así que corre en OTRO modelo
       # Groq para no gastar el bucket TPD de gpt-oss-20b, que queda entero para el
-      # bot real. El bot bajo prueba sigue siendo gpt-oss-20b (hardcodeado en procesar.ts).
+      # bot real. Sin esto comparten cubeta y la corrida se queda sin tokens.
+      # (El bot bajo prueba arranca en gpt-oss-20b pero NO está fijado ahí: pasa por
+      # procesarMensajesDeCliente, o sea que recorre la cadena MODELOS_EXTRACCION
+      # completa ante un 429, igual que producción.)
       # (llama-3.3-70b-versatile fue dado de baja en Groq; se usa un modelo de la
       # cadena MODELOS_EXTRACCION/MODELOS_CONSULTA del bot, confirmado vigente
       # contra GET /openai/v1/models el 2026-08-22.)
