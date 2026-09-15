@@ -8,8 +8,8 @@ import { esBorradorCompleto } from '@/lib/bot/borradores';
 import { registrarAlertaFallback, registrarUsoModelo, siguienteModelo } from '@/lib/bot/alertas';
 import { MODELOS_EXTRACCION } from '@/lib/bot/modelos';
 import { crearModeloLLM } from '@/lib/bot/proveedor-llm';
-import { obtenerListaPreciosPublica, formatearPreciosWhatsApp, SABORES } from '@/lib/precios-publico';
-import { construirContextoNegocio, responderConsultaNegocio, elegirTextoDelegacion, redactarPreguntaTipoHelado } from '@/lib/bot/consultas-negocio';
+import { obtenerListaPreciosPublica, formatearPreciosWhatsApp, SABORES, type ListaPreciosPublica } from '@/lib/precios-publico';
+import { construirContextoNegocio, responderConsultaNegocio, elegirTextoDelegacion, redactarPreguntaTipoHelado, saboresVigentes } from '@/lib/bot/consultas-negocio';
 import { patchConEnviadoCoherente } from '@/lib/pedidos-estado';
 
 const supabaseAdmin = createClient<Database>(
@@ -434,6 +434,167 @@ export function reconstruirObservaciones(slots: ObsSlots): string | null {
   return partes.length ? partes.join(', ') : null;
 }
 
+// ─── Un FORMATO no es un sabor ───────────────────────────────────────────────
+//
+// En rioplatense "palito" es como se le dice al helado de agua en palo: el
+// cliente lo usa como sustantivo del producto ("20 palitos de crema", "qué
+// palitos tenés"), no como sabor. El modelo lo venía copiando tal cual al slot
+// de sabores y TS lo persistía sin chistar: en la corrida 34900965360 un pedido
+// quedó con `observaciones: "palitos"` — un dato inventado que viajó al resumen,
+// al dashboard y a la cocina, y que el cliente reclamó tres veces sin que el bot
+// tuviera forma de corregirlo.
+//
+// Perder el mensaje es malo; corromper el pedido es peor (mismo criterio que el
+// veto de `cantidadVieneDeUnidadNoSoportada`). Así que antes del merge de
+// observaciones filtramos las palabras de formato/tipo del texto que trae el
+// modelo. Es la red determinista equivalente a `mencionaTipoHelado` &co.
+
+/**
+ * Palabras que describen el FORMATO o el producto, nunca el sabor.
+ */
+const PALABRAS_FORMATO = new Set([
+  'palito', 'palitos', 'palita', 'palitas', 'paleta', 'paletas',
+  'bombon', 'bombones', 'helado', 'helados', 'heladito', 'heladitos',
+  'unidad', 'unidades', 'sabor', 'sabores', 'gusto', 'gustos',
+]);
+
+/**
+ * Palabras de TIPO. Se descartan SOLO cuando vienen precedidas de "de"/"del",
+ * o sea funcionando como designación de tipo ("palitos DE CREMA"). Sueltas se
+ * conservan: un sabor que no está en el catálogo podría empezar con ellas
+ * ("crema americana") y borrarlo sería perder un dato real del cliente — la
+ * dirección peligrosa.
+ */
+const PALABRAS_TIPO_HELADO = new Set(['agua', 'aguas', 'crema', 'cremas']);
+
+/** Conectores que pueden quedar colgando cuando se descarta la palabra que acompañaban. */
+const CONECTORES_SABOR = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'e', 'con']);
+
+const sinTildesSabor = (t: string) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const tokenSabor = (t: string) => sinTildesSabor(t).replace(/[^a-z0-9ñ]/g, '');
+
+/**
+ * Saca del texto de sabores lo que es formato/tipo y no sabor. Devuelve el texto
+ * limpio, o `null` si no quedó ningún sabor real (ej: "palitos" entero).
+ *
+ * Los sabores del catálogo se protegen ANTES de filtrar, porque pueden contener
+ * una palabra de tipo: "Crema del Cielo" es un sabor DE AGUA, y ese "del cielo"
+ * no debe leerse como designación de tipo (mismo cuidado que `mencionaTipoHelado`).
+ * Un sabor que NO está en el catálogo igual se conserva: acá solo se descarta una
+ * lista cerrada de palabras de formato, nunca "lo que no reconozco".
+ *
+ * Corre sobre el texto que devuelve el MODELO (no sobre lo ya persistido), así
+ * que nunca puede borrar un sabor viejo guardado: si el slot queda en `null`,
+ * `aplicarOperacionObs` trata `reemplazar`/`agregar` como no-op y lo anterior
+ * sobrevive intacto.
+ *
+ * Pura y exportada para test.
+ */
+export function limpiarSaboresNoValidos(texto: string | null): string | null {
+  if (!texto) return null;
+  const tokens = texto.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return null;
+  const norm = tokens.map(tokenSabor);
+
+  // 1. Proteger los sabores del catálogo (pueden ser de varias palabras).
+  const protegido = new Array<boolean>(tokens.length).fill(false);
+  const catalogo = [...SABORES.agua, ...SABORES.crema]
+    .map(s => s.split(/\s+/).map(tokenSabor).filter(Boolean))
+    .sort((a, b) => b.length - a.length); // el más largo primero
+  for (const sabor of catalogo) {
+    for (let i = 0; i + sabor.length <= norm.length; i++) {
+      if (sabor.every((p, k) => norm[i + k] === p)) {
+        for (let k = 0; k < sabor.length; k++) protegido[i + k] = true;
+      }
+    }
+  }
+
+  // 2. Descartar formatos y las designaciones de tipo ("de crema").
+  const conservar = new Array<boolean>(tokens.length).fill(true);
+  for (let i = 0; i < tokens.length; i++) {
+    if (protegido[i] || !norm[i]) continue;
+    if (PALABRAS_FORMATO.has(norm[i])) {
+      conservar[i] = false;
+      continue;
+    }
+    if (PALABRAS_TIPO_HELADO.has(norm[i]) && (norm[i - 1] === 'de' || norm[i - 1] === 'del')) {
+      conservar[i] = false;
+      conservar[i - 1] = false;
+    }
+  }
+
+  // 3. Rearmar y limpiar los conectores/comas que quedaron colgando.
+  const esRelleno = (t: string) => {
+    const n = tokenSabor(t);
+    return !n || CONECTORES_SABOR.has(n);
+  };
+  const restantes = tokens.filter((_, i) => conservar[i]);
+  while (restantes.length && esRelleno(restantes[0])) restantes.shift();
+  while (restantes.length && esRelleno(restantes[restantes.length - 1])) restantes.pop();
+
+  const salida = restantes
+    .join(' ')
+    .replace(/\s*,(\s*,)+/g, ',')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,;.]+|[\s,;.]+$/g, '')
+    .trim();
+  if (!salida) return null;
+
+  // Un resto sin ninguna palabra (solo números o conectores) tampoco es un sabor:
+  // "10 de" no se guarda como si lo fuera.
+  const hayPalabra = salida.split(/\s+/).some(t => {
+    const n = tokenSabor(t);
+    return Boolean(n) && !/^\d+$/.test(n) && !CONECTORES_SABOR.has(n);
+  });
+  return hayPalabra ? salida : null;
+}
+
+/**
+ * ¿El cliente intentó nombrar el sabor de un tipo pero solo dijo el formato? Es
+ * decir: el modelo trajo texto para ese slot, `limpiarSaboresNoValidos` no dejó
+ * nada, y ese tipo SÍ tiene cantidad cargada. En ese caso el cliente cree que
+ * dijo el sabor y el pedido quedó sin ninguno, así que conviene preguntárselo.
+ *
+ * Devuelve el tipo a preguntar, o `null`. Si los DOS tipos califican devuelve
+ * `null` a propósito: meter dos preguntas de sabor en el mismo pedido de datos
+ * faltantes es más ruido que ayuda. Pura y exportada para test.
+ */
+export function detectarSaborDescartadoPorFormato(
+  pedido: Pick<PedidoIA, 'obs_agua' | 'obs_agua_operacion' | 'obs_crema' | 'obs_crema_operacion'>,
+  cantidadAgua: number,
+  cantidadCrema: number,
+): 'agua' | 'crema' | null {
+  const descartado = (texto: string | null, operacion: string) =>
+    operacion !== 'mantener' &&
+    operacion !== 'limpiar' &&
+    Boolean(texto?.trim()) &&
+    limpiarSaboresNoValidos(texto) === null;
+
+  const agua = cantidadAgua > 0 && descartado(pedido.obs_agua, pedido.obs_agua_operacion);
+  const crema = cantidadCrema > 0 && descartado(pedido.obs_crema, pedido.obs_crema_operacion);
+  if (agua && crema) return null;
+  if (agua) return 'agua';
+  if (crema) return 'crema';
+  return null;
+}
+
+/**
+ * Cola que se agrega al pedido de datos faltantes cuando el cliente nombró un
+ * formato creyendo que nombraba un sabor. Los sabores son opcionales, así que es
+ * un agregado informativo: NO bloquea el armado del pedido. Pura y exportada
+ * para test.
+ */
+export function colaSaborPendiente(
+  tipo: 'agua' | 'crema' | null,
+  listaPrecios: ListaPreciosPublica | null = null,
+): string {
+  if (!tipo) return '';
+  // Los sabores salen de la lista de precios ACTIVA (son configurables desde el
+  // dashboard); `SABORES` queda de piso vía `saboresVigentes`.
+  const sabores = saboresVigentes(listaPrecios)[tipo];
+  return `\n\nAh, y no me dijiste el sabor de los de ${tipo} 🍦 Tenemos: ${sabores.join(', ')}.`;
+}
+
 // Palabras que indican una referencia de UNIDAD (aclaración), no el nombre de
 // una calle. Un texto cuyo único componente alfabético es uno de estos NO es
 // una dirección entregable.
@@ -630,22 +791,39 @@ export type RespuestaDatosFaltantes =
   | { tipo: 'texto'; mensaje: string };
 
 // Variantes del saludo de "arranquemos tu pedido" (cuando faltan los 3 datos).
-// Se rota según un `seed` determinista para no repetir el MISMO texto palabra
-// por palabra ante mensajes off-topic consecutivos, que se sentía robótico
-// (#4 del informe). La variante 0 es la histórica (los tests con seed por
-// defecto la esperan). El comportamiento de fondo no cambia: sigue siendo el
-// mismo pedido de los 3 datos, solo varía el saludo de arriba.
+// Se rota según la `ronda` para no repetir el MISMO texto palabra por palabra
+// ante mensajes off-topic consecutivos, que se sentía robótico (#4 del informe).
+// La variante 0 es la histórica (los tests con ronda por defecto la esperan). El
+// comportamiento de fondo no cambia: sigue siendo el mismo pedido de los 3 datos,
+// solo varía el saludo de arriba.
 const BIENVENIDAS_DATOS_FALTANTES = [
   "¡Hola! 👋 ¿Qué te gustaría pedir? Mandame:",
   "¡Buenas! 🍦 Contame qué querés y te lo armo. Necesito:",
   "¡Hola! 😋 Dale, armamos tu pedido. Pasame:",
 ];
 
+// A partir de la TERCERA vez que pedimos lo mismo en la misma conversación, un
+// "¡Hola! 👋" es absurdo: el cliente viene escribiendo hace rato. En la corrida
+// 34900965360 el bot saludó cuatro veces seguidas ante mensajes off-topic y el
+// propio cliente-agente lo marcó ("sos un bot muy limitado... dejá de copiar y
+// pegar") — criterio ⚠️ de la rúbrica por tono.
+//
+// Que esta rama asuma off-topic es seguro: solo se llega acá cuando faltan los
+// TRES datos, o sea el cliente lleva tres turnos sin aportar ni uno. Si hubiera
+// dado cualquier cosa, el encabezado sería "Para armar tu pedido me falta:".
+const REINSISTENCIAS_DATOS_FALTANTES = [
+  "De eso no sé nada 😅 Lo mío son los helados. Para armarte el pedido necesito:",
+  "Esa te la debo 😅 Con lo que sí te puedo ayudar es con el pedido. Me falta:",
+  "Ahí no te sigo 😅 Pero el pedido te lo armo ya. Necesito:",
+];
+
 export function elegirRespuestaDatosFaltantes(
   faltaCantidad: boolean,
   faltaDireccion: boolean,
   faltaPago: boolean,
-  seed = 0,
+  // Cuántas veces YA pedimos estos datos en esta conversación (0 = primera). Rota
+  // el saludo, y desde la tercera cambia al set que reconoce la insistencia.
+  ronda = 0,
   cantidadEnUnidadNoSoportada = false,
   pagoNoSoportado = false,
   cantidadSinTipo = 0,
@@ -721,8 +899,11 @@ export function elegirRespuestaDatosFaltantes(
   if (faltaDireccion) datosFaltantes.push("Dirección de envío (o si pasás a retirar)");
   if (faltaPago) datosFaltantes.push("Forma de pago (efectivo o transferencia)");
 
+  // Desde la tercera ronda el saludo da lugar al reconocimiento de que venimos
+  // contestando lo mismo; antes de eso, la bienvenida de siempre (rotada).
+  const variantes = Math.abs(ronda) >= 2 ? REINSISTENCIAS_DATOS_FALTANTES : BIENVENIDAS_DATOS_FALTANTES;
   const encabezado = datosFaltantes.length === 3
-    ? BIENVENIDAS_DATOS_FALTANTES[Math.abs(seed) % BIENVENIDAS_DATOS_FALTANTES.length]
+    ? variantes[Math.abs(ronda) % variantes.length]
     : "Para armar tu pedido me falta:";
   return { tipo: 'texto', mensaje: [encabezado, ...datosFaltantes.map(d => `• ${d}`)].join('\n') };
 }
@@ -978,6 +1159,118 @@ export function traeDatosDePedido(pedido: PedidoIA): boolean {
   return false;
 }
 
+// ─── La pregunta que el propio cambio ya contesta ────────────────────────────
+//
+// Caso real de la corrida 34900965360: con el pedido ya confirmado, "Ah no, me
+// equivoqué con la dirección. Es en Av. Corrientes 5678, 2A. Me los mandan ahí
+// no?" produjo DOS burbujas seguidas y contradictorias: "esa te la responde una
+// persona" y, acto seguido, el resumen actualizado con la dirección nueva. La
+// segunda ya contestaba la primera, y encima se prendía `requiere_atencion` para
+// el staff por algo que el bot había resuelto solo en el mismo turno.
+//
+// La causa es de ORDEN: el bloque de `pregunta_negocio` corre ANTES de validar la
+// dirección y aplicar el merge, así que el contexto que ve la respuesta acotada
+// todavía tiene la dirección VIEJA — no hay con qué contestar "¿me los mandan
+// ahí?". Se ataca por los dos lados: (1) `construirCambiosPendientes` le pasa al
+// contexto lo que está por aplicarse, para que conteste de verdad; y (2) si aun
+// así no puede, `esConfirmacionRetoricaDeCambio` evita la delegación redundante.
+// No se movió ningún bloque de `procesarMensajesDeCliente`: el orden de los
+// overrides es una invariante conocida (ver CLAUDE.md).
+
+/**
+ * Los cambios que este mensaje está por aplicarle al pedido, en lenguaje llano,
+ * para alimentar el contexto de la respuesta acotada. Se arma con la salida CRUDA
+ * del modelo (la dirección todavía no pasó por `pareceDireccion`, así que se
+ * valida acá) comparada contra el pedido activo.
+ *
+ * Lista vacía = el mensaje no cambia nada del pedido. Pura y exportada para test.
+ */
+export function construirCambiosPendientes(
+  pedido: PedidoIA,
+  pedidoActivo: PedidoActivoContext | null,
+): string[] {
+  const cambios: string[] = [];
+
+  const direccionNueva =
+    pedido.direccion && pareceDireccion(pedido.direccion) ? pedido.direccion : null;
+  if (direccionNueva && direccionNueva !== pedidoActivo?.direccion) {
+    if (direccionNueva === 'retira') {
+      cambios.push('- Ahora pasa a retirar por el local (ya no quiere envío).');
+    } else {
+      const detalle = pedido.aclaracion ? ` (${pedido.aclaracion})` : '';
+      cambios.push(`- Nueva dirección de envío: ${direccionNueva}${detalle}. El pedido se va a entregar AHÍ.`);
+    }
+  }
+
+  const pagoNuevo = normalizarMetodoPago(pedido.metodo_pago);
+  if (pagoNuevo && pagoNuevo !== pedidoActivo?.metodo_pago) {
+    cambios.push(`- Nueva forma de pago: ${pagoNuevo}.`);
+  }
+
+  if (pedido.cantidad_agua !== (pedidoActivo?.cantidad_agua ?? 0)) {
+    cambios.push(`- Helados de agua: ahora son ${pedido.cantidad_agua}.`);
+  }
+  if (pedido.cantidad_crema !== (pedidoActivo?.cantidad_crema ?? 0)) {
+    cambios.push(`- Helados de crema: ahora son ${pedido.cantidad_crema}.`);
+  }
+  if (pedido.observaciones && pedido.observaciones !== (pedidoActivo?.observaciones ?? null)) {
+    cambios.push(`- Sabores/detalles: ${pedido.observaciones}.`);
+  }
+
+  return cambios;
+}
+
+// Palabras que hacen que una pregunta NO sea una muletilla sobre el cambio, por
+// más deíctica que suene: son los temas del bloque "LO QUE NO SABÉS", que tienen
+// que seguir delegándose. "¿Llegan hasta allá?" es cobertura de zona, no un
+// "¿quedó así?" — y confundirlas es la dirección peligrosa (perder la consulta).
+const TEMAS_QUE_NO_SABEMOS =
+  /\b(llega|llegan|llegas|cubren|cobertura|zona|barrio|localidad|hora|horario|abren|cierran|demora|tarda|tardan|cuanto|promo|promocion|descuento|oferta|mayorista|factura|facturacion|reclamo|stock|agotado|hay)\b/;
+
+// Pronombres interrogativos: si hay uno, es una pregunta de verdad, no una
+// coletilla de confirmación ("¿hasta qué hora...?" vs "¿me los mandan ahí, no?").
+const PRONOMBRES_INTERROGATIVOS = /\b(que|cual|cuales|cuanto|cuantos|cuanta|cuantas|cuando|donde|como|quien|quienes|porque|por que)\b/;
+
+// Deícticos que apuntan al cambio que se está aplicando en este mismo mensaje.
+const REFERENCIA_AL_CAMBIO = /\b(ahi|alli|alla|asi|eso|esa|ese|esos|esas|entonces)\b/;
+
+// Coletilla de confirmación al final ("..., no?", "..., cierto?").
+const COLETILLA_CONFIRMACION = /\b(no|cierto|verdad|ok|dale)$/;
+
+/**
+ * ¿La "pregunta de negocio" es en realidad una confirmación retórica del cambio
+ * que el bot está por aplicar en este mismo mensaje? ("Me los mandan ahí no?",
+ * "¿entonces son 30?", "¿queda así?"). En ese caso el resumen actualizado que sale
+ * a continuación YA es la respuesta, y delegar a un humano genera la burbuja
+ * contradictoria + un `requiere_atencion` que nadie necesita atender.
+ *
+ * Deliberadamente conservadora: un falso NEGATIVO solo mantiene el comportamiento
+ * actual (delegar), mientras que un falso positivo se tragaría una consulta real.
+ * Por eso exige las tres cosas: mensaje corto, sin pronombre interrogativo, y sin
+ * ninguno de los temas que el bot sabe que no sabe.
+ *
+ * Pura y exportada para test.
+ */
+export function esConfirmacionRetoricaDeCambio(pregunta: string | null): boolean {
+  if (!pregunta) return false;
+  const n = pregunta
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[¿?¡!.,;:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!n) return false;
+
+  // Una pregunta larga no es una muletilla.
+  const palabras = n.split(' ');
+  if (palabras.length > 12) return false;
+
+  if (PRONOMBRES_INTERROGATIVOS.test(n)) return false;
+  if (TEMAS_QUE_NO_SABEMOS.test(n)) return false;
+
+  return REFERENCIA_AL_CAMBIO.test(n) || COLETILLA_CONFIRMACION.test(n);
+}
+
 /**
  * Intenciones que tienen sentido —y que tienen HANDLER— en un estado dado. Es la
  * misma lista que `buildSystemPrompt` le muestra al modelo; se extrae acá para que
@@ -1139,9 +1432,10 @@ async function intentarRespuestaNegocio(
   pregunta: string,
   pedidoActivo: PedidoActivoContext | null,
   numeroCliente: string,
+  cambiosPendientes: string[] = [],
 ): Promise<string | null> {
   const lista = await obtenerListaPreciosPublica();
-  const contexto = construirContextoNegocio(pedidoActivo, lista);
+  const contexto = construirContextoNegocio(pedidoActivo, lista, cambiosPendientes);
   const { puede_responder, respuesta } = await responderConsultaNegocio(pregunta, contexto, numeroCliente);
   return puede_responder && respuesta ? respuesta : null;
 }
@@ -1338,25 +1632,44 @@ export async function pedirDatosFaltantes(
   faltaDireccion: boolean,
   faltaPago: boolean,
   saludo?: string,
-  seed = 0,
+  // Ver : cuántas veces ya pedimos lo mismo.
+  ronda = 0,
   cantidadEnUnidadNoSoportada = false,
   pagoNoSoportado = false,
   tipoHeladoAmbiguo: TipoHeladoAmbiguo | null = null,
+  // Tipo cuyo sabor el cliente creyó decir pero del que solo nombró el FORMATO
+  // ("20 palitos de crema"): se agrega una cola preguntándoselo con la lista de
+  // sabores de ese tipo. Es informativo, no bloquea el armado del pedido.
+  saborPendiente: 'agua' | 'crema' | null = null,
 ): Promise<boolean> {
   console.log(`⚠️ Datos faltantes: cantidad=${faltaCantidad}, direccion=${faltaDireccion}, pago=${faltaPago}, unidadNoSoportada=${cantidadEnUnidadNoSoportada}, pagoNoSoportado=${pagoNoSoportado}, cantidadSinTipo=${tipoHeladoAmbiguo?.cantidad ?? 0}`);
 
   // La decisión (botones vs texto) es pura y testeada; acá solo se envía.
-  // `seed` rota el saludo cuando faltan los 3 datos (ver elegirRespuestaDatosFaltantes),
+  // `ronda` rota el saludo cuando faltan los 3 datos (ver elegirRespuestaDatosFaltantes),
   // para no repetir el mismo texto ante mensajes off-topic seguidos.
-  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, seed, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo?.cantidad ?? 0, tipoHeladoAmbiguo?.operacion ?? 'reemplazar');
+  const respuesta = elegirRespuestaDatosFaltantes(faltaCantidad, faltaDireccion, faltaPago, ronda, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo?.cantidad ?? 0, tipoHeladoAmbiguo?.operacion ?? 'reemplazar');
   // Cuando entramos por la rama "saludo con borrador parcial", el caller
   // prepende un "¡Hola! 👋 …" al cuerpo así el cliente ve UNA sola burbuja en
   // vez de dos seguidas (saludo + pedido de datos). Vale para las tres formas
   // (texto libre, botones de pago, botón de retiro).
   const prefijo = saludo ? `${saludo}\n\n` : '';
 
+  // Los sabores son configurables por lista de precios, así que se leen de la DB
+  // en vez de la constante. Solo cuando alguna de las dos ramas que los nombran
+  // los necesita: un error de lectura devuelve null y `saboresVigentes` cae a la
+  // constante, así que esto nunca puede frenar el envío.
+  const listaSabores =
+    saborPendiente !== null || respuesta.tipo === 'botones_tipo_helado'
+      ? await obtenerListaPreciosPublica()
+      : null;
+
+  // La cola del sabor NO se agrega cuando estamos preguntando el TIPO de helado:
+  // ahí todavía no se sabe a qué tipo pertenece la cantidad, así que listar los
+  // sabores de uno de los dos contradice la pregunta que se está mandando.
+  const colaSabor = respuesta.tipo === 'botones_tipo_helado' ? '' : colaSaborPendiente(saborPendiente, listaSabores);
+
   if (respuesta.tipo === 'botones_pago') {
-    return enviarMensajeConBotones(numeroCliente, `${prefijo}¿Cómo lo pagás? 💰`, [
+    return enviarMensajeConBotones(numeroCliente, `${prefijo}¿Cómo lo pagás? 💰${colaSabor}`, [
       { id: 'resp_pago_efectivo', title: 'Efectivo' },
       { id: 'resp_pago_transferencia', title: 'Transferencia' },
     ]);
@@ -1375,7 +1688,7 @@ export async function pedirDatosFaltantes(
     // reemplazo, así que usamos el texto determinista (que ya dice "sumar/sacar").
     const libre =
       tipoHeladoAmbiguo && respuesta.operacion === 'reemplazar'
-        ? await redactarPreguntaTipoHelado(respuesta.cantidad, tipoHeladoAmbiguo.textoCliente, numeroCliente)
+        ? await redactarPreguntaTipoHelado(respuesta.cantidad, tipoHeladoAmbiguo.textoCliente, numeroCliente, listaSabores)
         : null;
     // La cantidad Y la operación viajan en el ID del botón (y la operación también
     // en el título), así que el click vuelve como el texto canónico —"N de agua"
@@ -1397,12 +1710,12 @@ export async function pedirDatosFaltantes(
     // lo tenga que escribir.
     return enviarMensajeConBotones(
       numeroCliente,
-      `${prefijo}¿A qué dirección te lo llevamos? Mandame calle y número (ej: *Mitre 950*) 🛵`,
+      `${prefijo}¿A qué dirección te lo llevamos? Mandame calle y número (ej: *Mitre 950*) 🛵${colaSabor}`,
       [{ id: 'resp_retira', title: 'Paso a retirar' }],
     );
   }
 
-  return enviarMensajeWhatsApp(numeroCliente, `${prefijo}${respuesta.mensaje}`);
+  return enviarMensajeWhatsApp(numeroCliente, `${prefijo}${respuesta.mensaje}${colaSabor}`);
 }
 
 /**
@@ -1948,11 +2261,28 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // OBSERVACIONES: merge keyed por tipo, en TS. Leemos los slots actuales
       // (sembrando general desde el texto plano si la fila no tiene jsonb),
       // aplicamos la operación de cada slot y reconstruimos el texto plano.
+      //
+      // ANTES del merge sacamos del texto que trae el modelo lo que es FORMATO y
+      // no sabor ("palitos" no es un gusto). Si un slot queda vacío,
+      // `aplicarOperacionObs` trata reemplazar/agregar como no-op, así que lo que
+      // ya estaba guardado sobrevive intacto: el filtro nunca borra datos viejos.
       const slotsActuales = leerSlots(pedidoActivo);
+      const obsAguaLimpio = limpiarSaboresNoValidos(object.obs_agua);
+      const obsCremaLimpio = limpiarSaboresNoValidos(object.obs_crema);
+      const obsGeneralLimpio = limpiarSaboresNoValidos(object.obs_general);
+      for (const [slot, crudo, limpio] of [
+        ['agua', object.obs_agua, obsAguaLimpio],
+        ['crema', object.obs_crema, obsCremaLimpio],
+        ['general', object.obs_general, obsGeneralLimpio],
+      ] as const) {
+        if (crudo?.trim() && crudo.trim() !== limpio) {
+          console.log(`🧹 Sabores (${slot}): el modelo trajo "${crudo}" y quedó "${limpio ?? ''}" (formato, no sabor).`);
+        }
+      }
       const slotsFinales: ObsSlots = {
-        agua: aplicarOperacionObs(object.obs_agua_operacion, object.obs_agua, slotsActuales.agua),
-        crema: aplicarOperacionObs(object.obs_crema_operacion, object.obs_crema, slotsActuales.crema),
-        general: aplicarOperacionObs(object.obs_general_operacion, object.obs_general, slotsActuales.general),
+        agua: aplicarOperacionObs(object.obs_agua_operacion, obsAguaLimpio, slotsActuales.agua),
+        crema: aplicarOperacionObs(object.obs_crema_operacion, obsCremaLimpio, slotsActuales.crema),
+        general: aplicarOperacionObs(object.obs_general_operacion, obsGeneralLimpio, slotsActuales.general),
       };
       const observacionesFinal = reconstruirObservaciones(slotsFinales);
       console.log(`🍨 Observaciones: ${JSON.stringify(slotsActuales)} -> ${JSON.stringify(slotsFinales)} => "${observacionesFinal ?? ''}"`);
@@ -2080,15 +2410,37 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // mostrábamos el total. Si NO puede (horarios/zonas/stock/promos…),
       // delegamos a un humano como siempre.
       const seedDelegacion = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
-      const respuestaNegocio = await intentarRespuestaNegocio(pedido.pregunta_negocio!, pedidoActivo, numeroCliente);
+      // Los cambios de ESTE mensaje van al contexto: sin ellos, una pregunta sobre
+      // el cambio en curso ("¿me los mandan ahí?") es incontestable, porque el
+      // bloque corre antes del merge y el contexto todavía tiene los datos viejos.
+      const cambiosPendientes = construirCambiosPendientes(pedido, pedidoActivo);
+      const respuestaNegocio = await intentarRespuestaNegocio(
+        pedido.pregunta_negocio!,
+        pedidoActivo,
+        numeroCliente,
+        cambiosPendientes,
+      );
       if (respuestaNegocio) {
         console.log(`💬 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") respondida desde el contexto. Sigo el flujo del pedido.`);
         await enviarMensajeWhatsApp(numeroCliente, respuestaNegocio);
+        respondiPreguntaNegocioEmbebida = true;
+      } else if (cambiosPendientes.length && esConfirmacionRetoricaDeCambio(pedido.pregunta_negocio)) {
+        // Piso determinista: el modelo no pudo contestarla, pero la "pregunta" es
+        // una muletilla sobre el cambio que estamos aplicando ahora mismo. El
+        // resumen actualizado que sale a continuación ES la respuesta: delegar
+        // acá manda una burbuja que la burbuja siguiente contradice, y prende un
+        // `requiere_atencion` para el staff por algo ya resuelto.
+        console.log(`🤝 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") es una confirmación del cambio en curso. No delego: el pedido actualizado la contesta.`);
+        // OJO: acá NO se marca `respondiPreguntaNegocioEmbebida`. Esa bandera
+        // silencia los fallbacks de más abajo porque asume que ya salió una
+        // burbuja; en esta rama no salió ninguna a propósito, y la que tiene que
+        // contestar es justamente la del pedido actualizado. Marcarla dejaría al
+        // cliente sin ninguna respuesta.
       } else {
         console.log(`🙋 Pregunta de negocio embebida ("${pedido.pregunta_negocio}") fuera del contexto conocido. Delego a un humano y sigo el flujo del pedido.`);
         await delegarAHumano(numeroCliente, seedDelegacion);
+        respondiPreguntaNegocioEmbebida = true;
       }
-      respondiPreguntaNegocioEmbebida = true;
       // NO retornamos: si el mensaje trae datos del pedido, el flujo de armado
       // de abajo los procesa igual (resumen / pedir lo que falta).
     }
@@ -2297,6 +2649,17 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         operacion: deltaPeladoAmbiguo.operacion,
       };
     }
+    // SABOR QUE ERA UN FORMATO: el cliente dijo "20 palitos de crema" creyendo
+    // que nombraba el sabor. `limpiarSaboresNoValidos` ya evitó que "palitos" se
+    // persistiera como gusto (que es lo que corrompía el pedido); esto además se
+    // lo pregunta, con la lista de ese tipo, en vez de dejarlo sin sabor y sin
+    // enterarse. Va como cola del pedido de datos faltantes: los sabores son
+    // opcionales, así que no bloquea nada.
+    const saborPendiente = detectarSaborDescartadoPorFormato(pedido, aguaFinal, cremaFinal);
+    if (saborPendiente) {
+      console.log(`🍦 El cliente nombró el formato pero no el sabor de los de ${saborPendiente}. Se lo pregunto con la lista de ese tipo.`);
+    }
+
     if (tipoHeladoAmbiguo) {
       const detalleOp = tipoHeladoAmbiguo.operacion && tipoHeladoAmbiguo.operacion !== 'reemplazar'
         ? ` (${tipoHeladoAmbiguo.operacion})`
@@ -2395,6 +2758,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
               tipoHeladoAmbiguo,
+              saborPendiente,
             );
           }
         } else {
@@ -2447,6 +2811,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
               tipoHeladoAmbiguo,
+              saborPendiente,
             );
           }
         } else {
@@ -2528,6 +2893,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
               tipoHeladoAmbiguo,
+              saborPendiente,
             );
           }
           return;
@@ -2597,6 +2963,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             cantidadEnUnidadNoSoportada,
             pagoNoSoportado,
             tipoHeladoAmbiguo,
+            saborPendiente,
           );
         }
       } else if (esperandoCancelacion) {
@@ -2651,7 +3018,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       if (pedido.intencion === 'confirmar' && !hayCambiosReales) {
         if (!pedidoCompleto) {
           console.log("⚠️ El cliente confirmó pero el borrador todavía está incompleto. Pido lo que falta.");
-          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+          await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo, saborPendiente);
           return;
         }
         // Guard atómico: el borrador pudo pasar a cancelado (auto-rechazo del cron
@@ -2687,7 +3054,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // un "no te entendí" pese a ser una instrucción clara). Preguntamos el tipo
       // —llevando la operación en los botones— antes de tocar el pedido.
       if (tipoHeladoAmbiguo) {
-        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo, saborPendiente);
         console.log("🍦 Número pelado ambiguo sobre borrador completo: pregunto el tipo en vez de adivinar.");
         return;
       }
@@ -2698,7 +3065,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
       // cae al fallback y se lleva un "no te entendí" que no le explica NADA — y el
       // cliente cree que ya dio la cantidad. Le decimos por qué no cuenta.
       if (cantidadEnUnidadNoSoportada && pedidoCompleto && !hayCambiosReales) {
-        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo, saborPendiente);
         console.log("⚖️ Cantidad en unidad no soportada sobre borrador completo: explico que vendemos por unidad.");
         return;
       }
@@ -2752,7 +3119,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             await enviarResumenYPedirConfirmacion(numeroCliente, updatedData, true);
           } else {
             console.log("📝 El borrador sigue incompleto tras el merge. Pido lo que falta.");
-            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+            await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo, saborPendiente);
           }
         } else {
           console.log(`⚠️ Race al actualizar borrador: el pedido ${pedidoActivo.id} cambió de estado o fue despachado.`);
@@ -2815,7 +3182,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         // Un pedido en cocina ya tenía datos completos; si un merge lo dejó
         // "incompleto" es por algo puntual del mensaje. No degradamos su estado
         // ni persistimos placeholders: solo pedimos el dato que falte.
-        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+        await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, 0, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo, saborPendiente);
         return;
       }
 
@@ -2890,6 +3257,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
               cantidadEnUnidadNoSoportada,
               pagoNoSoportado,
               tipoHeladoAmbiguo,
+              saborPendiente,
             );
             return;
           }
@@ -2901,11 +3269,19 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         }
       }
 
-      // Seed determinista para variar el saludo cuando faltan los 3 datos (caso
-      // típico de un mensaje off-topic/sin sentido): mensajes distintos → largo
-      // distinto → variante distinta, así no se repite palabra por palabra.
-      const seedSaludo = mensajesClaim.reduce((acc, m) => acc + (m.texto?.length ?? 0), 0);
-      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, seedSaludo, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo);
+      // Cuántas veces YA le pedimos los datos en esta conversación. El seed viejo
+      // era la suma de los largos del batch: como es un hash del contenido y no
+      // una cuenta, COLISIONA — en la corrida 34900965360 dos de los cuatro
+      // mensajes off-topic recibieron el saludo idéntico, que es justo lo que el
+      // cliente marcó como "copiar y pegar".
+      //
+      // `mensajesParaIA` (sin pedido activo: los últimos 15 min, ambos roles)
+      // crece de a dos por turno —el mensaje del cliente y la respuesta del bot—,
+      // así que la mitad es la ronda: 0, 1, 2, 3… monótona, sin repetir variante
+      // en turnos consecutivos, y es lo que habilita el texto que reconoce la
+      // insistencia a partir de la tercera.
+      const rondaDatosFaltantes = Math.floor(mensajesParaIA.length / 2);
+      await pedirDatosFaltantes(numeroCliente, faltaCantidad, faltaDireccion, faltaPago, undefined, rondaDatosFaltantes, cantidadEnUnidadNoSoportada, pagoNoSoportado, tipoHeladoAmbiguo, saborPendiente);
       return;
     }
 

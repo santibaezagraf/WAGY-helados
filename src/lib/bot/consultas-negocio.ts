@@ -59,6 +59,21 @@ export const ConsultaNegocioSchema = z.object({
 export type ConsultaNegocioResultado = z.infer<typeof ConsultaNegocioSchema>;
 
 /**
+ * Sabores vigentes: los de la lista de precios ACTIVA (configurables desde el
+ * dashboard) y, si no hay lista o vino sin sabores cargados, la constante
+ * `SABORES` como piso. Exportada para test y para que los dos constructores de
+ * contexto resuelvan los sabores por el mismo camino.
+ */
+export function saboresVigentes(
+  listaPrecios: ListaPreciosPublica | null,
+): { agua: string[]; crema: string[] } {
+  return {
+    agua: listaPrecios?.saboresAgua?.length ? listaPrecios.saboresAgua : [...SABORES.agua],
+    crema: listaPrecios?.saboresCrema?.length ? listaPrecios.saboresCrema : [...SABORES.crema],
+  };
+}
+
+/**
  * Arma el bloque de CONTEXTO curado que ve el modelo de respuesta. Es la ÚNICA
  * fuente de verdad de la respuesta libre: todo lo que no esté acá, el modelo lo
  * trata como "no lo sé" y delega. Pura y exportada para test.
@@ -71,8 +86,23 @@ export type ConsultaNegocioResultado = z.infer<typeof ConsultaNegocioSchema>;
 export function construirContextoNegocio(
   pedidoActivo: PedidoActivoContext | null,
   listaPrecios: ListaPreciosPublica | null,
+  // Cambios que el MISMO mensaje está por aplicarle al pedido (los arma
+  // `construirCambiosPendientes` en procesar.ts). Sin esto, el contexto que ve la
+  // respuesta acotada refleja el pedido de ANTES del merge —este bloque corre
+  // antes—, y una pregunta sobre el cambio en curso ("¿me los mandan ahí?") es
+  // imposible de contestar: se delegaba a un humano y la burbuja siguiente,
+  // el resumen actualizado, la contestaba igual.
+  cambiosPendientes: string[] = [],
 ): string {
   const partes: string[] = [];
+
+  // Los sabores son configurables por lista de precios (columnas `sabores_agua`/
+  // `sabores_crema` de `listas_precios`, editables desde el dashboard). Hasta la
+  // corrida 34900965360 este contexto usaba SIEMPRE la constante `SABORES`: si el
+  // staff cambiaba los sabores, la página /precios se actualizaba y el bot seguía
+  // nombrando los viejos. La constante queda como fallback para cuando no hay lista
+  // activa (o quedó sin sabores cargados).
+  const { agua: saboresAgua, crema: saboresCrema } = saboresVigentes(listaPrecios);
 
   // QUÉ SOS: una pregunta meta ("¿qué sabés hacer?", "¿sos un bot?") no es una
   // consulta de negocio real, pero sin este bloque el contexto no tenía con qué
@@ -88,9 +118,19 @@ export function construirContextoNegocio(
   partes.push('CONOCIMIENTO DEL NEGOCIO (WAGY helados, heladería):');
   partes.push('- Vendemos DOS tipos de helado, ambos siempre disponibles: de AGUA y de CREMA.');
   partes.push('- Se venden POR UNIDAD (no por kilo, gramo, pote, porción, bola ni cucurucho).');
-  partes.push(`- Sabores de los de agua: ${SABORES.agua.join(', ')}.`);
-  partes.push(`- Sabores de los de crema: ${SABORES.crema.join(', ')}.`);
-  partes.push('- Estos sabores los sabés SIEMPRE: si preguntan qué sabores hay (de agua o de crema), respondé con la lista, nunca lo delegues a una persona.');
+  // GLOSARIO: "palito" es como se le dice acá al producto. Sin esta línea, "¿qué
+  // tenés de helados de palito?" era una pregunta sobre algo que el contexto ni
+  // nombraba, y el modelo delegaba a un humano (corrida 34900965360: la
+  // conversación se murió en el primer mensaje del cliente).
+  partes.push('- Al helado también se le dice "palito", "palita", "paleta" o "bombón": son la MISMA cosa que vendemos, solo que nombrada por su formato. NO son un producto aparte ni un sabor. Si te hablan de "palitos", te están hablando de nuestros helados de agua o de crema.');
+  partes.push(`- Sabores de los de agua: ${saboresAgua.join(', ')}.`);
+  partes.push(`- Sabores de los de crema: ${saboresCrema.join(', ')}.`);
+  // CATÁLOGO != STOCK. Esta distinción es la que faltaba: el bloque "LO QUE NO
+  // SABÉS" decía "stock del día o si hay un sabor puntual disponible", y una
+  // pregunta como "¿qué tenés de crema?" se lee como disponibilidad, así que el
+  // escape hatch le ganaba a la regla de los sabores y el bot delegaba una lista
+  // que tenía delante. Ahora se nombra el contraste de los dos lados.
+  partes.push('- Las dos listas de arriba son el CATÁLOGO y lo sabés SIEMPRE. Si te preguntan qué sabores hay, cuáles son, qué tenés, qué me recomendás, o te piden que elijas/propongas uno, contestá con la lista del tipo que corresponda (o las dos si no aclararon). Eso NO es una pregunta de stock y NUNCA se delega a una persona.');
   partes.push(
     `- Envíos: GRATIS en compras de ${formatearPesos(ENVIOS.minimoGratis)} o más. Por menos de eso, se consulta el costo o el cliente pasa a retirar por el local.`,
   );
@@ -140,11 +180,20 @@ export function construirContextoNegocio(
     );
   }
 
+  if (cambiosPendientes.length) {
+    partes.push('');
+    partes.push('CAMBIOS QUE EL CLIENTE PIDE EN ESTE MISMO MENSAJE (se aplican AHORA, apenas termines de responder; el pedido va a quedar así):');
+    for (const cambio of cambiosPendientes) partes.push(cambio);
+    partes.push(
+      '- Si la pregunta es sobre estos cambios ("¿me los mandan ahí?", "¿queda así?", "¿entonces son 30?"), confirmáselo VOS: sí, ya quedan aplicados. Eso NO lo tiene que ver una persona.',
+    );
+  }
+
   partes.push('');
   partes.push('LO QUE NO SABÉS (si te preguntan esto, puede_responder=false para que lo tome una persona del equipo):');
   partes.push('- Horarios de atención exactos.');
   partes.push('- Zonas de entrega / cobertura puntual (si llegan a tal barrio o localidad).');
-  partes.push('- Stock del día o si hay un sabor puntual disponible ahora mismo.');
+  partes.push('- Si un sabor puntual está AGOTADO hoy (eso es stock del día, y no lo ves). Ojo: la LISTA de sabores sí la sabés y está más arriba — enumerarla nunca es una pregunta de stock.');
   partes.push('- Promociones, descuentos o venta mayorista.');
   partes.push('- Facturación, o reclamos/problemas con un pedido ya entregado.');
 
@@ -162,7 +211,7 @@ REGLAS ESTRICTAS (para no inventar ni filtrar información de más):
 4. Si la pregunta no tiene NADA que ver con la heladería (bromas, off-topic, sinsentidos), puede_responder=false.
 5. Cuando la respuesta sirva para avanzar el pedido, cerrá reencauzando (ej: "¿cuántos querés?").
 6. No confirmes ni modifiques el pedido; solo respondé la pregunta.
-7. Los SABORES (de agua y de crema) SIEMPRE están en el CONTEXTO: si preguntan qué sabores hay, cuáles son, o si tenés tal sabor, respondé con la lista y NUNCA delegues. Ejemplo: "¿qué sabores de crema hay?" → puede_responder=true, listás los de crema.
+7. Los SABORES (de agua y de crema) SIEMPRE están en el CONTEXTO: enumerarlos es CATÁLOGO, no stock. Si preguntan qué sabores hay, cuáles son, qué tenés, si tenés tal sabor, qué recomendás, o te piden que elijas uno, respondé con la lista y NUNCA delegues. Ejemplos: "¿qué sabores de crema hay?" → listás los de crema. "¿qué palitos tenés?" → "palito" es nuestro helado, así que listás los sabores. "Elegime uno de crema" → proponés uno de la lista. Lo ÚNICO que no sabés de sabores es si uno está AGOTADO hoy.
 
 Devolvé el objeto { puede_responder, respuesta }.`;
 
@@ -284,7 +333,12 @@ const LARGO_MAX_PREGUNTA_TIPO = 300;
  * cliente y los sabores reales de cada tipo. Es TODO lo que ve el modelo, así que
  * no puede inventar sabores ni hablar de otra cosa. Pura y exportada para test.
  */
-export function construirContextoTipoHelado(cantidad: number, textoCliente: string): string {
+export function construirContextoTipoHelado(
+  cantidad: number,
+  textoCliente: string,
+  listaPrecios: ListaPreciosPublica | null = null,
+): string {
+  const { agua, crema } = saboresVigentes(listaPrecios);
   return [
     'SITUACIÓN: el cliente pidió helados pero NO dijo de qué tipo son (de agua o de crema), y no se puede deducir.',
     `- Cantidad que pidió: ${cantidad} (repetila con números).`,
@@ -292,8 +346,9 @@ export function construirContextoTipoHelado(cantidad: number, textoCliente: stri
     '',
     'CONOCIMIENTO DEL NEGOCIO (WAGY helados, heladería):',
     '- Hay DOS tipos de helado, los dos siempre disponibles: de AGUA y de CREMA. Se venden por unidad.',
-    `- Sabores de los de agua: ${SABORES.agua.join(', ')}.`,
-    `- Sabores de los de crema: ${SABORES.crema.join(', ')}.`,
+    '- Al helado también se le dice "palito", "palita", "paleta" o "bombón": es la misma cosa, nombrada por su formato. NO es un sabor ni un producto aparte.',
+    `- Sabores de los de agua: ${agua.join(', ')}.`,
+    `- Sabores de los de crema: ${crema.join(', ')}.`,
     '- Un mismo sabor puede existir en los dos tipos; en ese caso el cliente igual tiene que elegir el tipo.',
   ].join('\n');
 }
@@ -321,11 +376,12 @@ export async function redactarPreguntaTipoHelado(
   cantidad: number,
   textoCliente: string,
   telefono: string | null = null,
+  listaPrecios: ListaPreciosPublica | null = null,
 ): Promise<string | null> {
   const object = await generarAcotado(
     'Pregunta de tipo de helado',
     SYSTEM_PROMPT_TIPO_HELADO,
-    construirContextoTipoHelado(cantidad, textoCliente),
+    construirContextoTipoHelado(cantidad, textoCliente, listaPrecios),
     PreguntaTipoHeladoSchema,
     telefono,
   );

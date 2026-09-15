@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { construirContextoNegocio, construirContextoTipoHelado, elegirTextoDelegacion } from './consultas-negocio';
+import { construirContextoNegocio, construirContextoTipoHelado, elegirTextoDelegacion, saboresVigentes } from './consultas-negocio';
 import type { PedidoActivoContext } from './procesar';
-import type { ListaPreciosPublica } from '@/lib/precios-publico';
+import { SABORES, type ListaPreciosPublica } from '@/lib/precios-publico';
 
 function pa(extra: Partial<PedidoActivoContext>): PedidoActivoContext {
   return {
@@ -33,7 +33,7 @@ describe('construirContextoNegocio', () => {
     expect(ctx).toMatch(/Sabores de los de agua:/);
     expect(ctx).toMatch(/Sabores de los de crema:/);
     // Ancla anti-delegación: los sabores son un dato que el bot SÍ conoce.
-    expect(ctx).toMatch(/Estos sabores los sabés SIEMPRE/);
+    expect(ctx).toMatch(/el CATÁLOGO y lo sabés SIEMPRE/);
     expect(ctx).toMatch(/Demora estimada de entrega:/);
     expect(ctx).toMatch(/efectivo o transferencia/);
   });
@@ -53,6 +53,48 @@ describe('construirContextoNegocio', () => {
     expect(ctx).toMatch(/LO QUE NO SABÉS/);
     expect(ctx).toMatch(/Horarios/);
     expect(ctx).toMatch(/Zonas de entrega/);
+  });
+
+  it('distingue CATÁLOGO de STOCK en el escape hatch', () => {
+    // Causa raíz del hallazgo de la corrida 34900965360: el escape hatch decía
+    // "stock del día o si hay un sabor puntual disponible", y "¿qué tenés de
+    // helados de palito?" se lee como disponibilidad — así que le ganaba a la
+    // regla de los sabores y el bot delegaba una lista que tenía delante. El
+    // escape hatch ahora habla solo de "agotado hoy" y remite a la lista.
+    const ctx = construirContextoNegocio(null, null);
+    const noSabes = ctx.slice(ctx.indexOf('LO QUE NO SABÉS'));
+    expect(noSabes).toMatch(/AGOTADO hoy/);
+    expect(noSabes).toMatch(/la LISTA de sabores sí la sabés/);
+    // El texto viejo, que era el que provocaba la delegación, no debe volver.
+    expect(noSabes).not.toMatch(/sabor puntual disponible ahora mismo/);
+  });
+
+  it('nombra "palito" como formato del producto, no como sabor', () => {
+    // El cliente-agente dijo "palito" en 4 de 5 escenarios de la corrida: es como
+    // se le dice acá al producto. Sin esta línea, el contexto ni lo nombraba.
+    const ctx = construirContextoNegocio(null, null);
+    expect(ctx).toMatch(/"palito"/);
+    expect(ctx).toMatch(/NO son un producto aparte ni un sabor/);
+    expect(construirContextoTipoHelado(50, 'quiero 50 palitos')).toMatch(/"palito"/);
+  });
+
+  it('usa los sabores de la lista ACTIVA, no la constante del código', () => {
+    // Los sabores son configurables por lista de precios desde el dashboard, pero
+    // el contexto del bot usaba siempre la constante: si el staff los cambiaba,
+    // /precios se actualizaba y el bot seguía nombrando los viejos.
+    const ctx = construirContextoNegocio(null, listaDemo);
+    expect(ctx).toMatch(/Sabores de los de agua: Frutilla, Uva\./);
+    expect(ctx).toMatch(/Sabores de los de crema: Chocolate\./);
+    // Un sabor de la constante que NO está en la lista activa no debe aparecer.
+    expect(ctx).not.toMatch(/Dulce de leche/);
+    expect(construirContextoTipoHelado(50, 'quiero 50', listaDemo))
+      .toMatch(/Sabores de los de crema: Chocolate\./);
+  });
+
+  it('cae a la constante SABORES cuando no hay lista activa o vino sin sabores', () => {
+    expect(saboresVigentes(null).crema).toEqual([...SABORES.crema]);
+    expect(saboresVigentes({ ...listaDemo, saboresAgua: [], saboresCrema: [] }).agua)
+      .toEqual([...SABORES.agua]);
   });
 
   it('incluye los tiers de precio cuando se pasa la lista', () => {

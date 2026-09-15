@@ -28,12 +28,18 @@ import {
   traeDatosDePedido,
   intencionesValidasPara,
   clampIntencionPorEstado,
+  limpiarSaboresNoValidos,
+  detectarSaborDescartadoPorFormato,
+  colaSaborPendiente,
+  construirCambiosPendientes,
+  esConfirmacionRetoricaDeCambio,
   CONFIRMACIONES,
   NEGACIONES,
   SALUDOS,
   type PedidoActivoContext,
   type PedidoIA,
 } from './procesar';
+import { SABORES } from '@/lib/precios-publico';
 
 // Helper: arma un PedidoIA completo "neutro" (todo en mantener, sin datos) para
 // que cada test solo declare el campo que le importa.
@@ -412,7 +418,7 @@ describe('elegirRespuestaDatosFaltantes', () => {
     expect(elegirRespuestaDatosFaltantes(true, true, false).tipo).toBe('texto');
   });
 
-  it('faltan los tres → encabezado de bienvenida (seed por defecto = variante histórica)', () => {
+  it('faltan los tres → encabezado de bienvenida (ronda por defecto = variante histórica)', () => {
     const r = elegirRespuestaDatosFaltantes(true, true, true);
     expect(r.tipo).toBe('texto');
     if (r.tipo === 'texto') {
@@ -423,20 +429,20 @@ describe('elegirRespuestaDatosFaltantes', () => {
     }
   });
 
-  it('faltan los tres → el saludo varía con el seed, pero los 3 ítems no (#4)', () => {
-    const encabezado = (seed: number) => {
-      const r = elegirRespuestaDatosFaltantes(true, true, true, seed);
+  it('faltan los tres → el saludo varía con la ronda, pero los 3 ítems no (#4)', () => {
+    const encabezado = (ronda: number) => {
+      const r = elegirRespuestaDatosFaltantes(true, true, true, ronda);
       // Primera línea = saludo; el resto son los bullets.
       return r.tipo === 'texto' ? r.mensaje.split('\n')[0] : '';
     };
-    // Seeds que caen en variantes distintas dan saludos distintos.
+    // Rondas distintas dan encabezados distintos.
     expect(encabezado(0)).not.toBe(encabezado(1));
     expect(encabezado(1)).not.toBe(encabezado(2));
-    // Mismo seed → mismo saludo (determinista, sin Math.random).
+    // Misma ronda → mismo encabezado (determinista, sin Math.random).
     expect(encabezado(5)).toBe(encabezado(5));
     // Sea cual sea el saludo, los 3 datos siempre están.
-    for (const seed of [0, 1, 2, 7, 13]) {
-      const r = elegirRespuestaDatosFaltantes(true, true, true, seed);
+    for (const ronda of [0, 1, 2, 7, 13]) {
+      const r = elegirRespuestaDatosFaltantes(true, true, true, ronda);
       if (r.tipo === 'texto') {
         expect(r.mensaje).toContain('Cantidades de helado');
         expect(r.mensaje).toContain('Dirección de envío');
@@ -1046,5 +1052,239 @@ describe('cantidadVieneDeUnidadNoSoportada', () => {
   it('tolera entradas vacías o inválidas', () => {
     expect(cantidadVieneDeUnidadNoSoportada(null, 2)).toBe(false);
     expect(cantidadVieneDeUnidadNoSoportada('que sean 2 kilos', 0)).toBe(false);
+  });
+});
+
+describe('limpiarSaboresNoValidos', () => {
+  it('descarta un texto que es SOLO formato (el caso que corrompía el pedido)', () => {
+    // Caso real de la corrida 34900965360: "20 palitos de crema" dejó
+    // `observaciones: "palitos"` en el pedido, y el cliente lo reclamó 3 veces.
+    expect(limpiarSaboresNoValidos('palitos')).toBeNull();
+    expect(limpiarSaboresNoValidos('palitos de crema')).toBeNull();
+    expect(limpiarSaboresNoValidos('helados')).toBeNull();
+    expect(limpiarSaboresNoValidos('paletas de agua')).toBeNull();
+    expect(limpiarSaboresNoValidos('bombones')).toBeNull();
+  });
+
+  it('conserva el sabor y saca solo el formato', () => {
+    expect(limpiarSaboresNoValidos('palitos de frutilla')).toBe('frutilla');
+    expect(limpiarSaboresNoValidos('sabor chocolate')).toBe('chocolate');
+    expect(limpiarSaboresNoValidos('20 helados de vainilla')).toBe('20 de vainilla');
+  });
+
+  it('no toca un texto de sabores normal', () => {
+    expect(limpiarSaboresNoValidos('frutilla')).toBe('frutilla');
+    expect(limpiarSaboresNoValidos('10 de frutilla y 5 de limón')).toBe('10 de frutilla y 5 de limón');
+    expect(limpiarSaboresNoValidos('dulce de leche')).toBe('dulce de leche');
+  });
+
+  it('protege los sabores del catálogo que contienen una palabra de tipo', () => {
+    // "Crema del Cielo" es un sabor DE AGUA: ese "crema"/"del" no es designación
+    // de tipo. Mismo cuidado que `mencionaTipoHelado`.
+    expect(limpiarSaboresNoValidos('crema del cielo')).toBe('crema del cielo');
+    expect(limpiarSaboresNoValidos('palitos de crema del cielo')).toBe('crema del cielo');
+  });
+
+  it('conserva un sabor que NO está en el catálogo (solo se veta una lista cerrada)', () => {
+    // La dirección peligrosa es borrar un dato real del cliente, no dejar pasar
+    // un sabor raro: eso lo resuelve una persona mirando el pedido.
+    expect(limpiarSaboresNoValidos('menta granizada')).toBe('menta granizada');
+    expect(limpiarSaboresNoValidos('crema americana')).toBe('crema americana');
+  });
+
+  it('no deja restos sin sabor (números o conectores sueltos)', () => {
+    expect(limpiarSaboresNoValidos('10 palitos')).toBeNull();
+    expect(limpiarSaboresNoValidos('de los helados')).toBeNull();
+    expect(limpiarSaboresNoValidos('   ')).toBeNull();
+    expect(limpiarSaboresNoValidos(null)).toBeNull();
+  });
+
+  it('conserva detalles generales que no son sabores ni formatos', () => {
+    expect(limpiarSaboresNoValidos('sin coco')).toBe('sin coco');
+    expect(limpiarSaboresNoValidos('todos sin azúcar')).toBe('todos sin azúcar');
+  });
+});
+
+describe('detectarSaborDescartadoPorFormato', () => {
+  const base = {
+    obs_agua: null, obs_agua_operacion: 'mantener' as const,
+    obs_crema: null, obs_crema_operacion: 'mantener' as const,
+  };
+
+  it('detecta el tipo cuyo "sabor" era solo formato', () => {
+    expect(detectarSaborDescartadoPorFormato(
+      { ...base, obs_crema: 'palitos', obs_crema_operacion: 'reemplazar' }, 0, 20,
+    )).toBe('crema');
+  });
+
+  it('no dispara si el sabor era real', () => {
+    expect(detectarSaborDescartadoPorFormato(
+      { ...base, obs_crema: 'vainilla', obs_crema_operacion: 'reemplazar' }, 0, 20,
+    )).toBeNull();
+  });
+
+  it('no dispara si ese tipo no tiene cantidad (no hay nada que saborizar)', () => {
+    expect(detectarSaborDescartadoPorFormato(
+      { ...base, obs_crema: 'palitos', obs_crema_operacion: 'reemplazar' }, 20, 0,
+    )).toBeNull();
+  });
+
+  it('no dispara con la operación "mantener" ni "limpiar" (el cliente no dijo nada)', () => {
+    expect(detectarSaborDescartadoPorFormato(
+      { ...base, obs_crema: 'palitos', obs_crema_operacion: 'mantener' }, 0, 20,
+    )).toBeNull();
+    expect(detectarSaborDescartadoPorFormato(
+      { ...base, obs_crema: 'palitos', obs_crema_operacion: 'limpiar' }, 0, 20,
+    )).toBeNull();
+  });
+
+  it('con los DOS tipos ambiguos no pregunta nada (sería ruido)', () => {
+    expect(detectarSaborDescartadoPorFormato({
+      obs_agua: 'palitos', obs_agua_operacion: 'reemplazar',
+      obs_crema: 'helados', obs_crema_operacion: 'reemplazar',
+    }, 10, 20)).toBeNull();
+  });
+});
+
+describe('colaSaborPendiente', () => {
+  it('lista los sabores del tipo pendiente', () => {
+    const cola = colaSaborPendiente('crema');
+    expect(cola).toContain('los de crema');
+    for (const sabor of SABORES.crema) expect(cola).toContain(sabor);
+    // No mezcla los del otro tipo.
+    expect(cola).not.toContain('Uva');
+  });
+
+  it('es vacía cuando no hay nada pendiente', () => {
+    expect(colaSaborPendiente(null)).toBe('');
+  });
+});
+
+describe('construirCambiosPendientes', () => {
+  it('describe la dirección nueva para que la consulta acotada pueda contestarla', () => {
+    // Caso real de la corrida 34900965360: el pedido ya estaba confirmado y el
+    // cliente mandó dirección nueva + "Me los mandan ahí no?". El contexto veía
+    // la dirección VIEJA (este bloque corre antes del merge), así que la pregunta
+    // era incontestable y se delegaba.
+    const cambios = construirCambiosPendientes(
+      ia({ direccion: 'Av. Corrientes 5678', aclaracion: '2A' }),
+      pa({ direccion: 'Av. Rivadavia 1234', cantidad_agua: 24 }),
+    );
+    expect(cambios.join('\n')).toMatch(/Av\. Corrientes 5678 \(2A\)/);
+    expect(cambios.join('\n')).toMatch(/se va a entregar AHÍ/);
+  });
+
+  it('marca el paso a retiro', () => {
+    const cambios = construirCambiosPendientes(
+      ia({ direccion: 'retira' }),
+      pa({ direccion: 'Mitre 951' }),
+    );
+    expect(cambios.join('\n')).toMatch(/pasa a retirar/);
+  });
+
+  it('ignora una dirección que no parece dirección (la misma red que usa el flujo)', () => {
+    // `pareceDireccion` corre DESPUÉS de este bloque en el flujo, así que si no se
+    // validara acá, una aclaración ("depto 6") entraría al contexto como si fuera
+    // la nueva dirección de entrega.
+    expect(construirCambiosPendientes(ia({ direccion: 'depto 6' }), pa({}))).toEqual([]);
+  });
+
+  it('lista cantidades, pago y sabores cuando cambian', () => {
+    const cambios = construirCambiosPendientes(
+      ia({ cantidad_crema: 30, metodo_pago: 'transferencia', observaciones: 'los de crema vainilla' }),
+      pa({ cantidad_crema: 20, metodo_pago: 'efectivo' }),
+    );
+    const texto = cambios.join('\n');
+    expect(texto).toMatch(/crema: ahora son 30/);
+    expect(texto).toMatch(/forma de pago: transferencia/);
+    expect(texto).toMatch(/vainilla/);
+  });
+
+  it('es vacía cuando el mensaje no cambia nada del pedido', () => {
+    expect(construirCambiosPendientes(
+      ia({ cantidad_crema: 20, metodo_pago: 'efectivo' }),
+      pa({ cantidad_crema: 20, metodo_pago: 'efectivo' }),
+    )).toEqual([]);
+  });
+});
+
+describe('esConfirmacionRetoricaDeCambio', () => {
+  it('reconoce la muletilla sobre el cambio que se está aplicando', () => {
+    expect(esConfirmacionRetoricaDeCambio('Me los mandan ahí no?')).toBe(true);
+    expect(esConfirmacionRetoricaDeCambio('¿queda así entonces?')).toBe(true);
+    expect(esConfirmacionRetoricaDeCambio('¿entonces son 30?')).toBe(true);
+    expect(esConfirmacionRetoricaDeCambio('lo dejamos así, dale?')).toBe(true);
+  });
+
+  it('NO se traga una consulta real de cobertura, horario o demora', () => {
+    // La dirección peligrosa: un falso positivo acá se come una consulta que sí
+    // tiene que ver una persona. Estas tienen que seguir delegándose.
+    expect(esConfirmacionRetoricaDeCambio('¿llegan hasta allá?')).toBe(false);
+    expect(esConfirmacionRetoricaDeCambio('¿hasta qué hora hacen entregas?')).toBe(false);
+    expect(esConfirmacionRetoricaDeCambio('¿cuánto tardan en llegar ahí?')).toBe(false);
+    expect(esConfirmacionRetoricaDeCambio('¿tienen promo por esa cantidad?')).toBe(false);
+    expect(esConfirmacionRetoricaDeCambio('¿hay stock de ese sabor?')).toBe(false);
+    // El ✅ de la corrida: pedido + pregunta de zona en el mismo mensaje.
+    expect(esConfirmacionRetoricaDeCambio('hasta qué hora hacen entregas porque vivo en el sur')).toBe(false);
+  });
+
+  it('NO dispara con una pregunta larga (no es una muletilla)', () => {
+    expect(esConfirmacionRetoricaDeCambio(
+      'che una consulta, si les pido eso ahora mismo y después me arrepiento lo puedo cambiar sin problema',
+    )).toBe(false);
+  });
+
+  it('es falsa sin texto', () => {
+    expect(esConfirmacionRetoricaDeCambio(null)).toBe(false);
+    expect(esConfirmacionRetoricaDeCambio('   ')).toBe(false);
+  });
+});
+
+describe('elegirRespuestaDatosFaltantes: rondas consecutivas (off-topic)', () => {
+  const encabezado = (ronda: number) => {
+    const r = elegirRespuestaDatosFaltantes(true, true, true, ronda);
+    return r.tipo === 'texto' ? r.mensaje.split('\n')[0] : '';
+  };
+
+  it('nunca repite el encabezado en rondas consecutivas', () => {
+    // El seed viejo era la suma de los largos del batch (un hash del contenido):
+    // colisionaba, y en la corrida 34900965360 dos de los cuatro mensajes
+    // off-topic recibieron el MISMO saludo. Con la ronda —que es una cuenta
+    // monótona— eso no puede pasar.
+    for (let ronda = 0; ronda < 8; ronda++) {
+      expect(encabezado(ronda)).not.toBe(encabezado(ronda + 1));
+    }
+  });
+
+  it('desde la tercera ronda deja de saludar y reconoce que viene repitiendo', () => {
+    // Saludar "¡Hola! 👋" por cuarta vez es absurdo: el cliente viene escribiendo
+    // hace rato. Es el criterio ⚠️ de tono de la rúbrica.
+    expect(encabezado(0)).toMatch(/^¡Hola!|^¡Buenas!/);
+    expect(encabezado(1)).toMatch(/^¡Hola!|^¡Buenas!/);
+    for (const ronda of [2, 3, 4, 5]) {
+      expect(encabezado(ronda)).not.toMatch(/^¡Hola!|^¡Buenas!/);
+      expect(encabezado(ronda)).toMatch(/😅/);
+    }
+  });
+
+  it('los 3 datos siguen estando en cualquier ronda (el fondo no cambia)', () => {
+    for (const ronda of [0, 1, 2, 3, 7, 13]) {
+      const r = elegirRespuestaDatosFaltantes(true, true, true, ronda);
+      if (r.tipo === 'texto') {
+        expect(r.mensaje).toContain('Cantidades de helado');
+        expect(r.mensaje).toContain('Dirección de envío');
+        expect(r.mensaje).toContain('Forma de pago');
+      }
+    }
+  });
+
+  it('con datos parciales NUNCA usa el texto de insistencia, por alta que sea la ronda', () => {
+    // La rama de insistencia asume off-topic, y eso solo es seguro cuando faltan
+    // los TRES datos: si el cliente aportó algo, el encabezado es el neutro.
+    const r = elegirRespuestaDatosFaltantes(false, true, true, 9);
+    if (r.tipo === 'texto') {
+      expect(r.mensaje).toContain('Para armar tu pedido me falta:');
+      expect(r.mensaje).not.toMatch(/😅/);
+    }
   });
 });

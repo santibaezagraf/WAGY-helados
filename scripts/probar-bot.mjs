@@ -103,6 +103,17 @@ function chequear(espera, pedido) {
     const dir = String(pedido?.direccion ?? '');
     add('direccion', dir.toLowerCase().includes(espera.direccionContiene.toLowerCase()), `esperado contiene "${espera.direccionContiene}" real="${dir}"`);
   }
+  // Sabores: el bug que motivó el chequeo es que una palabra de FORMATO ("palitos")
+  // terminaba persistida como si fuera un sabor. Eso no se ve en ningún otro campo,
+  // así que sin esto la regresión dependía del ojo del juez.
+  if (espera.observacionesContiene !== undefined) {
+    const obs = String(pedido?.observaciones ?? '');
+    add('observaciones', obs.toLowerCase().includes(espera.observacionesContiene.toLowerCase()), `esperado contiene "${espera.observacionesContiene}" real="${obs}"`);
+  }
+  if (espera.observacionesNoContiene !== undefined) {
+    const obs = String(pedido?.observaciones ?? '');
+    add('observaciones(veto)', !obs.toLowerCase().includes(espera.observacionesNoContiene.toLowerCase()), `NO debe contener "${espera.observacionesNoContiene}" real="${obs}"`);
+  }
   if (espera.metodo_pago !== undefined) {
     add('metodo_pago', pedido?.metodo_pago === espera.metodo_pago, `esperado="${espera.metodo_pago}" real="${pedido?.metodo_pago ?? '-'}"`);
   }
