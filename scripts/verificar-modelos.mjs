@@ -118,9 +118,12 @@ async function main() {
 
     const apiKey = proveedor === 'groq' ? process.env.GROQ_API_KEY : process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     if (!apiKey) {
-      // Sin key no se puede verificar. NO es un fallo: la cadena de Google solo
-      // corre con LLM_PROVIDER=google, así que en un CI de Groq no tener la key
-      // de Google es lo normal. Se avisa para que no parezca que se verificó.
+      // Sin key no se puede verificar. NO es un fallo acá: desde que la cadena
+      // default es cruzada (Groq x3 + Google x3 de cola, ver modelos.ts), un CI
+      // sin GOOGLE_GENERATIVE_AI_API_KEY simplemente no puede chequear esos 3
+      // ids — pero tampoco podría EJERCER ese fallback en runtime si hiciera
+      // falta (mismo requisito, ver la nota en proveedor-llm.ts). Se avisa para
+      // que no parezca que se verificó lo que en realidad se omitió.
       console.log(`⏭️  ${proveedor}: sin API key, no se verifican ${ids.length} id(s): ${ids.join(', ')}`);
       omitidos += ids.length;
       continue;

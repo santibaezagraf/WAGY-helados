@@ -7,8 +7,11 @@
 //
 // Cadena de FALLBACK: si el PRIMARIO (índice 0) se queda sin cuota (429 / TPD),
 // seguimos con el siguiente en vez de contestar "no te entendí". Todos bancan
-// structured output y tienen cubeta TPD SEPARADA en Groq, así que si se agotó el
-// primario es muy probable que el siguiente siga disponible.
+// structured output. Desde 2026-09-15 la cadena por defecto es CRUZADA: 3 de
+// Groq (cada uno con su propia cubeta TPD, así que agotar uno deja a los otros
+// disponibles) y, como último recurso (4ta/5ta/6ta opción), 3 de Google —ver
+// EXTRACCION_GOOGLE/CONSULTA_GOOGLE más abajo para el detalle y el requisito de
+// GOOGLE_GENERATIVE_AI_API_KEY—.
 //
 // Quién recorre la cadena y quién no: el fallback vive en el loop de extracción
 // de procesar.ts y en `generarAcotado` de consultas-negocio.ts, así que TODO lo
@@ -55,19 +58,10 @@ const CONSULTA_GROQ = [
 // cadena vieja, alcanza para correr el eval completo varias veces por día.
 // Ambos ids existen y responden 200 hoy (2026-09-15, verificado contra
 // generateContent con la key real) — no fueron dados de baja como pasó con la
-// línea 2.5. Se deja gemini-3.5-flash como segundo escalón (no-lite, RPD bajo
+// línea 2.5. Se deja gemini-3.5-flash como último escalón (no-lite, RPD bajo
 // medido) solo por si algún día hace falta más capacidad de razonamiento que
 // las lite y se acepta gastarlo rápido; NO se agrega 3.6-flash de vuelta —ver
 // nota arriba, es la que se agotó en la corrida real.
-//
-// Alcance de este cambio (decisión 2026-09-15): esta cadena SOLO corre con
-// LLM_PROVIDER=google (pruebas). El fallback de PRODUCCIÓN sigue siendo 100%
-// Groq sin tocar — cruzar proveedores en el camino real de clientes (agregar
-// estos modelos DESPUÉS de qwen3.8-27b en la cadena que corre siempre) queda
-// pendiente como mejora futura: requeriría que `crearModeloLLM` (proveedor-llm.ts)
-// elija el SDK por-modelo (ya existe `proveedorDeModelo` para eso) en vez de por
-// el toggle global, y que GOOGLE_GENERATIVE_AI_API_KEY pase a ser obligatoria en
-// producción (hoy es opcional, solo para el toggle de test).
 const EXTRACCION_GOOGLE = [
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
@@ -79,13 +73,35 @@ const CONSULTA_GOOGLE = [
   'gemini-3.5-flash',
 ] as const;
 
-/** Cadena de extracción del pedido (`generateObject` con PedidoIASchema). */
+// Composición final de cada cadena (decisión 2026-09-15: fallback CRUZADO de
+// producción). Dos modos:
+//   - Default (`LLM_PROVIDER` ausente o != 'google', producción normal): Groq
+//     primero (3 modelos, su propia cubeta TPD de 200k/día c/u) y los 3 de
+//     Google COMO COLA de la MISMA cadena — 4ta/5ta/6ta opción, solo se tocan
+//     si los tres de Groq ya agotaron cuota. `crearModeloLLM` (proveedor-llm.ts)
+//     elige el SDK POR ID (`proveedorDeModelo`), así que una cadena con ids
+//     mixtos funciona sin rama especial.
+//   - `LLM_PROVIDER=google` (pruebas / A-B): cadena PURA de Google, sin Groq —
+//     para medir el prompt contra Gemini solo, sin que un 429 salte a Groq y
+//     ensucie la comparación.
+//
+// ⚠️ Requisito operativo: para que la cola de Google (4/5/6) funcione de
+// verdad cuando se llegue a ella, `GOOGLE_GENERATIVE_AI_API_KEY` tiene que
+// estar seteada donde sea que esta cadena corra en modo default —producción
+// (Vercel) y, si se quiere ejercer el fallback ahí también, los secrets del
+// nightly de CI—. Si falta la key, el SDK de Google recién falla al hacer la
+// llamada real (`loadApiKey` es perezoso), con un error que NO matchea
+// `esRateLimit` ni `esModeloInexistente` → se trata como fallo de validación:
+// se reintenta el MISMO modelo `MAX_ATTEMPTS` veces y después el loop se
+// RINDE sin probar los eslabones siguientes de la cola. Sin la key, entonces,
+// llegar al 4to modelo cuesta 3 intentos perdidos y el cliente igual termina
+// en "no te entendí" — ligeramente peor que hoy (más latencia), no mejor.
 export const MODELOS_EXTRACCION: readonly string[] =
-  PROVEEDOR_LLM === 'google' ? EXTRACCION_GOOGLE : EXTRACCION_GROQ;
+  PROVEEDOR_LLM === 'google' ? EXTRACCION_GOOGLE : [...EXTRACCION_GROQ, ...EXTRACCION_GOOGLE];
 
 /** Cadena de la respuesta libre acotada (consulta de negocio / pregunta de tipo). */
 export const MODELOS_CONSULTA: readonly string[] =
-  PROVEEDOR_LLM === 'google' ? CONSULTA_GOOGLE : CONSULTA_GROQ;
+  PROVEEDOR_LLM === 'google' ? CONSULTA_GOOGLE : [...CONSULTA_GROQ, ...CONSULTA_GOOGLE];
 
 /**
  * Límite de tokens por día (TPD) del free-tier de Groq, POR MODELO. Cada modelo
