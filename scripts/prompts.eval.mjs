@@ -228,6 +228,24 @@ const CASOS = [
     pedidoActivo: borrador({ cantidad_crema: 0 }),
     espera: { cantidad_crema: 0 },
   },
+  {
+    // La cara OPUESTA de los tres casos de arriba, y el motivo de que existan:
+    // la lista de unidades no soportadas es cerrada (peso y porción servida), y
+    // el modelo NO tiene que extenderla por analogía. "Palito" es la FORMA del
+    // producto = la unidad que se vende. En la corrida 35012068144 (pasada
+    // Gemini) "20 palitos de crema" se leyó como unidad no soportada y las 20
+    // unidades se perdieron enteras, dejando al bot en loop pidiendo la cantidad.
+    nombre: 'cantidad: "palitos" es formato, no unidad no soportada',
+    mensaje: 'hola, quiero 20 palitos de crema, paso a retirar y pago en efectivo',
+    espera: { cantidad_crema: 20, cantidad_agua: 0, cantidad_sin_tipo: 0, metodo_pago: 'efectivo' },
+  },
+  {
+    // Ídem sobre un borrador (prompt de modificación, la otra rama del prompt).
+    nombre: 'cantidad: "paletas" sobre borrador suma como unidades',
+    mensaje: 'sumale 10 paletas de agua',
+    pedidoActivo: borrador({ cantidad_agua: 30 }),
+    espera: { cantidad_agua: 40 },
+  },
 
   // ---- PEDIDO EN ARMADO EN PARTES (multiturno) ----
   // Regresión real: el cliente daba la cantidad en un mensaje y el pago en otro.
