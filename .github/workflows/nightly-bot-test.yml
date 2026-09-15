@@ -84,7 +84,8 @@ jobs:
       GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
       BOT_TEST_MODE: '1'
       # 31s por turno = el TPM REAL del primario (8000 tokens/min segun el header
-      # x-ratelimit-limit-tokens, ~4093 por extraccion). Los 6000 anteriores iban a
+      # x-ratelimit-limit-tokens, ~3459 por extraccion con reasoningEffort=low).
+      # Los 6000 anteriores iban a
       # 5x el TPM: el exceso lo absorbia la cadena de fallback, o sea que la suite
       # medía modelos distintos segun el minuto y un 429 transitorio podia caer en
       # el ultimo eslabon. Ver la corrida 34928105031.

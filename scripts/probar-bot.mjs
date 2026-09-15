@@ -18,8 +18,8 @@
 //   PROBAR_URL=http://localhost:3000   base del server
 //   PROBAR_FILTER=cancelar             corre solo escenarios cuyo nombre matchea
 //   PROBAR_DELAY_MS=31000              pausa entre turnos. El default respeta el TPM
-//                                      del primario (8000 TPM medido / ~4093 tokens
-//                                      por turno = 1 llamada cada 31s). Bajalo para
+//                                      del primario (8000 TPM medido / ~3459 tokens
+//                                      por turno, con margen). Bajalo para
 //                                      corridas filtradas; 0 en Dev Tier.
 //   PROBAR_PREFIX=54000                prefijo de los teléfonos de test (debe
 //                                      coincidir con BOT_TEST_PREFIX del server)
@@ -51,17 +51,22 @@ const BASE_URL = process.env.PROBAR_URL || 'http://localhost:3000';
 const FILTER = process.env.PROBAR_FILTER || '';
 // Pausa entre turnos. El default sale del TPM REAL del primario, no de una
 // corazonada: Groq devuelve x-ratelimit-limit-tokens=8000 (medido 2026-09-15) y
-// una extracción cuesta ~4093 tokens (3202 de prompt + 891 de salida, medidos),
-// o sea que entra UNA llamada cada ~31s. El 15000 anterior iba al doble del TPM
-// y el 6000 del CI a 5×: ese exceso lo absorbía la cadena de fallback, y así es
-// como un 429 transitorio terminaba cayendo en el modelo muerto de la corrida
-// 34928105031. Para una corrida filtrada de 1-2 escenarios se puede bajar sin
-// riesgo (son pocas llamadas); el default protege la corrida completa.
+// una extracción cuesta ~3459 tokens (3202 de prompt + ~257 de salida, medidos
+// con reasoningEffort=low), o sea que entra UNA llamada cada ~26s.
+//
+// Se deja en 31s, con margen sobre esos 26: las consultas de negocio agregan
+// llamadas que esta cuenta no ve, y quedarse corto es exactamente lo que rompió
+// la corrida 34928105031 — el 15000 viejo iba al doble del TPM y el 6000 del CI
+// a 5×, y ese exceso lo absorbía la cadena de fallback, así que un 429
+// transitorio terminaba cayendo en el último eslabón (que estaba dado de baja).
+//
+// Para una corrida filtrada de 1-2 escenarios se puede bajar sin riesgo (son
+// pocas llamadas); el default protege la corrida completa.
 const DELAY_MS = Math.max(0, parseInt(process.env.PROBAR_DELAY_MS || '31000', 10));
 
-// Costo medido de una extracción (tokens de entrada + salida). Solo alimenta la
-// estimación que se imprime al arrancar.
-const TOKENS_POR_TURNO = 4093;
+// Costo medido de una extracción (entrada + salida), con reasoningEffort=low.
+// Solo alimenta la estimación que se imprime al arrancar.
+const TOKENS_POR_TURNO = 3459;
 const PREFIX = process.env.PROBAR_PREFIX || '54000';
 const MAX_TURNOS = Math.max(1, parseInt(process.env.PROBAR_MAX_TURNOS || '12', 10));
 // El cliente-agente NO es el sistema bajo prueba: solo improvisa mensajes de

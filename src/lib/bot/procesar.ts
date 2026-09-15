@@ -2215,6 +2215,22 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         prompt: `Conversación reciente (el último turno del bot da contexto al mensaje del cliente):\n${historialParaIA}`,
         schema: PedidoIASchema,
         temperature: 0,
+        // ESFUERZO DE RAZONAMIENTO BAJO. gpt-oss-20b es un modelo de razonamiento
+        // y por defecto gasta ~85% de los tokens de salida en el bloque de
+        // reasoning — para una extracción con `temperature: 0`, schema cerrado y
+        // un prompt que ya enumera las reglas caso por caso, ese razonamiento
+        // largo no aporta: MEDIDO sobre los 6 caminos difíciles (delta, cantidad
+        // pelada, kilos, mixto, sin-tipo, off-topic) da −62% de tokens de salida
+        // y MÁS aciertos, no menos (6/6 vs 5/6: con el default, "que sean 2 kilos"
+        // fallaba la validación del schema tras agotar los reintentos).
+        //
+        // 'low' es el mínimo que acepta Groq para este modelo: 'none' existe para
+        // otros (el cliente-agente del harness lo usa) pero acá la API rechaza el
+        // request con "reasoning_effort must be one of low, medium, or high".
+        //
+        // `providerOptions` va namespaceado por proveedor, así que los modelos
+        // Gemini de la cola de la cadena simplemente lo ignoran.
+        providerOptions: { groq: { reasoningEffort: 'low' } },
       });
 
       // Telemetría de tokens (fail-open, no bloqueante): alimenta la página de
