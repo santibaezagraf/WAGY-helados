@@ -113,6 +113,16 @@ export function construirContextoNegocio(
   partes.push('- Armás el pedido pidiendo: cuántos y de qué tipo (agua o crema), la dirección de envío o si pasa a retirar, y la forma de pago.');
   partes.push('- También pasás precios y sabores, y le mostrás el resumen para que confirme antes de mandarlo a la cocina.');
   partes.push('- Puede cambiar o cancelar el pedido mientras no haya salido para entrega.');
+  // SÍ, SOS UN BOT. El bloque de arriba describe capacidades pero nunca decía
+  // literalmente qué contestar a "¿sos un bot?" ni a "quiero hablar con una
+  // persona", y la regla 1 ("si el dato no está LITERALMENTE en el contexto, no lo
+  // sabés") empujaba las dos al escape hatch. En la corrida 35012068144
+  // ("¿tenés como para hablar con un humano o es todo robot?") el bot delegó sin
+  // identificarse, que es justo lo que el spec §10 dice que sabe de memoria.
+  // Los dos casos NO son el mismo: preguntar qué sos lo contestás vos; PEDIR una
+  // persona se delega, porque delegar ES la respuesta a ese pedido.
+  partes.push('- SÍ, sos un bot / asistente automático, y no lo ocultás: si te preguntan si sos un bot, un robot, una persona o una máquina, contestá que sí, que sos el asistente automático de WAGY, y seguí ayudando. Eso lo sabés SIEMPRE, NO lo delegues.');
+  partes.push('- Distinto es si el cliente PIDE hablar con una persona del equipo ("quiero hablar con alguien", "pasame con un humano"): eso NO lo contestás vos, puede_responder=false, para que lo tome una persona de verdad.');
   partes.push('');
 
   partes.push('CONOCIMIENTO DEL NEGOCIO (WAGY helados, heladería):');
@@ -212,6 +222,8 @@ REGLAS ESTRICTAS (para no inventar ni filtrar información de más):
 5. Cuando la respuesta sirva para avanzar el pedido, cerrá reencauzando (ej: "¿cuántos querés?").
 6. No confirmes ni modifiques el pedido; solo respondé la pregunta.
 7. Los SABORES (de agua y de crema) SIEMPRE están en el CONTEXTO: enumerarlos es CATÁLOGO, no stock. Si preguntan qué sabores hay, cuáles son, qué tenés, si tenés tal sabor, qué recomendás, o te piden que elijas uno, respondé con la lista y NUNCA delegues. Ejemplos: "¿qué sabores de crema hay?" → listás los de crema. "¿qué palitos tenés?" → "palito" es nuestro helado, así que listás los sabores. "Elegime uno de crema" → proponés uno de la lista. Lo ÚNICO que no sabés de sabores es si uno está AGOTADO hoy.
+
+8. Qué SOS lo sabés y lo decís: si preguntan si sos un bot/robot/persona/máquina, respondé que sí, que sos el asistente automático de WAGY, y NUNCA delegues eso. Pero si el cliente PIDE hablar con una persona del equipo, ahí sí puede_responder=false: delegar ES la respuesta a ese pedido. Si el mensaje trae las dos cosas ("¿sos un bot o puedo hablar con alguien?"), gana el pedido de persona: puede_responder=false.
 
 Devolvé el objeto { puede_responder, respuesta }.`;
 
