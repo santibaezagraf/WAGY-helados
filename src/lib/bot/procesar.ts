@@ -1247,6 +1247,64 @@ export function traeDatosDePedido(pedido: PedidoIA): boolean {
   return false;
 }
 
+// Números escritos con letras, para que "veinte de crema" corrobore igual que "20".
+const NUMEROS_ESCRITOS =
+  /\b(un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|mil|docena|docenas)\b/;
+
+// Pistas textuales de método de pago, incluidos los sinónimos que el prompt mapea.
+const PISTAS_PAGO =
+  /\b(efectivo|cash|billete|billetes|plata|transferencia|transferir|transfiero|transferi|transfer|mp|mercado\s*pago|alias|cbu|debito|credito|tarjeta)\b/;
+
+/**
+ * ¿El TEXTO CRUDO respalda los datos que el modelo dice haber extraído?
+ *
+ * Contrapeso de [[traeDatosDePedido]], que a propósito mira solo el output del
+ * modelo. Ese criterio es el correcto para un mensaje que el modelo clasificó
+ * como pedido, pero es demasiado crédulo para SACAR un mensaje de la categoría
+ * "consulta pura": ahí un solo campo alucinado alcanza para reclasificarlo a
+ * `datos_pedido`, y el camino mixto NO corta el flujo — la consulta se responde
+ * y encima sale una segunda burbuja de armado que la contradice.
+ *
+ * Caso real (informe nightly 35012068144, pasada Gemini): a la pregunta pura
+ * "¿Cuántos son el mínimo?" el modelo le colgó una cantidad inexistente, y el
+ * cliente recibió "Esa la dejo para alguien del equipo 🙏" e inmediatamente
+ * "Ahí no te sigo 😅 Pero el pedido te lo armo ya. Necesito: …".
+ *
+ * La corroboración es POR SEÑAL (la cantidad pide un número, el pago pide una
+ * palabra de pago, …) y deliberadamente LAXA: un falso negativo acá descarta un
+ * dato que el cliente sí dio —el bug que `traeDatosDePedido` vino a arreglar—,
+ * así que alcanza con que una sola de las señales emitidas tenga respaldo.
+ *
+ * Pura y exportada para test.
+ */
+export function datosCorroboradosEnTexto(pedido: PedidoIA, texto: string): boolean {
+  const n = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const hayNumero = /\d/.test(n) || NUMEROS_ESCRITOS.test(n);
+
+  const hayCantidad =
+    pedido.cantidad_agua_operacion !== 'mantener' ||
+    pedido.cantidad_crema_operacion !== 'mantener' ||
+    (pedido.cantidad_sin_tipo ?? 0) > 0;
+  if (hayCantidad && hayNumero) return true;
+
+  if (normalizarMetodoPago(pedido.metodo_pago) !== null && PISTAS_PAGO.test(n)) return true;
+
+  // Una dirección real trae altura; el sentinela de retiro trae el verbo.
+  if (pedido.direccion !== null && (hayNumero || mencionaRetiro(texto))) return true;
+
+  const hayObs =
+    pedido.obs_agua_operacion !== 'mantener' ||
+    pedido.obs_crema_operacion !== 'mantener' ||
+    pedido.obs_general_operacion !== 'mantener';
+  if (hayObs) {
+    if (mencionaTipoHelado(texto)) return true;
+    const sinTildes = (t: string) => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if ([...SABORES.agua, ...SABORES.crema].some((sabor) => n.includes(sinTildes(sabor)))) return true;
+  }
+
+  return false;
+}
+
 // ─── La pregunta que el propio cambio ya contesta ────────────────────────────
 //
 // Caso real de la corrida 34900965360: con el pedido ya confirmado, "Ah no, me
@@ -1637,6 +1695,7 @@ export function buildSystemPrompt(
         * SIN TIPO ("cantidad_sin_tipo"): si el mensaje da una cantidad, el pedido tiene agua=0 Y crema=0 y no dice "de agua" ni "de crema" ("50 helados de frutilla"), NO adivines (el sabor NO define el tipo): las dos cantidades en "mantener", el número en "cantidad_sin_tipo" y el sabor en "obs_general". Si hay EXACTAMENTE UN tipo con cantidad > 0, tampoco: ese número va a ESE tipo (ver NÚMERO PELADO arriba), cantidad_sin_tipo=0. PERO si los DOS tipos tienen cantidad > 0 y el cliente da un número pelado ("mejor que sean 30"), NO adivines a cuál se refiere: las dos cantidades en "mantener" y el número en "cantidad_sin_tipo" (el sistema le pregunta cuál). Si la unidad no se vende (kilos/potes/porciones/bolas), cantidad_sin_tipo=0.
         * Si el último turno del bot preguntó el tipo y el cliente lo responde ("de agua", "50 de crema"), poné en ese tipo la cantidad del mensaje o, si no la repite, la que preguntó el bot, con "reemplazar", y mové obs_general al slot de ese tipo ("agregar" + obs_general "limpiar").
         POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en "mantener" (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede sin definir.
+        OJO — FORMATO NO ES UNIDAD NO SOPORTADA: "palito", "paleta", "bombón", "helado" y sus plurales son la FORMA del producto, o sea la unidad que SÍ vendemos. La lista de arriba es CERRADA: solo el PESO (kilo/gramo) y la PORCIÓN SERVIDA (porción/bola/pote/cucurucho/copa) dejan la cantidad sin definir. NO la extiendas por analogía. Ej: "20 palitos de crema" = cantidad_crema 20 "reemplazar", exactamente igual que "20 de crema"; "sumale 10 paletas de agua" = cantidad_agua sumar 10.
 
       IMPORTANTE: Devolvé TODOS los campos del schema. "intencion" es una sola opción del enum, no un booleano.
     `;
@@ -1662,7 +1721,7 @@ export function buildSystemPrompt(
     - "direccion": ÚNICAMENTE nombre de calle y número (Ej: "Mitre 951"). Si el cliente solo menciona un departamento (ej: "depto 6"), un conjunto o una torre, PERO NO menciona la calle, pon null porque no es una dirección válida, eso corresponde a la aclaracion. Si el cliente dice que pasa a RETIRAR / lo pasa a buscar / retira en el local (cualquier conjugación: "retiro", "paso a retirar", "lo busco"), poné direccion="retira" (sentinela). Si NO menciona ni dirección ni retiro, pon null.
     - "aclaracion": Detalles extra de la dirección física (color de la casa, pisos, entre calles, timbre, departamento). Ejemplos: "la casa rosada de 2 pisos", "timbre 2B", "donde el porton gris" y asi. Si no se especifica, pon null.
     - "aclaracion_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay aclaración previa que combinar).
-    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10). POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en 0 (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede en 0.
+    - "cantidad_agua" y "cantidad_crema": Cantidad en números, por defecto 0. Si el cliente da un desglose por sabores dentro de UN tipo (ej. "10 helados de agua: 4 de frutilla y 6 de menta"), SUMÁ esos números y devolvé el total (10). POR UNIDAD DE AGUA/CREMA, NUNCA POR PESO NI POR PORCIÓN SERVIDA: los helados se venden por unidad (de agua o de crema), no por kilo/gramo ni como porción/bola/pote/cucurucho/copa servida. Si el cliente expresa la cantidad en kilos/gramos ("2 kilos de crema", "medio kilo de agua") o como porciones/bolas servidas ("una porción con 2 bolas", "un pote de 3 bolas", "2 cucuruchos"), NO conviertas ni inventes un número de unidades: dejá esa cantidad en 0 (el sistema vuelve a pedir las unidades de agua/crema). Un sabor mencionado ("de chocolate") SÍ va a su slot de observaciones aunque la cantidad quede en 0. OJO — FORMATO NO ES UNIDAD NO SOPORTADA: "palito", "paleta", "bombón", "helado" y sus plurales son la FORMA del producto, o sea la unidad que SÍ vendemos. Esa lista de unidades no soportadas es CERRADA (solo peso y porción servida); NO la extiendas por analogía. Ej: "quiero 20 palitos de crema" = cantidad_crema 20, NO 0; "30 paletas de agua" = cantidad_agua 30.
     - "cantidad_agua_operacion" y "cantidad_crema_operacion": SIEMPRE "reemplazar" en este contexto (es un pedido nuevo desde cero, no hay valor previo que sumar/restar/mantener).
     - "cantidad_sin_tipo": si el cliente dice CUÁNTOS quiere pero NO si son de agua o de crema (ej: "quiero 50 helados de frutilla", "mandame 20 helados"), poné ese número acá y dejá cantidad_agua=0 y cantidad_crema=0. NUNCA deduzcas el tipo por el sabor: un mismo sabor puede existir en los dos tipos, y el sistema le va a preguntar al cliente cuál quiere. El sabor mencionado va igual a "obs_general". Si el cliente SÍ dice el tipo, cantidad_sin_tipo=0. Tampoco lo uses para cantidades en kilos/gramos/potes/porciones/bolas/cucuruchos (esas quedan en 0, sin señal).
     - SABORES (campos "obs_agua" / "obs_crema" / "obs_general"): poné los sabores en el slot del tipo, SIN el prefijo "los de agua/crema". NO confundas el tipo de helado con un sabor.
@@ -2490,8 +2549,21 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // consulta (precios / negocio) CORTAN el flujo con return antes de aplicar y
     // persistir nada, así que sin esta señal un "transferencia. y hasta qué hora
     // entregan?" perdía el pago en silencio (hallazgo #2 del informe 32740622175).
-    const traeDatos = traeDatosDePedido(pedido);
-    if (traeDatos && (pedido.intencion === 'consulta_negocio' || pedido.intencion === 'consultar_precios')) {
+    //
+    // Para SACAR un mensaje de la categoría "consulta pura" no alcanza con que el
+    // modelo haya emitido un campo: exigimos que el TEXTO CRUDO lo respalde. Sin
+    // eso, un solo campo alucinado sobre una pregunta pura la manda al camino
+    // mixto (que NO corta el flujo) y el cliente recibe la respuesta a su consulta
+    // MÁS una burbuja de armado que la contradice.
+    const esConsultaPura =
+      pedido.intencion === 'consulta_negocio' || pedido.intencion === 'consultar_precios';
+    const traeDatosCrudo = traeDatosDePedido(pedido);
+    const traeDatos =
+      traeDatosCrudo && (!esConsultaPura || datosCorroboradosEnTexto(pedido, textoBatch));
+    if (traeDatosCrudo && !traeDatos) {
+      console.log(`🔍 El modelo extrajo datos sobre una "${pedido.intencion}" pero el texto no los respalda. La trato como consulta pura.`);
+    }
+    if (traeDatos && esConsultaPura) {
       // El prompt ya pide `datos_pedido` en este caso, pero es una regla soft. Esta
       // es la red determinista equivalente a las que ya existen para `saludo`+datos
       // y `modificar_sin_datos`+cambios. La pregunta NO se pierde: el bloque

@@ -104,7 +104,14 @@ async function main() {
   const clientePorDefecto = extraerModeloCliente(fuenteHarness);
   if (clientePorDefecto) delHarness.add(clientePorDefecto);
   else console.warn(`⚠️  No se pudo leer el default de PROBAR_MODELO_CLIENTE en ${RUTA_HARNESS}.`);
-  if (process.env.PROBAR_MODELO_CLIENTE) delHarness.add(process.env.PROBAR_MODELO_CLIENTE);
+  // Cualquier `PROBAR_MODELO_CLIENTE*` del entorno: el nightly declara uno POR
+  // PASADA (`..._GROQ` / `..._GEMINI`, para no compartir cubeta TPD entre las dos)
+  // y los exporta recién dentro del loop, o sea DESPUÉS de este chequeo. Sin el
+  // comodín, el id de la pasada gemini no se verificaría — justo el modo de falla
+  // que este script existe para evitar.
+  for (const [clave, valor] of Object.entries(process.env)) {
+    if (clave.startsWith('PROBAR_MODELO_CLIENTE') && valor) delHarness.add(valor);
+  }
 
   const todos = [...new Set([...declarados, ...delHarness])].sort();
   const porProveedor = { groq: [], google: [] };

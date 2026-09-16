@@ -100,7 +100,48 @@ jobs:
       # (llama-3.3-70b-versatile fue dado de baja en Groq; se usa un modelo de la
       # cadena MODELOS_EXTRACCION/MODELOS_CONSULTA del bot, confirmado vigente
       # contra GET /openai/v1/models el 2026-08-22.)
-      PROBAR_MODELO_CLIENTE: 'qwen/qwen3.8-27b'
+      #
+      # UNO POR PASADA: con `modelo=todos` el job corre las dos suites DOS veces
+      # (groq y gemini) en la misma corrida y el mismo día. Con un solo id las dos
+      # pasadas compartían la cubeta TPD del cliente-agente, y en la corrida
+      # 35012068144 la segunda (gemini) se la encontró casi agotada —`Used
+      # 199256/200000`— cortando 2 de los 5 exploratorios a mitad de conversación.
+      # No es un bug del bot: es presupuesto del harness. Con un id por pasada
+      # cada una arranca con su propia cubeta de 200k y no hay que recortar turnos.
+      #
+      # Los dos son de Groq, y NO por comodidad: el requisito que manda no es la
+      # cuota sino que el cliente-agente **cierre los escenarios**. El harness los
+      # termina cuando el modelo responde exactamente "FIN"; si no lo emite, cada
+      # exploratorio corre hasta PROBAR_MAX_TURNOS y el transcript deja de ser
+      # representativo (es lo que pasó en la corrida 32609751045). Medido contra la
+      # API el 2026-09-16, sobre el escenario `pedido-mas-pregunta` ya cumplido:
+      #
+      #   qwen/qwen3.8-27b                FIN 5/5   ✅
+      #   openai/gpt-oss-120b (low)       FIN 3/3   ✅
+      #   openai/gpt-oss-120b (medium)    FIN 2/3
+      #   gemini-3-flash-preview          FIN 1/3   ❌  (y RPD 20)
+      #   gemini-3.1-flash-lite-preview   FIN 0/5   ❌  (sigue conversando siempre)
+      #
+      # Por eso NO hay un modelo de Google acá, aunque tuviera cubeta más limpia.
+      # `antigravity-preview-*` está descartado de raíz: la API responde "This model
+      # only supports Interactions API" y "JSON mode is not enabled". Groq tampoco
+      # tiene nada fuera de la cadena que sirva de cliente rioplatense (allam-2-7b
+      # es árabe, orpheus es TTS, groq/compound es un sistema agéntico).
+      #
+      # Sobre el riesgo de que 120b esté gastado cuando arranca la pasada gemini:
+      # es real (el TPD es de la CUENTA y el bot de la pasada groq cascadea a 120b
+      # si se le agota 20b), pero está acotado porque el nightly corre SÁBADO, con
+      # el local cerrado y sin tráfico de producción que pise el presupuesto — esa
+      # fue justamente la razón de moverlo a sábado. Y el orden importa: si algo se
+      # degrada, que sea el cliente simulado y no el bot bajo prueba, que es lo que
+      # la suite mide. qwen queda en la pasada groq por ser el ÚLTIMO eslabón de la
+      # cadena (el bot solo lo toca si los dos anteriores agotaron cuota).
+      #
+      # ⚠️ 120b NO acepta reasoningEffort 'none' (400: "`reasoning_effort` must be
+      # one of `low`, `medium`, ..."). Lo resuelve `esfuerzoRazonamiento` en
+      # probar-bot.mjs; sin eso esta pasada moría entera en el preflight.
+      PROBAR_MODELO_CLIENTE_GROQ: 'qwen/qwen3.8-27b'
+      PROBAR_MODELO_CLIENTE_GEMINI: 'openai/gpt-oss-120b'
     steps:
       - uses: actions/checkout@v4
 
@@ -172,9 +213,12 @@ jobs:
                 continue
               fi
               export LLM_PROVIDER=google
+              export PROBAR_MODELO_CLIENTE="$PROBAR_MODELO_CLIENTE_GEMINI"
             else
               unset LLM_PROVIDER
+              export PROBAR_MODELO_CLIENTE="$PROBAR_MODELO_CLIENTE_GROQ"
             fi
+            echo "Cliente-agente de los exploratorios: $PROBAR_MODELO_CLIENTE"
 
             npm run dev > "devserver-${PROVEEDOR}.log" 2>&1 &
             DEV_PID=$!

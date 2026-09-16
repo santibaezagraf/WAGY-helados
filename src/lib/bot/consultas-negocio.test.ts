@@ -48,6 +48,19 @@ describe('construirContextoNegocio', () => {
     expect(ctx).toMatch(/tomás pedidos de helado/);
   });
 
+  it('dice explícitamente que es un bot, y que PEDIR una persona sí se delega', () => {
+    // Informe 35012068144: ante "¿tenés como para hablar con un humano o es todo
+    // robot?" el bot delegó sin identificarse. El bloque describía capacidades
+    // pero no decía LITERALMENTE qué contestar, y la regla 1 del prompt ("si no
+    // está en el contexto, no lo sabés") empujaba al escape hatch.
+    const ctx = construirContextoNegocio(null, null);
+    expect(ctx).toMatch(/SÍ, sos un bot/);
+    // Los dos casos son distintos y el contexto los tiene que separar: contestar
+    // qué sos NO es lo mismo que el pedido explícito de una persona.
+    expect(ctx).toMatch(/PIDE hablar con una persona/);
+    expect(ctx).toMatch(/puede_responder=false/);
+  });
+
   it('incluye el bloque "LO QUE NO SABÉS" (escape hatch de delegación)', () => {
     const ctx = construirContextoNegocio(null, null);
     expect(ctx).toMatch(/LO QUE NO SABÉS/);

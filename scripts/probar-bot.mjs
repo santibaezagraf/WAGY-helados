@@ -25,6 +25,9 @@
 //                                      coincidir con BOT_TEST_PREFIX del server)
 //   PROBAR_MAX_TURNOS=12               tope de turnos por escenario (red de seguridad)
 //   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo Groq del cliente-agente (exploratorios).
+//                                      Tiene que ser de Groq: los modelos de Gemini que se
+//                                      probaron NO cierran los escenarios (no emiten FIN),
+//                                      ver la nota de esfuerzoRazonamiento más abajo.
 //                                      ⚠️ CONVIENE PISARLO. El default coincide con el
 //                                      PRIMARIO del bot, así que el cliente simulado y el
 //                                      bot bajo prueba comparten la misma cubeta TPD de
@@ -76,6 +79,13 @@ const MAX_TURNOS = Math.max(1, parseInt(process.env.PROBAR_MAX_TURNOS || '12', 1
 // queda sin tokens a mitad de camino. Apuntándolo a otro modelo de la cadena, el
 // primario queda entero para el bot y el presupuesto del día se duplica.
 //
+// La otra colisión de cubeta no se ve desde acá: cuando el nightly corre con
+// `modelo=todos`, el MISMO día ejecuta dos pasadas (groq y gemini). El workflow
+// le pasa un id DISTINTO a cada una (PROBAR_MODELO_CLIENTE_GROQ / _GEMINI) para
+// que no se repartan los 200k del cliente-agente entre las dos — en la corrida
+// 35012068144 la segunda pasada arrancó con la cubeta ya casi vacía y cortó 2 de
+// los 5 exploratorios a mitad de conversación.
+//
 // ⚠️ Acoplamiento a mano: este id no se puede importar de modelos.ts (es TS y
 // esto es .mjs suelto), así que si algún día la cadena cambia y este modelo pasa
 // a ser el primario, la colisión vuelve en silencio. El chequeo de abajo avisa.
@@ -88,6 +98,23 @@ const ENDPOINT = `${BASE_URL}/api/dev/simular-conversacion`;
 // (por eso el npm script corre con --env-file=.env.local). Es lazy: si solo
 // corrés guionados, nunca se usa.
 const groq = createGroq();
+
+/**
+ * Cuánto esfuerzo de razonamiento pedirle al cliente-agente. NO es un parámetro
+ * de calidad: es de COMPATIBILIDAD. `gpt-oss-*` RECHAZA 'none' con un 400
+ * ("`reasoning_effort` must be one of `low`, `medium`, ..."), así que mandarle el
+ * mismo valor que a qwen tumbaba TODAS sus llamadas —el preflight incluido—.
+ * Medido contra la API el 2026-09-16.
+ *
+ * El mínimo que acepta cada familia: gpt-oss → 'low', qwen3.x → 'none'. Con 'low',
+ * gpt-oss-120b cierra los escenarios bien (FIN 3/3 en la prueba); con 'medium'
+ * empieza a alargar la charla (2/3).
+ */
+const esfuerzoRazonamiento = (id) => (id.startsWith('openai/gpt-oss') ? 'low' : 'none');
+
+const opcionesRazonamiento = () => ({
+  groq: { reasoningFormat: 'hidden', reasoningEffort: esfuerzoRazonamiento(MODELO_CLIENTE) },
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -311,12 +338,13 @@ Reglas de salida:
     // de razonamiento gastaba la salida entera en el bloque <think> y el mensaje
     // real salía cortado a mitad de frase (corrida 32609751045).
     maxOutputTokens: 300,
-    // CAUSA RAÍZ de la fuga de <think>: MODELO_CLIENTE es un modelo de
+    // CAUSA RAÍZ de la fuga de <think>: el MODELO_CLIENTE de Groq es de
     // razonamiento híbrido. `hidden` le pide a Groq que no devuelva el bloque y
     // `none` que directamente no razone (es un cliente improvisando un mensaje
     // corto, no lo necesita). `limpiarMensajeCliente` queda igual como red,
-    // porque esto depende de que el modelo del día soporte las dos opciones.
-    providerOptions: { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } },
+    // porque esto depende de que el modelo del día soporte las dos opciones —y
+    // porque con un modelo de Google estas opciones no aplican.
+    providerOptions: opcionesRazonamiento(),
   });
   // Se limpia SIEMPRE antes de que el llamador compare contra FIN o se lo mande
   // al bot: el crudo puede traer razonamiento pegado adelante.
@@ -362,7 +390,7 @@ async function preflightModeloCliente() {
       model: groq(MODELO_CLIENTE),
       prompt: 'Respondé solo: ok',
       maxOutputTokens: 16,
-      providerOptions: { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } },
+      providerOptions: opcionesRazonamiento(),
     });
     console.log('OK');
   } catch (error) {
@@ -370,7 +398,9 @@ async function preflightModeloCliente() {
     throw new Error(
       `El modelo del cliente-agente "${MODELO_CLIENTE}" no respondió: ${String(error.message || error)}\n` +
       '   Si Groq lo dio de baja, elegí otro vigente (GET /openai/v1/models) y actualizá\n' +
-      '   PROBAR_MODELO_CLIENTE (local) y .github/workflows/nightly-bot-test.yml (CI).'
+      '   PROBAR_MODELO_CLIENTE (local) y .github/workflows/nightly-bot-test.yml (CI).\n' +
+      '   Si el error habla de `reasoning_effort`, el modelo no acepta el valor que le manda\n' +
+      '   `esfuerzoRazonamiento` — agregá su familia ahí en vez de cambiarlo para todos.'
     );
   }
 }
