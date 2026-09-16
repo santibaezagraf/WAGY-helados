@@ -24,10 +24,10 @@
 //   PROBAR_PREFIX=54000                prefijo de los teléfonos de test (debe
 //                                      coincidir con BOT_TEST_PREFIX del server)
 //   PROBAR_MAX_TURNOS=12               tope de turnos por escenario (red de seguridad)
-//   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo del cliente-agente (exploratorios).
-//                                      Acepta Groq o Google: el SDK se elige por el id
-//                                      (prefijo `gemini` → Google), misma regla que
-//                                      `proveedorDeModelo` de modelos.ts.
+//   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo Groq del cliente-agente (exploratorios).
+//                                      Tiene que ser de Groq: los modelos de Gemini que se
+//                                      probaron NO cierran los escenarios (no emiten FIN),
+//                                      ver la nota de esfuerzoRazonamiento más abajo.
 //                                      ⚠️ CONVIENE PISARLO. El default coincide con el
 //                                      PRIMARIO del bot, así que el cliente simulado y el
 //                                      bot bajo prueba comparten la misma cubeta TPD de
@@ -47,7 +47,6 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { generateText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { ESCENARIOS } from './escenarios-bot.mjs';
 import { limpiarMensajeCliente, validarMensajeCliente } from './cliente-agente.mjs';
 
@@ -95,28 +94,27 @@ const SOLO_GUIONADOS = process.env.PROBAR_SOLO_GUIONADOS === '1';
 const SOLO_EXPLORATORIOS = process.env.PROBAR_SOLO_EXPLORATORIOS === '1';
 const ENDPOINT = `${BASE_URL}/api/dev/simular-conversacion`;
 
-// Cliente-agente para los escenarios exploratorios. Los factories leen
-// GROQ_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY (por eso el npm script corre con
-// --env-file=.env.local). Son lazy: si solo corrés guionados, nunca se usan.
+// Cliente-agente para los escenarios exploratorios. createGroq() lee GROQ_API_KEY
+// (por eso el npm script corre con --env-file=.env.local). Es lazy: si solo
+// corrés guionados, nunca se usa.
 const groq = createGroq();
-const google = createGoogleGenerativeAI();
 
 /**
- * El cliente-agente ya NO es siempre de Groq: la pasada `gemini` del nightly lo
- * corre en un modelo de Google, para no depender de la cuota de Groq —que para
- * cuando esa pasada arranca puede haber quedado gastada por producción y por la
- * pasada anterior— ni competirle al bot bajo prueba. Se elige el SDK POR ID, con
- * la MISMA regla que `proveedorDeModelo` de modelos.ts y `proveedorDe` de
- * verificar-modelos.mjs (no se pueden importar de acá: son TS / otro script).
+ * Cuánto esfuerzo de razonamiento pedirle al cliente-agente. NO es un parámetro
+ * de calidad: es de COMPATIBILIDAD. `gpt-oss-*` RECHAZA 'none' con un 400
+ * ("`reasoning_effort` must be one of `low`, `medium`, ..."), así que mandarle el
+ * mismo valor que a qwen tumbaba TODAS sus llamadas —el preflight incluido—.
+ * Medido contra la API el 2026-09-16.
+ *
+ * El mínimo que acepta cada familia: gpt-oss → 'low', qwen3.x → 'none'. Con 'low',
+ * gpt-oss-120b cierra los escenarios bien (FIN 3/3 en la prueba); con 'medium'
+ * empieza a alargar la charla (2/3).
  */
-const esGoogle = (id) => id.startsWith('gemini');
-const modeloCliente = () => (esGoogle(MODELO_CLIENTE) ? google(MODELO_CLIENTE) : groq(MODELO_CLIENTE));
+const esfuerzoRazonamiento = (id) => (id.startsWith('openai/gpt-oss') ? 'low' : 'none');
 
-// Las opciones anti-razonamiento de abajo son de Groq y solo aplican a Groq;
-// mandárselas a Google sería un provider key que ese SDK ignora, pero se omite
-// igual para no dar la impresión de que están haciendo algo.
-const opcionesRazonamiento = () =>
-  esGoogle(MODELO_CLIENTE) ? undefined : { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } };
+const opcionesRazonamiento = () => ({
+  groq: { reasoningFormat: 'hidden', reasoningEffort: esfuerzoRazonamiento(MODELO_CLIENTE) },
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -332,7 +330,7 @@ Reglas de salida:
 - Cuando tu objetivo ya se cumplió, o la charla no tiene más sentido, respondé exactamente: FIN`;
 
   const { text } = await generateText({
-    model: modeloCliente(),
+    model: groq(MODELO_CLIENTE),
     system,
     prompt: `Conversación hasta ahora:\n${historial}\n\nTu próximo mensaje (o FIN):`,
     temperature: 0.7,
@@ -389,7 +387,7 @@ async function preflightModeloCliente() {
   process.stdout.write(`🔎 Preflight del modelo del cliente-agente (${MODELO_CLIENTE})… `);
   try {
     await generateText({
-      model: modeloCliente(),
+      model: groq(MODELO_CLIENTE),
       prompt: 'Respondé solo: ok',
       maxOutputTokens: 16,
       providerOptions: opcionesRazonamiento(),
@@ -398,13 +396,11 @@ async function preflightModeloCliente() {
   } catch (error) {
     console.log('❌');
     throw new Error(
-      `El modelo del cliente-agente "${MODELO_CLIENTE}" (${esGoogle(MODELO_CLIENTE) ? 'google' : 'groq'}) no respondió: ${String(error.message || error)}\n` +
-      `   Si lo dieron de baja, elegí otro vigente (${esGoogle(MODELO_CLIENTE)
-        ? 'GET https://generativelanguage.googleapis.com/v1beta/models'
-        : 'GET https://api.groq.com/openai/v1/models'}) y actualizá\n` +
+      `El modelo del cliente-agente "${MODELO_CLIENTE}" no respondió: ${String(error.message || error)}\n` +
+      '   Si Groq lo dio de baja, elegí otro vigente (GET /openai/v1/models) y actualizá\n' +
       '   PROBAR_MODELO_CLIENTE (local) y .github/workflows/nightly-bot-test.yml (CI).\n' +
-      '   Ojo: no todo id del listado sirve — antigravity-preview-* aparece listado pero\n' +
-      '   responde "This model only supports Interactions API" a generateContent.'
+      '   Si el error habla de `reasoning_effort`, el modelo no acepta el valor que le manda\n' +
+      '   `esfuerzoRazonamiento` — agregá su familia ahí en vez de cambiarlo para todos.'
     );
   }
 }

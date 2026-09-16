@@ -109,32 +109,39 @@ jobs:
       # No es un bug del bot: es presupuesto del harness. Con un id por pasada
       # cada una arranca con su propia cubeta de 200k y no hay que recortar turnos.
       #
-      # La pasada `gemini` corre SEGUNDA, así que su cliente-agente es el que más
-      # expuesto está a encontrarse una cubeta ya gastada. Por eso NO usa un modelo
-      # de la cadena Groq: el TPD es de la CUENTA, no del nightly, así que un día
-      # de producción cargado puede agotar gpt-oss-20b, hacer que el bot de la
-      # pasada groq cascadee a 120b, y drenarlo justo antes de que esta pasada lo
-      # necesite. `gemini-3.1-flash-lite-preview` es un id DISTINTO de
-      # `gemini-3.1-flash-lite` (los límites de Gemini son "per project per model",
-      # o sea cubeta separada) y no está en NINGUNA de las dos cadenas, así que no
-      # le compite ni al bot de esta pasada —que corre la cadena PURA de Google— ni
-      # a nada de Groq. Al ser -lite tiene el RPD alto de esa familia, no el 20 de
-      # los flash. Verificado contra la API real: responde con generateText + system
-      # en ~77 tokens y en rioplatense correcto.
+      # Los dos son de Groq, y NO por comodidad: el requisito que manda no es la
+      # cuota sino que el cliente-agente **cierre los escenarios**. El harness los
+      # termina cuando el modelo responde exactamente "FIN"; si no lo emite, cada
+      # exploratorio corre hasta PROBAR_MAX_TURNOS y el transcript deja de ser
+      # representativo (es lo que pasó en la corrida 32609751045). Medido contra la
+      # API el 2026-09-16, sobre el escenario `pedido-mas-pregunta` ya cumplido:
       #
-      # La pasada `groq` mantiene qwen3.8-27b, el ÚLTIMO eslabón Groq de la cadena:
-      # el bot solo lo toca si los dos anteriores agotaron cuota, o sea la mínima
-      # exposición posible dentro de Groq. Se deja en Groq a propósito, para no
-      # dejar las DOS pasadas dependiendo de Google — si Google se cae, la pasada
-      # groq (donde el sistema bajo prueba no lo usa) tiene que poder correr igual.
+      #   qwen/qwen3.8-27b                FIN 5/5   ✅
+      #   openai/gpt-oss-120b (low)       FIN 3/3   ✅
+      #   openai/gpt-oss-120b (medium)    FIN 2/3
+      #   gemini-3-flash-preview          FIN 1/3   ❌  (y RPD 20)
+      #   gemini-3.1-flash-lite-preview   FIN 0/5   ❌  (sigue conversando siempre)
       #
-      # (Se evaluó `antigravity-preview-*`: NO sirve. La API responde "This model
-      # only supports Interactions API" a generateContent y "JSON mode is not
-      # enabled" a structured output, así que no es usable ni acá ni en la cadena.
-      # Groq no tiene ningún modelo fuera de la cadena que sirva: solo allam-2-7b
-      # (árabe), orpheus (TTS) y groq/compound (sistema agéntico).)
+      # Por eso NO hay un modelo de Google acá, aunque tuviera cubeta más limpia.
+      # `antigravity-preview-*` está descartado de raíz: la API responde "This model
+      # only supports Interactions API" y "JSON mode is not enabled". Groq tampoco
+      # tiene nada fuera de la cadena que sirva de cliente rioplatense (allam-2-7b
+      # es árabe, orpheus es TTS, groq/compound es un sistema agéntico).
+      #
+      # Sobre el riesgo de que 120b esté gastado cuando arranca la pasada gemini:
+      # es real (el TPD es de la CUENTA y el bot de la pasada groq cascadea a 120b
+      # si se le agota 20b), pero está acotado porque el nightly corre SÁBADO, con
+      # el local cerrado y sin tráfico de producción que pise el presupuesto — esa
+      # fue justamente la razón de moverlo a sábado. Y el orden importa: si algo se
+      # degrada, que sea el cliente simulado y no el bot bajo prueba, que es lo que
+      # la suite mide. qwen queda en la pasada groq por ser el ÚLTIMO eslabón de la
+      # cadena (el bot solo lo toca si los dos anteriores agotaron cuota).
+      #
+      # ⚠️ 120b NO acepta reasoningEffort 'none' (400: "`reasoning_effort` must be
+      # one of `low`, `medium`, ..."). Lo resuelve `esfuerzoRazonamiento` en
+      # probar-bot.mjs; sin eso esta pasada moría entera en el preflight.
       PROBAR_MODELO_CLIENTE_GROQ: 'qwen/qwen3.8-27b'
-      PROBAR_MODELO_CLIENTE_GEMINI: 'gemini-3.1-flash-lite-preview'
+      PROBAR_MODELO_CLIENTE_GEMINI: 'openai/gpt-oss-120b'
     steps:
       - uses: actions/checkout@v4
 
