@@ -24,7 +24,10 @@
 //   PROBAR_PREFIX=54000                prefijo de los teléfonos de test (debe
 //                                      coincidir con BOT_TEST_PREFIX del server)
 //   PROBAR_MAX_TURNOS=12               tope de turnos por escenario (red de seguridad)
-//   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo Groq del cliente-agente (exploratorios).
+//   PROBAR_MODELO_CLIENTE=openai/gpt-oss-20b   modelo del cliente-agente (exploratorios).
+//                                      Acepta Groq o Google: el SDK se elige por el id
+//                                      (prefijo `gemini` → Google), misma regla que
+//                                      `proveedorDeModelo` de modelos.ts.
 //                                      ⚠️ CONVIENE PISARLO. El default coincide con el
 //                                      PRIMARIO del bot, así que el cliente simulado y el
 //                                      bot bajo prueba comparten la misma cubeta TPD de
@@ -44,6 +47,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { generateText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { ESCENARIOS } from './escenarios-bot.mjs';
 import { limpiarMensajeCliente, validarMensajeCliente } from './cliente-agente.mjs';
 
@@ -91,10 +95,28 @@ const SOLO_GUIONADOS = process.env.PROBAR_SOLO_GUIONADOS === '1';
 const SOLO_EXPLORATORIOS = process.env.PROBAR_SOLO_EXPLORATORIOS === '1';
 const ENDPOINT = `${BASE_URL}/api/dev/simular-conversacion`;
 
-// Cliente-agente para los escenarios exploratorios. createGroq() lee GROQ_API_KEY
-// (por eso el npm script corre con --env-file=.env.local). Es lazy: si solo
-// corrés guionados, nunca se usa.
+// Cliente-agente para los escenarios exploratorios. Los factories leen
+// GROQ_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY (por eso el npm script corre con
+// --env-file=.env.local). Son lazy: si solo corrés guionados, nunca se usan.
 const groq = createGroq();
+const google = createGoogleGenerativeAI();
+
+/**
+ * El cliente-agente ya NO es siempre de Groq: la pasada `gemini` del nightly lo
+ * corre en un modelo de Google, para no depender de la cuota de Groq —que para
+ * cuando esa pasada arranca puede haber quedado gastada por producción y por la
+ * pasada anterior— ni competirle al bot bajo prueba. Se elige el SDK POR ID, con
+ * la MISMA regla que `proveedorDeModelo` de modelos.ts y `proveedorDe` de
+ * verificar-modelos.mjs (no se pueden importar de acá: son TS / otro script).
+ */
+const esGoogle = (id) => id.startsWith('gemini');
+const modeloCliente = () => (esGoogle(MODELO_CLIENTE) ? google(MODELO_CLIENTE) : groq(MODELO_CLIENTE));
+
+// Las opciones anti-razonamiento de abajo son de Groq y solo aplican a Groq;
+// mandárselas a Google sería un provider key que ese SDK ignora, pero se omite
+// igual para no dar la impresión de que están haciendo algo.
+const opcionesRazonamiento = () =>
+  esGoogle(MODELO_CLIENTE) ? undefined : { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -310,7 +332,7 @@ Reglas de salida:
 - Cuando tu objetivo ya se cumplió, o la charla no tiene más sentido, respondé exactamente: FIN`;
 
   const { text } = await generateText({
-    model: groq(MODELO_CLIENTE),
+    model: modeloCliente(),
     system,
     prompt: `Conversación hasta ahora:\n${historial}\n\nTu próximo mensaje (o FIN):`,
     temperature: 0.7,
@@ -318,12 +340,13 @@ Reglas de salida:
     // de razonamiento gastaba la salida entera en el bloque <think> y el mensaje
     // real salía cortado a mitad de frase (corrida 32609751045).
     maxOutputTokens: 300,
-    // CAUSA RAÍZ de la fuga de <think>: MODELO_CLIENTE es un modelo de
+    // CAUSA RAÍZ de la fuga de <think>: el MODELO_CLIENTE de Groq es de
     // razonamiento híbrido. `hidden` le pide a Groq que no devuelva el bloque y
     // `none` que directamente no razone (es un cliente improvisando un mensaje
     // corto, no lo necesita). `limpiarMensajeCliente` queda igual como red,
-    // porque esto depende de que el modelo del día soporte las dos opciones.
-    providerOptions: { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } },
+    // porque esto depende de que el modelo del día soporte las dos opciones —y
+    // porque con un modelo de Google estas opciones no aplican.
+    providerOptions: opcionesRazonamiento(),
   });
   // Se limpia SIEMPRE antes de que el llamador compare contra FIN o se lo mande
   // al bot: el crudo puede traer razonamiento pegado adelante.
@@ -366,18 +389,22 @@ async function preflightModeloCliente() {
   process.stdout.write(`🔎 Preflight del modelo del cliente-agente (${MODELO_CLIENTE})… `);
   try {
     await generateText({
-      model: groq(MODELO_CLIENTE),
+      model: modeloCliente(),
       prompt: 'Respondé solo: ok',
       maxOutputTokens: 16,
-      providerOptions: { groq: { reasoningFormat: 'hidden', reasoningEffort: 'none' } },
+      providerOptions: opcionesRazonamiento(),
     });
     console.log('OK');
   } catch (error) {
     console.log('❌');
     throw new Error(
-      `El modelo del cliente-agente "${MODELO_CLIENTE}" no respondió: ${String(error.message || error)}\n` +
-      '   Si Groq lo dio de baja, elegí otro vigente (GET /openai/v1/models) y actualizá\n' +
-      '   PROBAR_MODELO_CLIENTE (local) y .github/workflows/nightly-bot-test.yml (CI).'
+      `El modelo del cliente-agente "${MODELO_CLIENTE}" (${esGoogle(MODELO_CLIENTE) ? 'google' : 'groq'}) no respondió: ${String(error.message || error)}\n` +
+      `   Si lo dieron de baja, elegí otro vigente (${esGoogle(MODELO_CLIENTE)
+        ? 'GET https://generativelanguage.googleapis.com/v1beta/models'
+        : 'GET https://api.groq.com/openai/v1/models'}) y actualizá\n` +
+      '   PROBAR_MODELO_CLIENTE (local) y .github/workflows/nightly-bot-test.yml (CI).\n' +
+      '   Ojo: no todo id del listado sirve — antigravity-preview-* aparece listado pero\n' +
+      '   responde "This model only supports Interactions API" a generateContent.'
     );
   }
 }

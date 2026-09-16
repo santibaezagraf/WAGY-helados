@@ -109,13 +109,32 @@ jobs:
       # No es un bug del bot: es presupuesto del harness. Con un id por pasada
       # cada una arranca con su propia cubeta de 200k y no hay que recortar turnos.
       #
-      # La asignación no es arbitraria: en la pasada `gemini` el bot corre 100%
-      # sobre Google (cadena PURA, ver modelos.ts), así que Groq entero queda libre
-      # y el cliente-agente puede usar gpt-oss-120b sin competirle a nadie. En la
-      # pasada `groq` se mantiene qwen3.8-27b, que es el TERCER eslabón de la
-      # cadena: el bot solo lo toca si los dos anteriores agotaron cuota.
+      # La pasada `gemini` corre SEGUNDA, así que su cliente-agente es el que más
+      # expuesto está a encontrarse una cubeta ya gastada. Por eso NO usa un modelo
+      # de la cadena Groq: el TPD es de la CUENTA, no del nightly, así que un día
+      # de producción cargado puede agotar gpt-oss-20b, hacer que el bot de la
+      # pasada groq cascadee a 120b, y drenarlo justo antes de que esta pasada lo
+      # necesite. `gemini-3.1-flash-lite-preview` es un id DISTINTO de
+      # `gemini-3.1-flash-lite` (los límites de Gemini son "per project per model",
+      # o sea cubeta separada) y no está en NINGUNA de las dos cadenas, así que no
+      # le compite ni al bot de esta pasada —que corre la cadena PURA de Google— ni
+      # a nada de Groq. Al ser -lite tiene el RPD alto de esa familia, no el 20 de
+      # los flash. Verificado contra la API real: responde con generateText + system
+      # en ~77 tokens y en rioplatense correcto.
+      #
+      # La pasada `groq` mantiene qwen3.8-27b, el ÚLTIMO eslabón Groq de la cadena:
+      # el bot solo lo toca si los dos anteriores agotaron cuota, o sea la mínima
+      # exposición posible dentro de Groq. Se deja en Groq a propósito, para no
+      # dejar las DOS pasadas dependiendo de Google — si Google se cae, la pasada
+      # groq (donde el sistema bajo prueba no lo usa) tiene que poder correr igual.
+      #
+      # (Se evaluó `antigravity-preview-*`: NO sirve. La API responde "This model
+      # only supports Interactions API" a generateContent y "JSON mode is not
+      # enabled" a structured output, así que no es usable ni acá ni en la cadena.
+      # Groq no tiene ningún modelo fuera de la cadena que sirva: solo allam-2-7b
+      # (árabe), orpheus (TTS) y groq/compound (sistema agéntico).)
       PROBAR_MODELO_CLIENTE_GROQ: 'qwen/qwen3.8-27b'
-      PROBAR_MODELO_CLIENTE_GEMINI: 'openai/gpt-oss-120b'
+      PROBAR_MODELO_CLIENTE_GEMINI: 'gemini-3.1-flash-lite-preview'
     steps:
       - uses: actions/checkout@v4
 
