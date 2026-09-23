@@ -35,6 +35,8 @@ import { useRouter, useSearchParams, usePathname } from "next/navigation"
 import { EditOrderModal } from "./edit-order-modal"
 import { EditCostoEnvioModal } from "./edit-costo-envio-modal"
 import { ChatModal } from "./chat-modal"
+import { claveDiaAR } from "@/lib/zona-horaria"
+import { etiquetaFecha } from "@/lib/fecha-chat"
 
 type FilterPeriodo = 'dia' | 'semana' | 'mes' | 'todos'
 
@@ -394,18 +396,46 @@ export function DataTable({
           </TableHeader>
           <TableBody>
             {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && "selected"}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
+              table.getRowModel().rows.map((row, index) => {
+                // Separador de día: solo tiene sentido cuando la vista puede
+                // mostrar pedidos de más de un día (semana/mes/todos) — en
+                // "día" todas las filas comparten fecha_entrega, así que
+                // separar sería ruido. Se agrupa por fecha_entrega (no por
+                // created_at): es la fecha por la que ordena/filtra el
+                // listado (ver pedidos-listado.ts) y la data ya llega
+                // ordenada por ese campo, así que alcanza con comparar contra
+                // la fila anterior en el orden actual de la tabla.
+                const filas = table.getRowModel().rows
+                const diaActual = claveDiaAR(new Date(row.original.fecha_entrega))
+                const diaAnterior = index > 0
+                  ? claveDiaAR(new Date(filas[index - 1].original.fecha_entrega))
+                  : null
+                const mostrarSeparador = filters.periodo !== 'dia' && diaActual !== diaAnterior
+
+                return (
+                  <React.Fragment key={row.id}>
+                    {mostrarSeparador && (
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell
+                          colSpan={columns.length}
+                          className="bg-slate-100 py-1 px-3 text-[11px] font-medium text-slate-500 border-y"
+                        >
+                          {etiquetaFecha(row.original.fecha_entrega)}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    <TableRow
+                      data-state={row.getIsSelected() && "selected"}
+                    >
+                      {row.getVisibleCells().map((cell) => (
+                        <TableCell key={cell.id}>
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  </React.Fragment>
+                )
+              })
             ) : (
               <TableRow>
                 <TableCell colSpan={columns.length} className="h-24 text-center">
