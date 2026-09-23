@@ -17,12 +17,14 @@ interface AddGastoModalProps {
 export function AddGastoModal({ open, onOpenChange }: AddGastoModalProps) {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [monto, setMonto] = React.useState<string>("")
+  const [concepto, setConcepto] = React.useState<string>("")
 
   const router = useRouter()
 
   React.useEffect(() => {
     if (!open) {
       setMonto("")
+      setConcepto("")
     }
   }, [open])
 
@@ -39,8 +41,9 @@ export function AddGastoModal({ open, onOpenChange }: AddGastoModalProps) {
     setIsSubmitting(true)
 
     try {
-      await IngresarGasto(montoNumerico)
+      await IngresarGasto(montoNumerico, concepto)
         setMonto("")
+        setConcepto("")
         onOpenChange(false)
         
     } catch (error) {
@@ -54,6 +57,7 @@ export function AddGastoModal({ open, onOpenChange }: AddGastoModalProps) {
 
   const handleCancel = () => {
     setMonto("")
+    setConcepto("")
     onOpenChange(false)
   }
 
@@ -88,8 +92,22 @@ export function AddGastoModal({ open, onOpenChange }: AddGastoModalProps) {
                   className="pl-8"
                 />
                 </div>
-              
-              
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="concepto" className="flex items-center gap-2">
+                <FileText className="h-4 w-4" />
+                Concepto <span className="text-xs font-normal text-gray-500">(opcional)</span>
+              </Label>
+              <Input
+                id="concepto"
+                type="text"
+                placeholder="Nafta, insumos, mantenimiento…"
+                value={concepto}
+                onChange={(e) => setConcepto(e.target.value)}
+                disabled={isSubmitting}
+                maxLength={120}
+              />
             </div>
           </div>
 

@@ -2,31 +2,40 @@
 import * as React from 'react'
 import { createClient } from '@/lib/supabase-client'
 import { useRouter } from 'next/navigation'
+import { aMailInterno } from '@/lib/rol'
 
 export default function Login() {
-    const [email, setEmail] = React.useState('')
+    const [usuario, setUsuario] = React.useState('')
     const [password, setPassword] = React.useState('')
     const [loading, setLoading] = React.useState(false)
+    const [error, setError] = React.useState<string | null>(null)
     const router = useRouter()
     const supabase = createClient()
 
     const handleLogin = React.useCallback(async (e: React.FormEvent) => {
         e.preventDefault()
         setLoading(true)
+        setError(null)
 
-        const { error } = await supabase.auth.signInWithPassword({
-            email,
+        // El staff se loguea con su NOMBRE; el mail interno es un detalle de
+        // implementación que nunca ve (aMailInterno le pega el dominio). Si
+        // alguien escribe un mail con "@", se respeta tal cual.
+        const { error: errorLogin } = await supabase.auth.signInWithPassword({
+            email: aMailInterno(usuario),
             password,
         })
 
-        if (error) {
-            alert(error.message)    
+        if (errorLogin) {
+            // No repetimos el mensaje de Supabase: habla de "email" y acá nadie
+            // usa uno. Además no conviene distinguir "usuario inexistente" de
+            // "contraseña incorrecta".
+            setError('Usuario o contraseña incorrectos.')
         } else {
             router.push('/')
             router.refresh()
         }
         setLoading(false)
-    }, [email, password, router])
+    }, [usuario, password, router, supabase])
 
     return (
         <div className="flex min-h-screen items-center justify-center bg-gray-50 text-black">
@@ -38,20 +47,24 @@ export default function Login() {
                 
                 <form onSubmit={handleLogin} className="space-y-4">
                     <div>
-                        <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
-                            Email
+                        <label htmlFor="usuario" className="block text-sm font-medium text-gray-700 mb-1">
+                            Usuario
                         </label>
                         <input
-                            id="email"
-                            type="email"
-                            placeholder="usuario@ejemplo.com"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
+                            id="usuario"
+                            type="text"
+                            autoComplete="username"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
+                            placeholder="tu nombre"
+                            value={usuario}
+                            onChange={(e) => setUsuario(e.target.value)}
                             required
                             className="w-full rounded border border-gray-300 p-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                         />
                     </div>
-                    
+
                     <div>
                         <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
                             Contraseña
@@ -67,6 +80,12 @@ export default function Login() {
                         />
                     </div>
                     
+                    {error && (
+                        <p role="alert" className="rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700">
+                            {error}
+                        </p>
+                    )}
+
                     <button
                         type="submit"
                         disabled={loading}

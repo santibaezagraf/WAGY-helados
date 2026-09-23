@@ -8,7 +8,7 @@ import {
     parseAncla,
     formatAncla,
     desplazarAncla,
-    esPeriodoActual,
+    puedeAvanzar,
     etiquetaPeriodo,
 } from "@/lib/periodo-utils"
 
@@ -18,6 +18,9 @@ interface TemporalNavigatorProps {
     ancla: string
     /** Cambiar período resetea el ancla a hoy; navegar solo cambia el ancla. */
     onChange: (periodo: Periodo, ancla: string) => void
+    /** Última fecha de entrega cargada (ISO). Marca hasta dónde se puede avanzar:
+     *  con pedidos programados el futuro ya no está vacío. null = solo hasta hoy. */
+    maxFechaEntregaISO?: string | null
 }
 
 const PERIODOS: { value: Periodo; label: string; labelCorto: string }[] = [
@@ -31,15 +34,24 @@ export const TemporalNavigator = React.memo(function TemporalNavigator({
     periodo,
     ancla,
     onChange,
+    maxFechaEntregaISO = null,
 }: TemporalNavigatorProps) {
     // `new Date()` en render del cliente: el navegador refleja "ahora" del usuario.
     const fecha = parseAncla(ancla)
-    const enActual = esPeriodoActual(periodo, fecha)
     const etiqueta = etiquetaPeriodo(periodo, fecha)
 
+    const maxEntrega = React.useMemo(() => {
+        if (!maxFechaEntregaISO) return null
+        const d = new Date(maxFechaEntregaISO)
+        return Number.isNaN(d.getTime()) ? null : d
+    }, [maxFechaEntregaISO])
+
+    // El tope ya no es "el período actual": con pedidos programados hay que poder
+    // llegar hasta el último que haya cargado. Ver `puedeAvanzar`.
+    const haySiguiente = puedeAvanzar(periodo, fecha, maxEntrega)
+
     const navegar = (dir: -1 | 1) => {
-        // No se puede avanzar más allá del período actual (no hay pedidos a futuro).
-        if (dir === 1 && enActual) return
+        if (dir === 1 && !haySiguiente) return
         onChange(periodo, formatAncla(desplazarAncla(periodo, fecha, dir)))
     }
 
@@ -79,7 +91,7 @@ export const TemporalNavigator = React.memo(function TemporalNavigator({
                         size="icon-sm"
                         variant="outline"
                         onClick={() => navegar(1)}
-                        disabled={enActual}
+                        disabled={!haySiguiente}
                         aria-label="Período siguiente"
                     >
                         <ChevronRight className="h-4 w-4" />

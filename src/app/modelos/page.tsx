@@ -1,4 +1,5 @@
-import { createClient } from '@/lib/supabase-server'
+import { sesionActual } from '@/lib/auth-rol'
+import { puede } from '@/lib/rol'
 import { redirect } from 'next/navigation'
 import { Header } from '@/components/ui/header'
 import { getConversacionesRecientes } from '@/lib/actions/mensajes'
@@ -11,9 +12,9 @@ import { PanelModelos } from '@/components/modelos/panel-modelos'
 // de las últimas 2 semanas y los saltos de fallback recientes. Se llega desde el
 // botón del header o clickeando el banner de alerta de fallback.
 export default async function ModelosPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  const sesion = await sesionActual()
+  if (!sesion) redirect('/login')
+  if (!puede(sesion.rol, 'modelos.ver')) redirect('/')
 
   const inicial = await getEstadoModelos()
 
@@ -26,7 +27,7 @@ export default async function ModelosPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header conversacionesIniciales={conversaciones} />
+      <Header conversacionesIniciales={conversaciones} rol={sesion.rol} />
       <PanelModelos inicial={inicial} />
     </div>
   )

@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient as createServiceClient } from '@supabase/supabase-js'
-import { createClient as createUserClient } from '@/lib/supabase-server'
+import { exigirPermiso } from '@/lib/auth-rol'
 import { armarPreviewMensaje, type MotivoAtencion } from '@/lib/conversaciones-utils'
 
 // Cliente service-role: lee la vista `conversaciones_inbox` y atencion_humana
@@ -38,12 +38,8 @@ export type PaginaInbox = {
 
 const PAGE_SIZE = 25
 
-/** Aborta si no hay usuario autenticado (esta action usa service-role). */
-async function exigirUsuario() {
-  const supabase = await createUserClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('No autenticado')
-}
+// El gate de permiso es la ÚNICA protección: esta action usa el cliente
+// service-role, que bypassea la RLS. No hay segunda capa.
 
 // Fila cruda de la vista conversaciones_inbox.
 type FilaVista = {
@@ -84,7 +80,7 @@ export async function getInboxConversaciones(
   page = 1,
   conCount = true,
 ): Promise<PaginaInbox> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
 
   const pageNum = Math.max(1, page)
   const from = (pageNum - 1) * PAGE_SIZE

@@ -4,7 +4,7 @@ import { revalidatePath, updateTag } from 'next/cache'
 import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { Database } from '@/types/supabase'
 import { Pedido } from '@/types/pedidos'
-import { createClient as createUserClient } from '@/lib/supabase-server'
+import { exigirPermiso } from '@/lib/auth-rol'
 import { enviarMensajeManual, enviarResumenYPedirConfirmacion, marcarLeidoWhatsapp } from '@/lib/whatsapp'
 import { estaRateLimiteado } from '@/lib/bot/rate-limit'
 import { PEDIDOS_TAG } from '@/lib/data/pedidos-listado'
@@ -30,7 +30,7 @@ const URL_FIRMADA_SEG = 60 * 60
 
 // Cliente service-role (igual que el listado y el bot): lee/escribe mensajes_chat
 // bypasseando RLS. La página ya valida la sesión, pero las server actions son
-// invocables por su cuenta, así que cada una exige usuario autenticado abajo.
+// invocables por su cuenta, así que cada una exige permiso explícito abajo.
 const supabaseAdmin = createServiceClient<Database>(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
@@ -85,12 +85,8 @@ const HORAS_HISTORIAL = 24
 // viejo solo si el operador sube a buscarlo.
 const PAGINA_HISTORIAL = 50
 
-/** Aborta si no hay usuario autenticado (estas actions usan service-role). */
-async function exigirUsuario() {
-  const supabase = await createUserClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('No autenticado')
-}
+// El gate de permiso de cada action de acá abajo es la ÚNICA protección: estas
+// actions usan el cliente service-role, que bypassea la RLS. No hay segunda capa.
 
 export type HistorialPagina = {
   /** Mensajes en orden cronológico (ascendente). */
@@ -150,7 +146,7 @@ export async function getMensajesAntiguos(
   telefono: string,
   antesDeISO: string,
 ): Promise<HistorialPagina> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   return traerHistorialPagina(telefono, antesDeISO)
 }
 
@@ -161,13 +157,13 @@ export async function getMensajesAntiguos(
  * URL de las filas nuevas sin recargar todo el historial.
  */
 export async function firmarMedia(path: string): Promise<string | null> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   return firmarPath(path)
 }
 
 /** Lista de teléfonos que esperan intervención humana (badge + contador del registro). */
 export async function getTelefonosRequierenAtencion(): Promise<string[]> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   return (await telefonosRequierenAtencion()).map((r) => r.telefono)
 }
 
@@ -178,7 +174,7 @@ export async function getTelefonosRequierenAtencion(): Promise<string[]> {
  * cliente con un operador manejando la conversación, chat cerrado).
  */
 export async function getTelefonosConTomaActiva(): Promise<string[]> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   return telefonosConTomaActiva()
 }
 
@@ -196,7 +192,7 @@ export async function getTelefonosConTomaActiva(): Promise<string[]> {
  * base (migración sin aplicar), cae al método anterior para no romper el header.
  */
 export async function getConversacionesRecientes(): Promise<Conversacion[]> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
 
   const desde = new Date(Date.now() - HORAS_HISTORIAL * 60 * 60 * 1000).toISOString()
 
@@ -244,7 +240,7 @@ export async function getConversacionesRecientes(): Promise<Conversacion[]> {
  * que con el más reciente que tenga wa_message_id alcanza.
  */
 export async function marcarAtendido(telefono: string): Promise<void> {
-  await exigirUsuario()
+  await exigirPermiso('chat.moderar')
   await limpiarRequiereAtencion(telefono)
   // No await: fire-and-forget con log del error. No debe bloquear el abrir.
   void marcarLeidoUltimoDelCliente(telefono).catch((e) => {
@@ -279,7 +275,7 @@ export async function enviarMensajeManualAccion(
   telefono: string,
   texto: string,
 ): Promise<{ ok: boolean; mensaje: MensajeChat | null }> {
-  await exigirUsuario()
+  await exigirPermiso('chat.escribir')
 
   const limpio = texto.trim()
   if (!limpio) return { ok: false, mensaje: null }
@@ -308,7 +304,7 @@ export async function enviarMensajeManualAccion(
 
 /** Devolver la conversación al bot (fin de la toma humana). */
 export async function finalizarAtencion(telefono: string): Promise<void> {
-  await exigirUsuario()
+  await exigirPermiso('chat.moderar')
   await desactivarAtencionHumana(telefono)
 }
 
@@ -316,13 +312,13 @@ export async function finalizarAtencion(telefono: string): Promise<void> {
 
 /** Bloquea manualmente el número: el bot lo ignora por completo hasta desbloquear. */
 export async function bloquearNumeroAccion(telefono: string): Promise<void> {
-  await exigirUsuario()
+  await exigirPermiso('chat.moderar')
   await bloquearNumero(telefono)
 }
 
 /** Quita el bloqueo manual (el bot vuelve a responderle). */
 export async function desbloquearNumeroAccion(telefono: string): Promise<void> {
-  await exigirUsuario()
+  await exigirPermiso('chat.moderar')
   await desbloquearNumero(telefono)
 }
 
@@ -332,7 +328,7 @@ export async function desbloquearNumeroAccion(telefono: string): Promise<void> {
  * instante, sin esperar a que la ventana de 1h se vacíe sola.
  */
 export async function resetearRateLimitAccion(telefono: string): Promise<void> {
-  await exigirUsuario()
+  await exigirPermiso('chat.moderar')
   await resetearRateLimit(telefono)
 }
 
@@ -346,7 +342,7 @@ export async function resetearRateLimitAccion(telefono: string): Promise<void> {
  * deja de estar limitado de verdad (ventana vencida o reset manual).
  */
 export async function getEstadoRateLimit(telefono: string): Promise<boolean> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   return estaRateLimiteado(telefono)
 }
 
@@ -367,7 +363,7 @@ async function traerPedidoActivo(telefono: string): Promise<Pedido | null> {
     .eq('telefono', telefono)
     .gte('created_at', hace12Horas)
     .in('estado', ['borrador', 'pendiente', 'esperando_cancelacion'])
-    .eq('enviado', false)
+    .eq('mensaje_enviado', false)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -380,7 +376,7 @@ async function traerPedidoActivo(telefono: string): Promise<Pedido | null> {
 }
 
 export async function getPedidoActivoChat(telefono: string): Promise<Pedido | null> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   return traerPedidoActivo(telefono)
 }
 
@@ -399,7 +395,7 @@ export async function getDatosChat(telefono: string): Promise<{
   bloqueado: boolean
   enRateLimit: boolean
 }> {
-  await exigirUsuario()
+  await exigirPermiso('chat.ver')
   const [historial, estado, pedido, bloqueado, enRateLimit] = await Promise.all([
     traerHistorialPagina(telefono),
     estadoAtencion(telefono),
@@ -429,7 +425,7 @@ export async function getDatosChat(telefono: string): Promise<{
  * confirma con el botón, o pide cambios y los sigue manejando el bot.
  *
  * El UPDATE lleva los mismos guards que usa el bot: solo estados intervenibles,
- * nunca un despachado (enviado=true), solo el pedido del teléfono del chat, y
+ * nunca un despachado (mensaje_enviado=true), solo el pedido del teléfono del chat, y
  * completitud (un resumen de un borrador parcial mostraría campos vacíos).
  * Pase lo que pase con el estado previo, el pedido queda en 'borrador': el
  * resumen ofrece "confirmar", y el botón de confirmar solo actúa sobre borradores.
@@ -438,7 +434,7 @@ export async function enviarResumenManualAccion(
   pedidoId: number,
   telefono: string,
 ): Promise<{ ok: boolean; motivo?: string }> {
-  await exigirUsuario()
+  await exigirPermiso('chat.escribir')
 
   const { data: fila, error } = await supabaseAdmin
     .from('pedidos')
@@ -446,7 +442,7 @@ export async function enviarResumenManualAccion(
     .eq('id', pedidoId)
     .eq('telefono', telefono)
     .in('estado', ['borrador', 'pendiente', 'esperando_cancelacion'])
-    .neq('enviado', true)
+    .neq('mensaje_enviado', true)
     .neq('direccion', '')
     .neq('metodo_pago', '')
     .or('cantidad_agua.gt.0,cantidad_crema.gt.0')

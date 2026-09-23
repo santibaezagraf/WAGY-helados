@@ -191,7 +191,7 @@ async function buscarBorradorCompletoActivo(numeroCliente: string) {
     .select('*')
     .eq('telefono', numeroCliente)
     .eq('estado', 'borrador')
-    .neq('enviado', true)
+    .neq('mensaje_enviado', true)
     .neq('direccion', '')
     .neq('metodo_pago', '')
     .or('cantidad_agua.gt.0,cantidad_crema.gt.0')
@@ -219,7 +219,7 @@ async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
     .eq('id', pedidoId)
     .eq('telefono', numeroCliente) // seguridad: solo el dueño puede confirmar
     .eq('estado', 'borrador')
-    .neq('enviado', true)
+    .neq('mensaje_enviado', true)
     .neq('direccion', '')
     .neq('metodo_pago', '')
     .or('cantidad_agua.gt.0,cantidad_crema.gt.0')
@@ -229,7 +229,7 @@ async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
   }
 
   // UPDATE atómico sin `.or()`: la completitud ya la validó el SELECT de arriba.
-  // Los guards de estado/enviado siguen acá para atrapar la carrera con el cron
+  // Los guards de estado/mensaje_enviado siguen acá para atrapar la carrera con el cron
   // o el repartidor entre el SELECT y el UPDATE (afecta 0 filas → fallback).
   const { data, error } = candidato
     ? await supabaseAdmin
@@ -238,7 +238,7 @@ async function confirmarBorrador(numeroCliente: string, pedidoId: number) {
         .eq('id', pedidoId)
         .eq('telefono', numeroCliente)
         .eq('estado', 'borrador')
-        .neq('enviado', true)
+        .neq('mensaje_enviado', true)
         .select('id, direccion, metodo_pago')
         .maybeSingle()
     : { data: null, error: null };
@@ -283,7 +283,7 @@ async function tieneBorradorActivo(numeroCliente: string): Promise<boolean> {
     .select('id')
     .eq('telefono', numeroCliente)
     .eq('estado', 'borrador')
-    .neq('enviado', true)
+    .neq('mensaje_enviado', true)
     .limit(1);
   return Boolean(data && data.length > 0);
 }
@@ -323,7 +323,7 @@ async function modificarBorrador(numeroCliente: string, pedidoId: number) {
 async function leerEstadoPedido(numeroCliente: string, pedidoId: number) {
   const { data } = await supabaseAdmin
     .from('pedidos')
-    .select('estado, enviado')
+    .select('estado, mensaje_enviado')
     .eq('id', pedidoId)
     .eq('telefono', numeroCliente)
     .maybeSingle();
@@ -337,7 +337,7 @@ async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
     .eq('id', pedidoId)
     .eq('telefono', numeroCliente)
     .eq('estado', 'esperando_cancelacion')
-    .neq('enviado', true)
+    .neq('mensaje_enviado', true)
     .select('id')
     .maybeSingle();
   if (error) {
@@ -353,7 +353,7 @@ async function confirmarCancelacion(numeroCliente: string, pedidoId: number) {
 
   // 0 filas: leemos el estado real y contestamos acorde en vez de adivinar.
   const pedido = await leerEstadoPedido(numeroCliente, pedidoId);
-  console.log(`⚠️ Botón "confirmar_cancelacion" sobre pedido ${pedidoId} que ya no está en esperando_cancelacion (estado real: ${pedido?.estado ?? 'no encontrado'}, enviado: ${pedido?.enviado ?? '-'}).`);
+  console.log(`⚠️ Botón "confirmar_cancelacion" sobre pedido ${pedidoId} que ya no está en esperando_cancelacion (estado real: ${pedido?.estado ?? 'no encontrado'}, mensaje_enviado: ${pedido?.mensaje_enviado ?? '-'}).`);
 
   if (pedido?.estado === 'cancelado') {
     await enviarMensajeWhatsApp(numeroCliente, "Tu pedido ya estaba cancelado ✅ Si querés pedir de nuevo, escribime 🍦");
@@ -389,7 +389,7 @@ async function rechazarCancelacion(numeroCliente: string, pedidoId: number) {
 
   // 0 filas: mismo criterio que confirmarCancelacion — responder con el estado real.
   const pedido = await leerEstadoPedido(numeroCliente, pedidoId);
-  console.log(`⚠️ Botón "rechazar_cancelacion" sobre pedido ${pedidoId} que ya no está en esperando_cancelacion (estado real: ${pedido?.estado ?? 'no encontrado'}, enviado: ${pedido?.enviado ?? '-'}).`);
+  console.log(`⚠️ Botón "rechazar_cancelacion" sobre pedido ${pedidoId} que ya no está en esperando_cancelacion (estado real: ${pedido?.estado ?? 'no encontrado'}, mensaje_enviado: ${pedido?.mensaje_enviado ?? '-'}).`);
 
   if (pedido?.estado === 'cancelado') {
     // El cliente quería MANTENERLO pero ya se canceló (cron de cancelación

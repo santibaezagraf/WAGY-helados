@@ -10,10 +10,43 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.1"
+    PostgrestVersion: "14.5"
   }
   public: {
     Tables: {
+      actividad_usuario: {
+        Row: {
+          accion: string
+          cantidad: number
+          created_at: string
+          detalle: Json | null
+          id: number
+          pedido_id: number | null
+          usuario_id: string
+          usuario_nombre: string
+        }
+        Insert: {
+          accion: string
+          cantidad?: number
+          created_at?: string
+          detalle?: Json | null
+          id?: never
+          pedido_id?: number | null
+          usuario_id: string
+          usuario_nombre: string
+        }
+        Update: {
+          accion?: string
+          cantidad?: number
+          created_at?: string
+          detalle?: Json | null
+          id?: never
+          pedido_id?: number | null
+          usuario_id?: string
+          usuario_nombre?: string
+        }
+        Relationships: []
+      }
       alertas_modelo: {
         Row: {
           created_at: string
@@ -45,6 +78,7 @@ export type Database = {
         Row: {
           activa: boolean
           bloqueado: boolean
+          motivo_atencion: string | null
           rate_limit_reset_at: string | null
           requiere_atencion: boolean
           requiere_atencion_at: string | null
@@ -54,6 +88,7 @@ export type Database = {
         Insert: {
           activa?: boolean
           bloqueado?: boolean
+          motivo_atencion?: string | null
           rate_limit_reset_at?: string | null
           requiere_atencion?: boolean
           requiere_atencion_at?: string | null
@@ -63,6 +98,7 @@ export type Database = {
         Update: {
           activa?: boolean
           bloqueado?: boolean
+          motivo_atencion?: string | null
           rate_limit_reset_at?: string | null
           requiere_atencion?: boolean
           requiere_atencion_at?: string | null
@@ -74,18 +110,21 @@ export type Database = {
       gastos: {
         Row: {
           activo: boolean
+          concepto: string | null
           created_at: string
           id: number
           monto: number
         }
         Insert: {
           activo?: boolean
+          concepto?: string | null
           created_at?: string
           id?: number
           monto: number
         }
         Update: {
           activo?: boolean
+          concepto?: string | null
           created_at?: string
           id?: number
           monto?: number
@@ -184,16 +223,20 @@ export type Database = {
           cantidad_agua: number
           cantidad_crema: number
           costo_envio: number
+          creado_por_nombre: string | null
           created_at: string
           direccion: string
           direccion_de_historial: boolean
           entro_a_cocina_at: string | null
-          enviado: boolean
+          enviado_at: string | null
+          enviado_por_nombre: string | null
           es_cambio_manual: boolean | null
           esperando_respuesta_boton: boolean
           estado: string
+          fecha_entrega: string
           id: number
           intentos_reenvio: number
+          mensaje_enviado: boolean
           metodo_pago: string
           monto_total_agua: number | null
           monto_total_crema: number | null
@@ -215,16 +258,20 @@ export type Database = {
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
+          creado_por_nombre?: string | null
           created_at?: string
           direccion?: string
           direccion_de_historial?: boolean
           entro_a_cocina_at?: string | null
-          enviado?: boolean
+          enviado_at?: string | null
+          enviado_por_nombre?: string | null
           es_cambio_manual?: boolean | null
           esperando_respuesta_boton?: boolean
           estado?: string
+          fecha_entrega?: string
           id?: number
           intentos_reenvio?: number
+          mensaje_enviado?: boolean
           metodo_pago: string
           monto_total_agua?: number | null
           monto_total_crema?: number | null
@@ -246,16 +293,20 @@ export type Database = {
           cantidad_agua?: number
           cantidad_crema?: number
           costo_envio?: number
+          creado_por_nombre?: string | null
           created_at?: string
           direccion?: string
           direccion_de_historial?: boolean
           entro_a_cocina_at?: string | null
-          enviado?: boolean
+          enviado_at?: string | null
+          enviado_por_nombre?: string | null
           es_cambio_manual?: boolean | null
           esperando_respuesta_boton?: boolean
           estado?: string
+          fecha_entrega?: string
           id?: number
           intentos_reenvio?: number
+          mensaje_enviado?: boolean
           metodo_pago?: string
           monto_total_agua?: number | null
           monto_total_crema?: number | null
@@ -304,11 +355,45 @@ export type Database = {
           },
         ]
       }
+      uso_modelo: {
+        Row: {
+          created_at: string
+          id: number
+          modelo: string
+          telefono: string | null
+          tipo: string
+          tokens_input: number
+          tokens_output: number
+          tokens_total: number
+        }
+        Insert: {
+          created_at?: string
+          id?: never
+          modelo: string
+          telefono?: string | null
+          tipo: string
+          tokens_input?: number
+          tokens_output?: number
+          tokens_total?: number
+        }
+        Update: {
+          created_at?: string
+          id?: never
+          modelo?: string
+          telefono?: string | null
+          tipo?: string
+          tokens_input?: number
+          tokens_output?: number
+          tokens_total?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       conversaciones_inbox: {
         Row: {
           bloqueado: boolean | null
+          motivo_atencion: string | null
           requiere_atencion: boolean | null
           telefono: string | null
           toma_activa: boolean | null
@@ -320,9 +405,30 @@ export type Database = {
         }
         Relationships: []
       }
+      uso_modelo_diario: {
+        Row: {
+          dia: string | null
+          llamadas: number | null
+          modelo: string | null
+          tipo: string | null
+          tokens_input: number | null
+          tokens_output: number | null
+          tokens_total: number | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       auto_confirmar_pedidos_expirados: { Args: never; Returns: undefined }
+      es_admin: { Args: never; Returns: boolean }
+      obtener_actividad_por_dia: {
+        Args: { desde: string; hasta: string }
+        Returns: {
+          acciones: number
+          dia: string
+          usuario_nombre: string
+        }[]
+      }
       obtener_balance: {
         Args: { fecha_fin: string; fecha_inicio: string }
         Returns: {
@@ -336,6 +442,28 @@ export type Database = {
           total_agua: number
           total_crema: number
           total_gastos: number
+        }[]
+      }
+      obtener_contadores_helados: {
+        Args: {
+          direccion_filtro?: string
+          estados?: string[]
+          fecha_desde?: string
+          fecha_hasta?: string
+          telefono_filtro?: string
+        }
+        Returns: {
+          entregados: number
+          total: number
+        }[]
+      }
+      obtener_ranking_actividad: {
+        Args: { desde: string; hasta: string }
+        Returns: {
+          acciones: number
+          pedidos_tocados: number
+          usuario_id: string
+          usuario_nombre: string
         }[]
       }
     }
@@ -356,12 +484,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -385,11 +513,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -410,11 +538,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -435,11 +563,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -452,11 +580,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }

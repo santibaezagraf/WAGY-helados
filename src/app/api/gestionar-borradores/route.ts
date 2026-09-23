@@ -221,16 +221,16 @@ async function gestionarBorradores() {
       }
     } else if (decision.accion === 'rechazar') {
       // Guard sobre el estado: si el cliente confirmó/canceló entre el read y
-      // acá, el UPDATE afecta 0 filas y no hacemos nada. `.neq('enviado', true)`
+      // acá, el UPDATE afecta 0 filas y no hacemos nada. `.neq('mensaje_enviado', true)`
       // + patchConEnviadoCoherente evitan que este auto-rechazo deje un
-      // enviado=true colgado sobre el cancelado (el operador puede haber
+      // mensaje_enviado=true colgado sobre el cancelado (el operador puede haber
       // marcado el flag de envío independientemente del estado).
       const { data: cancelado } = await supabaseAdmin
         .from('pedidos')
         .update({ ...patchConEnviadoCoherente('cancelado'), auto_rechazado: true })
         .eq('id', p.id)
         .eq('estado', 'borrador')
-        .neq('enviado', true)
+        .neq('mensaje_enviado', true)
         .select('id')
         .maybeSingle();
       if (!cancelado) continue;
@@ -271,15 +271,15 @@ async function gestionarBorradores() {
 
     // Guard de estado: si el cliente respondió o el flow lo movió entre el
     // read y acá, el UPDATE afecta 0 filas y no hacemos nada. Mismo guard
-    // `.neq('enviado', true)` + patchConEnviadoCoherente que el auto-rechazo:
-    // un pedido con enviado=true colgado no debe quedar cancelado con el
+    // `.neq('mensaje_enviado', true)` + patchConEnviadoCoherente que el auto-rechazo:
+    // un pedido con mensaje_enviado=true colgado no debe quedar cancelado con el
     // flag pegado (ver estaDespachado en procesar.ts).
     const { data: cancelado } = await supabaseAdmin
       .from('pedidos')
       .update(patchConEnviadoCoherente('cancelado'))
       .eq('id', p.id)
       .eq('estado', 'esperando_cancelacion')
-      .neq('enviado', true)
+      .neq('mensaje_enviado', true)
       .select('id')
       .maybeSingle();
     if (!cancelado) continue;

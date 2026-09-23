@@ -12,6 +12,7 @@ import { Check, Clock, X, IceCream, Droplet, Banknote, CreditCard, FileText } fr
 import { calcularPreciosUnitarios, obtenerReglasListaActiva, ReglaPrecios } from "@/lib/precio-utils"
 import { Logo } from "@/components/ui/logo"
 import { actualizarPedidoCompleto } from "@/lib/actions/pedidos"
+import { isoDesdeFechaEntrega, rangoFechasEntrega } from "@/lib/entrega"
 import { useRouter } from "next/navigation"
 
 // Estados que el modal permite ver/elegir. Incluye 'borrador' porque el chat
@@ -39,6 +40,13 @@ export function EditOrderModal({ open, onOpenChange, pedido, onSaved }: EditOrde
   const [observaciones, setObservaciones] = React.useState("")
   const [metodoPago, setMetodoPago] = React.useState<"transferencia" | "efectivo">("efectivo")
   const [costoEnvioStr, setCostoEnvioStr] = React.useState("")
+  // Día de entrega del pedido (ver lib/entrega.ts). Se hidrata de la fila.
+  const [fechaEntrega, setFechaEntrega] = React.useState("")
+  // El valor con el que se abrió, para mandar el campo SOLO si se tocó: la
+  // validación del servidor rechaza fechas pasadas, así que reenviar la fecha
+  // original de un pedido viejo haría fallar cualquier edición de ese pedido.
+  const [fechaEntregaOriginal, setFechaEntregaOriginal] = React.useState("")
+  const rangoEntrega = React.useMemo(() => rangoFechasEntrega(), [open])
 
   const [precioUnitarioAgua, setPrecioUnitarioAgua] = React.useState<number | null>(0)
   const [precioUnitarioCrema, setPrecioUnitarioCrema] = React.useState<number | null>(0)
@@ -67,6 +75,8 @@ export function EditOrderModal({ open, onOpenChange, pedido, onSaved }: EditOrde
       setObservaciones(pedido.observaciones || "")
       setMetodoPago(pedido.metodo_pago as "transferencia" | "efectivo")
       setCostoEnvioStr(pedido.costo_envio.toString())
+      setFechaEntrega(isoDesdeFechaEntrega(pedido.fecha_entrega))
+      setFechaEntregaOriginal(isoDesdeFechaEntrega(pedido.fecha_entrega))
       setPrecioUnitarioAgua(pedido.precio_unitario_agua)
       setPrecioUnitarioCrema(pedido.precio_unitario_crema)
       setTotalAguaManualStr(pedido.monto_total_agua?.toString() || "")
@@ -151,6 +161,8 @@ export function EditOrderModal({ open, onOpenChange, pedido, onSaved }: EditOrde
         observaciones: observaciones || null,
         monto_total_agua: parseInt(totalAgua || "0"),
         monto_total_crema: parseInt(totalCrema || "0"),
+        // Solo si se tocó: ver el comentario de fechaEntregaOriginal.
+        fecha_entrega: fechaEntrega !== fechaEntregaOriginal ? fechaEntrega : null,
       })
       onSaved?.()
       onOpenChange(false)
@@ -161,7 +173,7 @@ export function EditOrderModal({ open, onOpenChange, pedido, onSaved }: EditOrde
     } finally {
       setIsSubmitting(false)
     }
-  }, [pedido.id, direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, estado, pagado, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, onOpenChange, onSaved, router])
+  }, [pedido.id, direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, estado, pagado, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, fechaEntrega, fechaEntregaOriginal, onOpenChange, onSaved, router])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -369,6 +381,23 @@ export function EditOrderModal({ open, onOpenChange, pedido, onSaved }: EditOrde
                 onWheel={(e) => e.currentTarget.blur()}
                 className="h-12 text-base"
                 min="0"
+              />
+            </div>
+
+            {/* Día de entrega: mover esto cambia en qué período del listado y
+                del balance cae el pedido. */}
+            <div className="space-y-2">
+              <Label htmlFor="fechaEntregaEdit" className="text-base font-semibold">
+                Entregar el
+              </Label>
+              <Input
+                id="fechaEntregaEdit"
+                type="date"
+                value={fechaEntrega}
+                onChange={(e) => setFechaEntrega(e.target.value)}
+                min={rangoEntrega.min}
+                max={rangoEntrega.max}
+                className="h-12 text-base"
               />
             </div>
           </div>

@@ -21,14 +21,25 @@ import { ChatModal } from "@/components/pedidos/chat-modal"
 import { NotificacionesEntrantes } from "@/components/ui/notificaciones-entrantes"
 import { AlertaModelo } from "@/components/ui/alerta-modelo"
 import { marcaPendiente, type Conversacion } from "@/lib/conversaciones-utils"
+import { puede, type Rol } from "@/lib/rol"
+import type { ContadoresHelados } from "@/lib/data/pedidos-listado"
+import { ContadoresHelado } from "@/components/ui/contadores-helado"
+import { LogOut, UserRound } from "lucide-react"
 
 interface HeaderProps {
   /** Conversaciones recientes (cualquier teléfono con actividad), con flag de
    *  requiere_atencion para resaltar las que esperan a una persona. */
   conversacionesIniciales?: Conversacion[]
+  /** Rol de quien está mirando. Sin rol se asume lo más restrictivo (mensajero). */
+  rol?: Rol
+  /** Contadores de helados del período. Solo los pasa el dashboard (`/`), que es
+   *  la única página con contexto de filtros; en el resto no se muestran. */
+  contadores?: ContadoresHelados
 }
 
-export function Header({ conversacionesIniciales = [] }: HeaderProps) {
+export function Header({ conversacionesIniciales = [], rol, contadores }: HeaderProps) {
+  // Fail-closed: si no llega el rol, se muestra la versión más restringida.
+  const esAdmin = puede(rol ?? 'mensajero', 'pedidos.escribir')
   const [priceListModalOpen, setPriceListModalOpen] = React.useState(false)
   const [addGastoModalOpen, setAddGastoModalOpen] = React.useState(false)
   // Directorio de conversaciones recientes. El servidor es la fuente de verdad;
@@ -49,6 +60,8 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
   // En vivo: cualquier mensaje nuevo mueve su conversación al frente; si es un
   // media/ubicación de un cliente, además la marca como pendiente.
   React.useEffect(() => {
+    // El mensajero no ve el menú de chats: no tiene sentido abrir el canal.
+    if (!esAdmin) return
     const supabase = createClient()
     const channel = supabase
       .channel("conversaciones-header")
@@ -122,7 +135,7 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [])
+  }, [esAdmin])
 
   const pendientes = conversaciones.filter((c) => c.requiereAtencion).length
 
@@ -156,7 +169,11 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
               </div>
             )}
 
+            {/* Contadores del período: solo el dashboard los pasa. */}
+            {contadores && <ContadoresHelado {...contadores} />}
+
             <div className="flex items-center gap-2">
+              {esAdmin && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
@@ -221,60 +238,93 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+              )}
+              {esAdmin && (
+                <>
+                  <Button
+                    size="sm"
+                    onClick={() => setAddGastoModalOpen(true)}
+                    className="gap-2 bg-white text-rose-600 hover:bg-slate-100 font-medium"
+                  >
+                    <Receipt className="h-4 w-4" />
+                    <span className="hidden sm:inline">+ Gasto</span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => router.push('/balances')}
+                    className="gap-2 bg-white text-emerald-600 hover:bg-slate-100 font-medium"
+                  >
+                    <BarChart3 className="h-4 w-4" />
+                    <span className="hidden sm:inline">Balances</span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => router.push('/modelos')}
+                    className="gap-2 bg-white text-indigo-600 hover:bg-slate-100 font-medium"
+                    title="Estado de los modelos LLM y uso de tokens"
+                  >
+                    <Cpu className="h-4 w-4" />
+                    <span className="hidden sm:inline">Modelos</span>
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => setPriceListModalOpen(true)}
+                    className="gap-2 bg-white text-cyan-600 hover:bg-slate-100 font-medium"
+                  >
+                    <Tags className="h-4 w-4" />
+                    <span className="hidden sm:inline">Listas de Precios</span>
+                    <span className="sm:hidden">Precios</span>
+                  </Button>
+                </>
+              )}
+              {/* Perfil y salir: los dos roles. Sin logout, un dispositivo que
+                  quedó logueado como mensajero no se puede volver a usar. */}
               <Button
                 size="sm"
-                onClick={() => setAddGastoModalOpen(true)}
-                className="gap-2 bg-white text-rose-600 hover:bg-slate-100 font-medium"
+                onClick={() => router.push('/perfil')}
+                className="gap-2 bg-white text-slate-700 hover:bg-slate-100 font-medium"
+                title="Mi perfil"
               >
-                <Receipt className="h-4 w-4" />
-                <span className="hidden sm:inline">+ Gasto</span>
+                <UserRound className="h-4 w-4" />
+                <span className="hidden sm:inline">Mi perfil</span>
               </Button>
-              <Button
-                size="sm"
-                onClick={() => router.push('/balances')}
-                className="gap-2 bg-white text-emerald-600 hover:bg-slate-100 font-medium"
-              >
-                <BarChart3 className="h-4 w-4" />
-                <span className="hidden sm:inline">Balances</span>
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => router.push('/modelos')}
-                className="gap-2 bg-white text-indigo-600 hover:bg-slate-100 font-medium"
-                title="Estado de los modelos LLM y uso de tokens"
-              >
-                <Cpu className="h-4 w-4" />
-                <span className="hidden sm:inline">Modelos</span>
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => setPriceListModalOpen(true)}
-                className="gap-2 bg-white text-cyan-600 hover:bg-slate-100 font-medium"
-              >
-                <Tags className="h-4 w-4" />
-                <span className="hidden sm:inline">Listas de Precios</span>
-                <span className="sm:hidden">Precios</span>
-              </Button>
+              {/* Form común contra un route handler, no un server action: ver el
+                  comentario en app/auth/cerrar-sesion/route.ts. */}
+              <form action="/auth/cerrar-sesion" method="post">
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="gap-2 bg-white text-slate-700 hover:bg-slate-100 font-medium"
+                  title="Cerrar sesión"
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span className="sr-only">Cerrar sesión</span>
+                </Button>
+              </form>
             </div>
           </div>
         </div>
       </header>
 
       {/* Aviso de ops: el bot cayó al modelo de fallback (429/TPD del primario). */}
-      <AlertaModelo />
+      {esAdmin && <AlertaModelo />}
 
-      <PriceListModal
-        open={priceListModalOpen}
-        onOpenChange={setPriceListModalOpen}
-      />
+      {esAdmin && (
+        <>
+          <PriceListModal
+            open={priceListModalOpen}
+            onOpenChange={setPriceListModalOpen}
+          />
 
-      <AddGastoModal
-        open={addGastoModalOpen}
-        onOpenChange={setAddGastoModalOpen}
-      />
+          <AddGastoModal
+            open={addGastoModalOpen}
+            onOpenChange={setAddGastoModalOpen}
+          />
+        </>
+      )}
 
       {/* Chat abierto desde la campana (por teléfono, sin pedido asociado). */}
-      {chatTelefono !== null && (
+      {esAdmin && chatTelefono !== null && (
         <ChatModal
           open={true}
           onOpenChange={(isOpen) => {
@@ -287,7 +337,7 @@ export function Header({ conversacionesIniciales = [] }: HeaderProps) {
       {/* Toasts globales de notificaciones entrantes (mensajes de cliente con
           toma humana activa y chat cerrado). Al clickearlos, abren el chat de
           ese teléfono. */}
-      <NotificacionesEntrantes onAbrirChat={abrirChat} />
+      {esAdmin && <NotificacionesEntrantes onAbrirChat={abrirChat} />}
     </>
   )
 }

@@ -72,7 +72,7 @@ export const SelectionBar = React.memo(function SelectionBar({
     const actualizarEnviadoMasivoHandler = React.useCallback(async (enviado: boolean) => {
         const selectedRows = table.getFilteredSelectedRowModel().rows
         const idsAActualizar = selectedRows
-            .filter(row => (row.original as Pedido).enviado !== enviado)
+            .filter(row => (row.original as Pedido).mensaje_enviado !== enviado)
             .map(row => (row.original as Pedido).id)
     
         if (idsAActualizar.length === 0) {
