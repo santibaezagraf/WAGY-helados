@@ -1,10 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { normalizarRol, rutaExigeAdmin } from "@/lib/rol";
 
 // Rutas accesibles SIN sesión. Todo lo demás exige usuario autenticado.
 //  - /login: el propio formulario de acceso.
 //  - /precios: landing pública (link en el perfil de WhatsApp Business).
-const RUTAS_PUBLICAS = ["/login", "/precios"];
+//  - /auth/cerrar-sesion: el logout. Va acá para que, si la sesión YA venció, el
+//    gate no intercepte el POST con un redirect 307 (que preserva el método y
+//    terminaría posteando contra /login). Sin sesión el signOut es un no-op y
+//    el handler te manda al login igual, que es lo que se quiere.
+const RUTAS_PUBLICAS = ["/login", "/precios", "/auth/cerrar-sesion"];
 
 function esRutaPublica(pathname: string): boolean {
     // Algunos endpoints /api/* no llevan sesión de usuario y se autentican por
@@ -85,6 +90,18 @@ export async function proxy(req: NextRequest) {
         const urlLogin = req.nextUrl.clone();
         urlLogin.pathname = "/login";
         return NextResponse.redirect(urlLogin);
+    }
+
+    // Gate de ROL: las rutas de admin (balances, modelos, conversaciones) no son
+    // para el mensajero. Reusa el `user` que ya trajimos arriba, así que no
+    // cuesta ninguna consulta extra. Las páginas vuelven a validar por su cuenta
+    // (defensa en profundidad) y cada server action tiene su propio permiso: esto
+    // es solo para que una URL escrita a mano no muestre una pantalla vacía.
+    if (user && rutaExigeAdmin(req.nextUrl.pathname) && normalizarRol(user.app_metadata?.rol) !== "admin") {
+        const urlInicio = req.nextUrl.clone();
+        urlInicio.pathname = "/";
+        urlInicio.search = "";
+        return NextResponse.redirect(urlInicio);
     }
 
     return response;

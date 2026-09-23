@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 import { createClient } from "@/lib/supabase-server"
+import { exigirPermiso } from "@/lib/auth-rol"
 import { PriceList } from "@/components/pedidos/price-list-modal"
 
 // Definimos el tipo de retorno para tener autocompletado en el front
@@ -18,6 +19,8 @@ export async function guardarListaPrecios(
     saboresAgua: string[],
     saboresCrema: string[]
 ): Promise<ActionResponse> {
+    await exigirPermiso("precios.escribir")
+
 
     // 1. Validaciones básicas antes de tocar la BD
     if (!nombre || nombre.trim() === "") {
@@ -94,7 +97,9 @@ export async function guardarListaPrecios(
     }
 }
 
+// Su único consumidor es el modal de edición de listas, que es solo de admin.
 export async function getListaActiva(): Promise<PriceList | null> {
+    await exigirPermiso("precios.escribir")
     const supabase = await createClient()
 
     try {

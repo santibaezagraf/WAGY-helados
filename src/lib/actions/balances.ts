@@ -1,6 +1,7 @@
 "use server"
 
 import { createClient } from "@/lib/supabase-server"
+import { exigirPermiso } from "@/lib/auth-rol"
 
 export interface Balance {
   total_agua: number
@@ -19,6 +20,7 @@ export async function obtenerBalance(
   fechaInicio: Date,
   fechaFin: Date
 ): Promise<Balance | null> {
+  await exigirPermiso("balances.ver")
   try {
     const supabase = await createClient()
 

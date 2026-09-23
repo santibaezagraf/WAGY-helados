@@ -11,33 +11,34 @@
 //
 // Uso (PowerShell):
 //   $env:WAGY_DB_PASSWORD_PROD="..."; $env:WAGY_DB_PASSWORD_STAGING="..."
-//   npm run migrar-todo             # aplica de verdad
-//   npm run migrar-todo -- --dry-run  # solo muestra qué aplicaría
+//   npm run migrar-todo                        # aplica a los dos, prod primero
+//   npm run migrar-todo -- --dry-run           # solo muestra qué aplicaría
+//   npm run migrar-todo -- --solo=staging      # SOLO staging (no pide la pass de prod)
+//   npm run migrar-todo -- --solo=prod
 //
 // Notas:
 // - Corre PROD primero y, si falla, NO toca staging (corta con exit 1).
+// - Con --solo=<clave> se aplica a un único proyecto: sirve para probar una
+//   migración riesgosa en staging antes de tocar producción.
 // - La password se url-encodea (encodeURIComponent) por si tiene símbolos.
 // - El host del pooler es el mismo para ambos (sa-east-1); solo cambia el ref.
 
 import { spawnSync } from 'node:child_process';
+import { PROYECTOS, leerSolo } from './proyectos.mjs';
 
 const POOLER_HOST = 'aws-1-sa-east-1.pooler.supabase.com';
 const POOLER_PORT = 5432; // session mode — el que usa `db push`
 
-const OBJETIVOS = [
-  {
-    nombre: 'PRODUCCIÓN (WAGY helados)',
-    ref: 'bhexbncbuieuxklegnjm',
-    envPassword: 'WAGY_DB_PASSWORD_PROD',
-  },
-  {
-    nombre: 'STAGING (wagy-helados-staging)',
-    ref: 'oqrufwtuwvogdfhojips',
-    envPassword: 'WAGY_DB_PASSWORD_STAGING',
-  },
-];
-
 const dryRun = process.argv.includes('--dry-run');
+
+// --solo=staging | --solo=prod: aplica a UN solo proyecto.
+// Sirve para probar una migración riesgosa en staging antes de tocar producción
+// (el default corre los dos, y prod primero).
+const solo = leerSolo(process.argv);
+
+// Filtramos ANTES del chequeo de passwords: con --solo=staging no debe pedir la
+// de producción.
+const objetivosAplicar = solo ? PROYECTOS.filter((p) => p.clave === solo) : PROYECTOS;
 
 function construirDbUrl(ref, password) {
   const user = `postgres.${ref}`;
@@ -51,7 +52,7 @@ function ocultarPassword(url) {
 
 let huboError = false;
 
-for (const objetivo of OBJETIVOS) {
+for (const objetivo of objetivosAplicar) {
   const password = process.env[objetivo.envPassword];
   if (!password) {
     console.error(
@@ -81,4 +82,4 @@ for (const objetivo of OBJETIVOS) {
 }
 
 if (huboError) process.exit(1);
-console.log(`\n✔ Migraciones aplicadas en todos los proyectos.`);
+console.log(`\n✔ Migraciones aplicadas en: ${objetivosAplicar.map((o) => o.nombre).join(' + ')}.`);

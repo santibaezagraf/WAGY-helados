@@ -35,6 +35,8 @@ import { useRouter, useSearchParams, usePathname } from "next/navigation"
 import { EditOrderModal } from "./edit-order-modal"
 import { EditCostoEnvioModal } from "./edit-costo-envio-modal"
 import { ChatModal } from "./chat-modal"
+import { claveDiaAR } from "@/lib/zona-horaria"
+import { etiquetaFecha } from "@/lib/fecha-chat"
 
 type FilterPeriodo = 'dia' | 'semana' | 'mes' | 'todos'
 
@@ -44,7 +46,7 @@ export interface Filters {
   ancla: string,
   estados: string[]
   pagado: (boolean | null)[]
-  enviado: (boolean | null)[]
+  mensaje_enviado: (boolean | null)[]
   direccion?: string
   telefono?: string
 }
@@ -54,7 +56,7 @@ const defaultFilters: Filters = {
   ancla: '',
   estados: ["pendiente", "enviado"],
   pagado: [true, false],
-  enviado: [true, false],
+  mensaje_enviado: [true, false],
   direccion: '',
   telefono: '',
 }
@@ -65,7 +67,7 @@ const areFiltersEqual = (f1: Filters, f2: Filters) => {
     f1.ancla === f2.ancla &&
     f1.estados.join() === f2.estados.join() &&
     f1.pagado.join() === f2.pagado.join() &&
-    f1.enviado.join() === f2.enviado.join() &&
+    f1.mensaje_enviado.join() === f2.mensaje_enviado.join() &&
     f1.direccion === f2.direccion &&
     f1.telefono === f2.telefono
   )
@@ -77,7 +79,7 @@ const parseFiltersFromUrl = (searchParams: URLSearchParams): Filters => {
     ancla: searchParams.get('ancla') || defaultFilters.ancla,
     estados: searchParams.get('estado')?.split(',') || defaultFilters.estados,
     pagado: searchParams.get('pagado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.pagado,
-    enviado: searchParams.get('enviado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.enviado,
+    mensaje_enviado: searchParams.get('mensaje_enviado')?.split(',').map(p => p === 'true' ? true : p === 'false' ? false : null) || defaultFilters.mensaje_enviado,
     direccion: searchParams.get('direccion') || defaultFilters.direccion,
     telefono: searchParams.get('telefono') || defaultFilters.telefono,
   }
@@ -93,6 +95,10 @@ interface DataTableProps {
   telefonosRequierenAtencion?: string[],
   /** Teléfonos pausados por el rate-limit anti-DoS (aviso distinto del anterior). */
   telefonosRateLimit?: string[],
+  /** Rol de solo lectura (mensajero): sin alta, edición ni acciones masivas. */
+  soloLectura?: boolean,
+  /** Última fecha de entrega cargada (ISO): hasta dónde navega el selector. */
+  maxFechaEntregaISO?: string | null,
 }
 
 export function DataTable({
@@ -103,6 +109,8 @@ export function DataTable({
   rowCount,
   telefonosRequierenAtencion = [],
   telefonosRateLimit = [],
+  soloLectura = false,
+  maxFechaEntregaISO = null,
 }: DataTableProps) {
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
@@ -182,7 +190,8 @@ export function DataTable({
     onRowSelect: handleRowSelect,
     telefonosAtencion: telefonosAtencionSet,
     telefonosRateLimit: telefonosRateLimitSet,
-  }), [editingOrderId, editingCostoId, chattingOrderId, handleRowSelect, telefonosAtencionSet, telefonosRateLimitSet])
+    soloLectura,
+  }), [editingOrderId, editingCostoId, chattingOrderId, handleRowSelect, telefonosAtencionSet, telefonosRateLimitSet, soloLectura])
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -226,7 +235,7 @@ export function DataTable({
 
     params.set('estado', newFilters.estados.join(','))
     params.set('pagado', newFilters.pagado.join(','))
-    params.set('enviado', newFilters.enviado.join(','))
+    params.set('mensaje_enviado', newFilters.mensaje_enviado.join(','))
     params.set('periodo', newFilters.periodo)
 
     // ancla vacía = hoy → no ensuciamos la URL
@@ -325,7 +334,7 @@ export function DataTable({
       return {
         id: pedido.id,
         mensaje: crearMensajeWpp(pedido),
-        enviado: pedido.enviado
+        enviado: pedido.mensaje_enviado
       }
     })
 
@@ -340,7 +349,7 @@ export function DataTable({
           así el editor de mensajes se posiciona por debajo y no le come alto a
           la tabla al abrirse. */}
       <div className="flex flex-col gap-2 min-h-[calc(100dvh-var(--wagy-header-h,4rem)-1.5rem)]">
-      {selectedRowsCount > 0 && (
+      {!soloLectura && selectedRowsCount > 0 && (
         <div className="shrink-0">
           <SelectionBar
             selectedRowsCount={selectedRowsCount}
@@ -355,8 +364,9 @@ export function DataTable({
         <FilterBar
           table={table}
           onFiltersChange={onFiltersChange}
-          onAddOrder={() => setIsAddModalOpen(true)}
+          onAddOrder={soloLectura ? undefined : () => setIsAddModalOpen(true)}
           currentFilters={filters}
+          maxFechaEntregaISO={maxFechaEntregaISO}
         />
       </div>
 
@@ -386,18 +396,46 @@ export function DataTable({
           </TableHeader>
           <TableBody>
             {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && "selected"}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
+              table.getRowModel().rows.map((row, index) => {
+                // Separador de día: solo tiene sentido cuando la vista puede
+                // mostrar pedidos de más de un día (semana/mes/todos) — en
+                // "día" todas las filas comparten fecha_entrega, así que
+                // separar sería ruido. Se agrupa por fecha_entrega (no por
+                // created_at): es la fecha por la que ordena/filtra el
+                // listado (ver pedidos-listado.ts) y la data ya llega
+                // ordenada por ese campo, así que alcanza con comparar contra
+                // la fila anterior en el orden actual de la tabla.
+                const filas = table.getRowModel().rows
+                const diaActual = claveDiaAR(new Date(row.original.fecha_entrega))
+                const diaAnterior = index > 0
+                  ? claveDiaAR(new Date(filas[index - 1].original.fecha_entrega))
+                  : null
+                const mostrarSeparador = filters.periodo !== 'dia' && diaActual !== diaAnterior
+
+                return (
+                  <React.Fragment key={row.id}>
+                    {mostrarSeparador && (
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell
+                          colSpan={columns.length}
+                          className="bg-slate-100 py-1 px-3 text-[11px] font-medium text-slate-500 border-y"
+                        >
+                          {etiquetaFecha(row.original.fecha_entrega)}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    <TableRow
+                      data-state={row.getIsSelected() && "selected"}
+                    >
+                      {row.getVisibleCells().map((cell) => (
+                        <TableCell key={cell.id}>
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  </React.Fragment>
+                )
+              })
             ) : (
               <TableRow>
                 <TableCell colSpan={columns.length} className="h-24 text-center">
@@ -486,7 +524,7 @@ export function DataTable({
 
       {/* Editor de mensajes de WhatsApp — vive fuera del bloque de viewport,
           así al abrirse aparece debajo (el propio editor hace scrollIntoView) */}
-      {mostrarEditorWpp && mensajesWpp.length > 0 && (
+      {!soloLectura && mostrarEditorWpp && mensajesWpp.length > 0 && (
         <div>
           <MessageEditor
             mensajes={mensajesWpp}
@@ -495,13 +533,15 @@ export function DataTable({
         </div>
       )}
 
-      <AddOrderModal
-        open={isAddModalOpen}
-        onOpenChange={setIsAddModalOpen}
-      />
+      {!soloLectura && (
+        <AddOrderModal
+          open={isAddModalOpen}
+          onOpenChange={setIsAddModalOpen}
+        />
+      )}
 
-      {editingOrderId !== null && (
-        <EditOrderModal 
+      {!soloLectura && editingOrderId !== null && (
+        <EditOrderModal
           open={true}
           onOpenChange={(isOpen) => {
             if (!isOpen) setEditingOrderId(null)
@@ -521,7 +561,7 @@ export function DataTable({
         />
       )}
 
-      {chattingOrderId !== null && (
+      {!soloLectura && chattingOrderId !== null && (
         <ChatModal
           open={true}
           onOpenChange={(isOpen) => {

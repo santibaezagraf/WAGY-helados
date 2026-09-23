@@ -570,34 +570,34 @@ describe('elegirRespuestaDatosFaltantes con pagoNoSoportado', () => {
 });
 
 describe('estaDespachado', () => {
-  it('estado="enviado" → despachado (aunque enviado sea false/null)', () => {
-    expect(estaDespachado({ estado: 'enviado', enviado: false })).toBe(true);
-    expect(estaDespachado({ estado: 'enviado', enviado: null })).toBe(true);
+  it('estado="enviado" → despachado (aunque mensaje_enviado sea false/null)', () => {
+    expect(estaDespachado({ estado: 'enviado', mensaje_enviado: false })).toBe(true);
+    expect(estaDespachado({ estado: 'enviado', mensaje_enviado: null })).toBe(true);
   });
 
-  it('enviado=true → despachado aunque el estado todavía sea "pendiente"', () => {
-    // Caso central: se copió el mensaje al cadete (enviado=true) pero nadie
-    // movió el estado a mano todavía.
-    expect(estaDespachado({ estado: 'pendiente', enviado: true })).toBe(true);
+  it('mensaje_enviado=true → despachado aunque el estado todavía sea "pendiente"', () => {
+    // Caso central: se copió el mensaje al cadete (mensaje_enviado=true) pero
+    // nadie movió el estado a mano todavía.
+    expect(estaDespachado({ estado: 'pendiente', mensaje_enviado: true })).toBe(true);
   });
 
   it('pendiente sin enviar → no despachado', () => {
-    expect(estaDespachado({ estado: 'pendiente', enviado: false })).toBe(false);
+    expect(estaDespachado({ estado: 'pendiente', mensaje_enviado: false })).toBe(false);
   });
 
   it('borrador / esperando_cancelacion sin enviar → no despachado', () => {
-    expect(estaDespachado({ estado: 'borrador', enviado: false })).toBe(false);
-    expect(estaDespachado({ estado: 'esperando_cancelacion', enviado: null })).toBe(false);
+    expect(estaDespachado({ estado: 'borrador', mensaje_enviado: false })).toBe(false);
+    expect(estaDespachado({ estado: 'esperando_cancelacion', mensaje_enviado: null })).toBe(false);
   });
 
-  it('cancelado con enviado ausente → no despachado (patchConEnviadoCoherente fuerza enviado=false)', () => {
+  it('cancelado con mensaje_enviado ausente → no despachado (patchConEnviadoCoherente fuerza mensaje_enviado=false)', () => {
     expect(estaDespachado({ estado: 'cancelado' })).toBe(false);
   });
 
-  it('la cancelación gana: cancelado + enviado=true colgado → NO despachado', () => {
-    // Defensa contra un enviado=true que quedó sin limpiar al cancelar desde el
-    // bot: no queremos re-disparar el viejo bug de "ya fue despachado".
-    expect(estaDespachado({ estado: 'cancelado', enviado: true })).toBe(false);
+  it('la cancelación gana: cancelado + mensaje_enviado=true colgado → NO despachado', () => {
+    // Defensa contra un mensaje_enviado=true que quedó sin limpiar al cancelar
+    // desde el bot: no queremos re-disparar el viejo bug de "ya fue despachado".
+    expect(estaDespachado({ estado: 'cancelado', mensaje_enviado: true })).toBe(false);
   });
 
   it('campos ausentes → no despachado', () => {

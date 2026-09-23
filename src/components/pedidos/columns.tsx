@@ -26,6 +26,8 @@ import {
     actualizarEnviadoPedido,
 } from "@/lib/actions/pedidos"
 import { useRouter } from "next/navigation"
+import { formatearFechaAR, formatearHoraAR } from "@/lib/zona-horaria"
+import { esPedidoProgramado } from "@/lib/entrega"
 
 export const createColumns = (config: {
     editingOrderId: number | null
@@ -40,7 +42,10 @@ export const createColumns = (config: {
     telefonosAtencion: Set<string>
     /** Teléfonos pausados por el rate-limit anti-DoS (>=40 msj/hora) — aviso distinto. */
     telefonosRateLimit: Set<string>
-}): ColumnDef<Pedido>[] => [
+    /** Mensajero: se sacan la selección y el menú de acciones. El costo de envío
+     *  sigue siendo editable — es su única escritura permitida. */
+    soloLectura?: boolean
+}): ColumnDef<Pedido>[] => ([
     {
         id: "select",
         header: ({ table }) => (
@@ -105,7 +110,10 @@ export const createColumns = (config: {
         accessorFn: (row) => row.costo_envio,
         header: () => <span className="md:hidden">Costo de Envío</span>,
         cell: ({ row }) => {
-            const costo_envio = parseFloat(row.getValue("costo_envio") || "0")
+            // Leemos de row.original y no de getValue("costo_envio"): eso apuntaba
+            // a la OTRA columna (la de desktop) y devolvería undefined si algún
+            // día se la oculta.
+            const costo_envio = row.original.costo_envio ?? 0
             const formatted = new Intl.NumberFormat("es-AR", {
                 style: "currency",
                 currency: "ARS",
@@ -240,24 +248,34 @@ export const createColumns = (config: {
     {
         accessorKey: "costo_envio",
         header: () => <span className="hidden md:inline">Costo de Envío</span>,
+        // Editable también en desktop: antes solo se podía tocar desde la celda
+        // móvil o abriendo el modal completo del pedido. El mensajero, cuyo
+        // ÚNICO permiso de escritura es este, trabaja sobre todo en desktop.
         cell: ({ row }) => {
-            const precio = parseFloat(row.getValue("costo_envio") || "0")
+            const precio = row.original.costo_envio ?? 0
             const formatted = new Intl.NumberFormat("es-AR", {
                 style: "currency",
                 currency: "ARS",
             }).format(precio)
-            return <div className="font-medium hidden md:block">{formatted}</div>
-
+            return (
+                <Button
+                    variant="link"
+                    className="hidden md:inline-flex h-auto p-0 font-medium"
+                    onClick={() => config.setEditingCostoId(row.original.id)}
+                >
+                    {formatted}
+                </Button>
+            )
         },
         meta: {
             className: "hidden md:table-cell"
         }
     },
     {
-        accessorKey: "enviado",
+        accessorKey: "mensaje_enviado",
         header: "Wpp Enviado",
         cell: ({ row }) => {
-            const enviado = row.getValue("enviado") as boolean
+            const enviado = row.getValue("mensaje_enviado") as boolean
             return (
                 <div className="flex items-center justify-center">
                     <Badge 
@@ -271,15 +289,77 @@ export const createColumns = (config: {
         },
     },
     {
+        id: "cargado",
+        accessorFn: (row) => row.created_at,
+        header: () => <span className="hidden md:inline">Cargado</span>,
+        // La hora en que ENTRÓ el pedido. Es un dato que no se veía en ninguna
+        // parte del listado. Ojo: no es lo mismo que la fecha de ENTREGA, que es
+        // por la que la tabla filtra — de ahí el badge "Programado".
+        cell: ({ row }) => {
+            const creado = new Date(row.original.created_at)
+            const programado = esPedidoProgramado(row.original)
+            return (
+                <div
+                    className="hidden md:block text-xs"
+                    title={`Cargado el ${formatearFechaAR(creado, { dateStyle: "full" })} a las ${formatearHoraAR(creado)}`}
+                >
+                    <div className="font-medium tabular-nums text-slate-700">
+                        {formatearHoraAR(creado)}
+                    </div>
+                    <div className="text-[11px] text-slate-400 tabular-nums">
+                        {formatearFechaAR(creado, { day: "numeric", month: "short" })}
+                    </div>
+                    {programado && (
+                        <span
+                            className="mt-0.5 inline-block rounded bg-violet-100 px-1 py-px text-[10px] font-medium text-violet-700"
+                            title={`Programado: se entrega el ${formatearFechaAR(new Date(row.original.fecha_entrega), { day: "numeric", month: "long" })}`}
+                        >
+                            Programado
+                        </span>
+                    )}
+                </div>
+            )
+        },
+        meta: {
+            className: "hidden md:table-cell"
+        }
+    },
+    {
+        id: "creado_por",
+        accessorFn: (row) => row.creado_por_nombre,
+        header: () => <span className="hidden md:inline">Por</span>,
+        cell: ({ row }) => {
+            const quien = row.original.creado_por_nombre
+            const cuando = row.original.enviado_at
+            const despacho = row.original.enviado_por_nombre
+            return (
+                <div
+                    className="hidden md:block text-xs text-slate-600"
+                    title={
+                        despacho
+                            ? `Despachado por ${despacho}${cuando ? ` el ${new Date(cuando).toLocaleString("es-AR")}` : ""}`
+                            : undefined
+                    }
+                >
+                    {quien ?? "—"}
+                    {despacho && <span className="block text-[10px] text-slate-400">↗ {despacho}</span>}
+                </div>
+            )
+        },
+        meta: {
+            className: "hidden md:table-cell"
+        }
+    },
+    {
         id: "actions",
         cell: ({ row }) => {
             const pedido = row.original
             const router = useRouter()
-            
+
             const actualizarEstado = React.useCallback(async (nuevoEstado: string) => {
                 try {
                     await actualizarEstadoPedido(pedido.id, nuevoEstado)
-                    
+
                 } catch (error) {
                     console.error(error)
                     alert("Error al actualizar el estado")
@@ -289,7 +369,7 @@ export const createColumns = (config: {
             const actualizarPagado = React.useCallback(async (pagado: boolean) => {
                 try {
                     await actualizarPagadoPedido(pedido.id, pagado)
-                    
+
                 } catch (error) {
                     console.error(error)
                     alert("Error al actualizar el estado de pago")
@@ -299,13 +379,13 @@ export const createColumns = (config: {
             const actualizarEnviado = React.useCallback(async (enviado: boolean) => {
                 try {
                     await actualizarEnviadoPedido(pedido.id, enviado)
-                    
+
                 } catch (error) {
                     console.error(error)
                     alert("Error al actualizar el estado de envío")
                 }
             }, [pedido.id, router])
-        
+
             return (
                 <>
                     <DropdownMenu>
@@ -328,7 +408,7 @@ export const createColumns = (config: {
                                 Abrir chat
                             </DropdownMenuItem>
 
-                            <DropdownMenuItem 
+                            <DropdownMenuItem
                                 onClick={() => {
                                     const mensaje = crearMensajeWpp(pedido)
                                     navigator.clipboard.writeText(mensaje)
@@ -338,13 +418,13 @@ export const createColumns = (config: {
                                 <Copy className="h-4 w-4 mr-2" />
                                 Copiar mensaje
                             </DropdownMenuItem>
-                            
+
                             <DropdownMenuSeparator />
-                            
+
                             <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Cambiar estado</DropdownMenuSubTrigger>
                                 <DropdownMenuSubContent>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarEstado("pendiente")}
                                         disabled={pedido.estado === "pendiente"}
                                         className="gap-2 text-gray-700 hover:text-gray-800 hover:bg-gray-50 focus:bg-gray-50 focus:text-gray-800 data-[disabled]:bg-gray-100"
@@ -352,7 +432,7 @@ export const createColumns = (config: {
                                         <Clock className="h-4 w-4 text-gray-500" />
                                         Pendiente
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarEstado("enviado")}
                                         disabled={pedido.estado === "enviado"}
                                         className={`gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800 data-[disabled]:bg-green-50`}
@@ -360,7 +440,7 @@ export const createColumns = (config: {
                                         <Check className="h-4 w-4" />
                                         Enviado
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarEstado("cancelado")}
                                         disabled={pedido.estado === "cancelado"}
                                         className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800 data-[disabled]:bg-red-50"
@@ -374,7 +454,7 @@ export const createColumns = (config: {
                             <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Marcar pago como</DropdownMenuSubTrigger>
                                 <DropdownMenuSubContent>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarPagado(true)}
                                         disabled={pedido.pagado === true}
                                         className="gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800"
@@ -382,7 +462,7 @@ export const createColumns = (config: {
                                         <Check className="h-4 w-4" />
                                         Pagado
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarPagado(false)}
                                         disabled={pedido.pagado === false}
                                         className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800"
@@ -396,17 +476,17 @@ export const createColumns = (config: {
                             <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Marcar mensaje como</DropdownMenuSubTrigger>
                                 <DropdownMenuSubContent>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarEnviado(true)}
-                                        disabled={pedido.enviado === true}
+                                        disabled={pedido.mensaje_enviado === true}
                                         className="gap-2 text-green-700 hover:text-green-800 hover:bg-green-50 focus:bg-green-50 focus:text-green-800"
                                     >
                                         <Check className="h-4 w-4" />
                                         Enviado
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem
                                         onClick={() => actualizarEnviado(false)}
-                                        disabled={pedido.enviado === false}
+                                        disabled={pedido.mensaje_enviado === false}
                                         className="gap-2 text-red-700 hover:text-red-800 hover:bg-red-50 focus:bg-red-50 focus:text-red-800"
                                     >
                                         <X className="h-4 w-4" />
@@ -414,11 +494,15 @@ export const createColumns = (config: {
                                     </DropdownMenuItem>
                                 </DropdownMenuSubContent>
                             </DropdownMenuSub>
-                            
+
                         </DropdownMenuContent>
                     </DropdownMenu>
                 </>
             )
         },
     },
-]
+// Para el mensajero sacamos la selección masiva y el menú de acciones. El costo
+// de envío NO se filtra: es lo único que puede editar.
+] as ColumnDef<Pedido>[]).filter(
+    (columna) => !config.soloLectura || (columna.id !== "select" && columna.id !== "actions"),
+)

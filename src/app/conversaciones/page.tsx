@@ -1,4 +1,5 @@
-import { createClient } from '@/lib/supabase-server'
+import { sesionActual } from '@/lib/auth-rol'
+import { puede } from '@/lib/rol'
 import { redirect } from 'next/navigation'
 import { Header } from '@/components/ui/header'
 import { getConversacionesRecientes } from '@/lib/actions/mensajes'
@@ -11,9 +12,9 @@ import { ConversacionesInbox } from '@/components/conversaciones/conversaciones-
 // Todas / Pendientes / Bloqueadas. Las bloqueadas se pueden desbloquear desde acá
 // aunque el número lleve rato mudo (lo que el menú de 24h no permitía).
 export default async function ConversacionesPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
+  const sesion = await sesionActual()
+  if (!sesion) redirect('/login')
+  if (!puede(sesion.rol, 'chat.ver')) redirect('/')
 
   // Estado inicial: primera página del filtro por defecto ('todas'). El resto de
   // la navegación (tabs, búsqueda, paginación) la maneja el cliente vía la action.
@@ -32,7 +33,7 @@ export default async function ConversacionesPage() {
     // h-screen + overflow-hidden: el layout tipo WhatsApp Web fija el alto (lista
     // y chat scrollean por dentro), no crece la página.
     <div className="flex h-screen flex-col overflow-hidden">
-      <Header conversacionesIniciales={conversaciones} />
+      <Header conversacionesIniciales={conversaciones} rol={sesion.rol} />
       <main className="min-h-0 flex-1 bg-slate-50">
         <ConversacionesInbox inicial={inicial} />
       </main>

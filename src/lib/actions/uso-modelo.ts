@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient as createServiceClient } from '@supabase/supabase-js'
-import { createClient as createUserClient } from '@/lib/supabase-server'
+import { exigirPermiso } from '@/lib/auth-rol'
 import {
   MODELOS_EXTRACCION,
   MODELOS_CONSULTA,
@@ -100,12 +100,8 @@ type FilaUso = {
   tokens_total: number
 }
 
-/** Aborta si no hay usuario autenticado (esta action usa service-role). */
-async function exigirUsuario() {
-  const supabase = await createUserClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('No autenticado')
-}
+// El gate de permiso es la ÚNICA protección: esta action usa el cliente
+// service-role, que bypassea la RLS. No hay segunda capa.
 
 /** Lista de claves YYYY-MM-DD (AR) de los últimos `dias` días, cronológica. */
 function ultimosDiasAR(dias: number): string[] {
@@ -125,7 +121,7 @@ function ultimosDiasAR(dias: number): string[] {
  * bot). El uso sale de la vista agregada; las alertas, de `alertas_modelo`.
  */
 export async function getEstadoModelos(): Promise<EstadoModelosResp> {
-  await exigirUsuario()
+  await exigirPermiso('modelos.ver')
 
   const claves = ultimosDiasAR(DIAS_SERIE)
   const hoyClave = claves[claves.length - 1]

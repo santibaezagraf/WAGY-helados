@@ -65,19 +65,78 @@ describe('proxy — gate de autenticación', () => {
     it('no confunde una ruta que empieza con el nombre de una pública (/preciosX)', async () => {
       expect(destinoRedirect(await proxy(req('/preciosX')))).toBe('/login');
     });
+
+    // El logout tiene que pasar aunque la sesión ya haya vencido: si el gate lo
+    // interceptara, el redirect 307 preservaría el método y terminaría haciendo
+    // POST contra /login (el error "unexpected response" del server action).
+    it('deja pasar /auth/cerrar-sesion aunque no haya sesión', async () => {
+      expect(destinoRedirect(await proxy(req('/auth/cerrar-sesion')))).toBeNull();
+    });
   });
 
-  describe('con sesión', () => {
+  describe('con sesión de admin', () => {
     beforeEach(() => {
-      getUserMock.mockResolvedValue({ data: { user: { id: 'u1' } } });
+      getUserMock.mockResolvedValue({
+        data: { user: { id: 'u1', app_metadata: { rol: 'admin' } } },
+      });
     });
 
     it('deja pasar el dashboard (/)', async () => {
       expect(destinoRedirect(await proxy(req('/')))).toBeNull();
     });
 
-    it('deja pasar /balances', async () => {
-      expect(destinoRedirect(await proxy(req('/balances')))).toBeNull();
+    it.each(['/balances', '/modelos', '/conversaciones', '/perfil'])(
+      'deja pasar %s',
+      async (ruta) => {
+        expect(destinoRedirect(await proxy(req(ruta)))).toBeNull();
+      },
+    );
+  });
+
+  describe('con sesión de mensajero', () => {
+    beforeEach(() => {
+      getUserMock.mockResolvedValue({
+        data: { user: { id: 'u2', app_metadata: { rol: 'mensajero' } } },
+      });
+    });
+
+    it.each(['/balances', '/modelos', '/conversaciones'])(
+      'manda %s al dashboard',
+      async (ruta) => {
+        expect(destinoRedirect(await proxy(req(ruta)))).toBe('/');
+      },
+    );
+
+    it('también protege las subrutas', async () => {
+      expect(destinoRedirect(await proxy(req('/conversaciones/5491122334455')))).toBe('/');
+    });
+
+    it('deja pasar el dashboard (/), que sí puede ver', async () => {
+      expect(destinoRedirect(await proxy(req('/')))).toBeNull();
+    });
+
+    it('deja pasar /perfil: los dos roles cambian su nombre y contraseña', async () => {
+      expect(destinoRedirect(await proxy(req('/perfil')))).toBeNull();
+    });
+
+    it('no confunde un prefijo (/balances-falsos no es ruta de admin)', async () => {
+      expect(destinoRedirect(await proxy(req('/balances-falsos')))).toBeNull();
+    });
+  });
+
+  // Regresión del fail-closed: un usuario creado a mano al que se le olvidó
+  // poner el rol NO debe entrar como admin.
+  describe('con sesión sin rol declarado', () => {
+    beforeEach(() => {
+      getUserMock.mockResolvedValue({ data: { user: { id: 'u3' } } });
+    });
+
+    it('se lo trata como mensajero: /balances va al dashboard', async () => {
+      expect(destinoRedirect(await proxy(req('/balances')))).toBe('/');
+    });
+
+    it('igual puede ver el dashboard', async () => {
+      expect(destinoRedirect(await proxy(req('/')))).toBeNull();
     });
   });
 });

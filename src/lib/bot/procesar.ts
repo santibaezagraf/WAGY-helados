@@ -1486,7 +1486,7 @@ export type PedidoActivoContext = {
   observaciones: string | null;
   observaciones_detalle?: Json | null;
   metodo_pago: string;
-  enviado?: boolean | null;
+  mensaje_enviado?: boolean | null;
   // Total ya calculado del pedido (DB-side, vía procesar_pedido_final). Lo usa el
   // contexto de la respuesta libre para poder contestar "¿cuánto es mi total?".
   // null en un borrador todavía sin precio.
@@ -1498,25 +1498,28 @@ export type PedidoActivoContext = {
  *
  *   - estado === 'enviado': lo marca el usuario a mano en el dashboard, y muchas
  *     veces tarde (a veces recién al día siguiente).
- *   - enviado === true: se marca solo al copiar desde el sistema el mensaje para
- *     el cadete (copiar == "ya lo despaché"). Es la señal TEMPRANA y confiable.
+ *   - mensaje_enviado === true: se marca solo al copiar desde el sistema el
+ *     mensaje para el cadete (copiar == "ya lo despaché"). Es la señal TEMPRANA
+ *     y confiable. (Se llamaba `enviado` a secas — se renombró porque confundía
+ *     con el estado homónimo. Migración 20260922130000.)
  *
  * Por eso hay que mirar ambas, no solo el estado: entre que se copia el mensaje
- * (enviado=true) y que mueven el estado a 'enviado' hay una ventana en la que el
- * pedido YA salió pero estado sigue en 'pendiente'. Tratarlo como despachado en
- * esa ventana evita que el bot deje cancelar/modificar algo que ya está en camino.
+ * (mensaje_enviado=true) y que mueven el estado a 'enviado' hay una ventana en la
+ * que el pedido YA salió pero estado sigue en 'pendiente'. Tratarlo como despachado
+ * en esa ventana evita que el bot deje cancelar/modificar algo que ya está en camino.
  *
  * LA CANCELACIÓN GANA SIEMPRE: si estado='cancelado' devolvemos false aunque
- * enviado=true. patchConEnviadoCoherente ya fuerza enviado=false al cancelar
- * desde el dashboard, pero las cancelaciones del bot (auto-rechazo y cancelación
- * colgada en /api/gestionar-borradores) NO limpian el booleano, así que podría
- * quedar un enviado=true colgado sobre un cancelado. Sin este cortocircuito eso
- * re-introduciría el viejo bug de "tu pedido ya fue despachado" sobre algo que
- * el cliente canceló — y además un cancelado no está "en camino" por definición.
+ * mensaje_enviado=true. patchConEnviadoCoherente ya fuerza mensaje_enviado=false
+ * al cancelar desde el dashboard, pero las cancelaciones del bot (auto-rechazo y
+ * cancelación colgada en /api/gestionar-borradores) NO limpian el booleano, así
+ * que podría quedar un mensaje_enviado=true colgado sobre un cancelado. Sin este
+ * cortocircuito eso re-introduciría el viejo bug de "tu pedido ya fue despachado"
+ * sobre algo que el cliente canceló — y además un cancelado no está "en camino"
+ * por definición.
  */
-export function estaDespachado(p: { estado?: string | null; enviado?: boolean | null }): boolean {
+export function estaDespachado(p: { estado?: string | null; mensaje_enviado?: boolean | null }): boolean {
   if (p.estado === 'cancelado') return false;
-  return p.estado === 'enviado' || p.enviado === true;
+  return p.estado === 'enviado' || p.mensaje_enviado === true;
 }
 
 // Minutos desde que un pedido entró a cocina ('pendiente') durante los cuales
@@ -2034,7 +2037,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     .eq('telefono', numeroCliente)
     .gte('created_at', hace12Horas)
     .in('estado', ['borrador', 'pendiente', 'esperando_cancelacion'])
-    .eq('enviado', false) // defensivo por si quedó un pendiente con enviado=true
+    .eq('mensaje_enviado', false) // defensivo por si quedó un pendiente con mensaje_enviado=true
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -2045,10 +2048,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   // cliente fue un despacho — si después de eso canceló (u otro evento), su
   // "estado actual" ya no es el del despacho y caemos al saludo genérico.
   //
-  // "Despachado" = estado='enviado' O enviado=true (ver estaDespachado): el
-  // query de pedidoActivo de arriba excluye enviado=true, así que un pedido ya
-  // copiado al cadete pero con estado todavía en 'pendiente' cae acá y lo
-  // reconocemos igual como despachado.
+  // "Despachado" = estado='enviado' O mensaje_enviado=true (ver estaDespachado):
+  // el query de pedidoActivo de arriba excluye mensaje_enviado=true, así que un
+  // pedido ya copiado al cadete pero con estado todavía en 'pendiente' cae acá y
+  // lo reconocemos igual como despachado.
   let ultimoPedidoEnviado: { id: number; estado: string; created_at: string } | null = null;
   // Pedido cancelado hace poco (dentro de VENTANA_REACTIVAR_MS): si el cliente
   // se arrepiente, lo reabrimos con sus datos en vez de perder cantidad/pago.
@@ -2056,7 +2059,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
   if (!pedidoActivo) {
     const { data: ultimoPedido } = await supabaseAdmin
       .from('pedidos')
-      .select('id, estado, enviado, created_at, updated_at')
+      .select('id, estado, mensaje_enviado, created_at, updated_at')
       .eq('telefono', numeroCliente)
       .gte('created_at', hace12Horas)
       .order('created_at', { ascending: false })
@@ -2065,7 +2068,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
     if (ultimoPedido && estaDespachado(ultimoPedido)) {
       ultimoPedidoEnviado = ultimoPedido;
-      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) ya está despachado (estado=${ultimoPedido.estado}, enviado=${ultimoPedido.enviado}). Lo uso para respuestas contextuales.`);
+      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) ya está despachado (estado=${ultimoPedido.estado}, mensaje_enviado=${ultimoPedido.mensaje_enviado}). Lo uso para respuestas contextuales.`);
     } else if (ultimoPedido && ultimoPedido.estado === 'cancelado') {
       // ¿Se canceló hace poco? updated_at ≈ el momento de la cancelación
       // (fallback a created_at por si la columna viniera null).
@@ -2078,7 +2081,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está cancelado pero hace rato (${Math.round(msDesdeCancelacion / 60000)} min); no habilito reactivar.`);
       }
     } else if (ultimoPedido) {
-      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado ${ultimoPedido.estado} (enviado=${ultimoPedido.enviado}); no aplica respuesta contextual de despacho.`);
+      console.log(`📦 El último pedido del cliente (id ${ultimoPedido.id}) está en estado ${ultimoPedido.estado} (mensaje_enviado=${ultimoPedido.mensaje_enviado}); no aplica respuesta contextual de despacho.`);
     }
   }
 
@@ -2883,7 +2886,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
     // 1. PRIORIDAD ABSOLUTA: CANCELACIÓN
     //
     // Todos los UPDATE de estos flujos van con guard atómico:
-    //   .neq('estado', 'enviado').neq('enviado', true)
+    //   .neq('estado', 'enviado').neq('mensaje_enviado', true)
     // Esto evita una race condition: entre que leímos pedidoActivo y ahora,
     // el repartidor pudo haber tocado "Marcar como enviado". Si el UPDATE
     // afecta 0 filas, sabemos que se envió en la ventana y le avisamos al cliente.
@@ -2907,7 +2910,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           .update(patchConEnviadoCoherente('cancelado'))
           .eq('id', pedidoActivo.id)
           .neq('estado', 'enviado')
-          .neq('enviado', true)
+          .neq('mensaje_enviado', true)
           .select('id');
 
         if (cancelados && cancelados.length > 0) {
@@ -3022,7 +3025,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         .update({ estado: 'esperando_cancelacion' })
         .eq('id', pedidoActivo.id)
         .neq('estado', 'enviado')
-        .neq('enviado', true)
+        .neq('mensaje_enviado', true)
         .select('id');
 
       if (marcados && marcados.length > 0) {
@@ -3063,7 +3066,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           .eq('id', ultimoPedidoCancelado.id)
           .eq('telefono', numeroCliente)
           .eq('estado', 'cancelado') // guard: sigue cancelado (no lo tocó otro proceso)
-          .neq('enviado', true)
+          .neq('mensaje_enviado', true)
           .select('*')
           .maybeSingle();
 
@@ -3100,7 +3103,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
 
     // Modificación de un pedido ya despachado (sin pedidoActivo): el pedido ya
     // salió, no se puede tocar. Mismo criterio que la cancelación de un
-    // despachado. "Despachado" incluye enviado=true con estado='pendiente' (el
+    // despachado. "Despachado" incluye mensaje_enviado=true con estado='pendiente' (el
     // usuario copió el mensaje al cadete pero todavía no movió el estado a mano).
     // Limitación conocida: dentro de la ventana de 12h no podemos distinguir
     // "sumale 10 a lo que pedí" de "quiero pedir de nuevo", así que un pedido
@@ -3214,15 +3217,15 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           return;
         }
         // Guard atómico: el borrador pudo pasar a cancelado (auto-rechazo del cron
-        // u operador cancelando desde el dashboard) o quedar con enviado=true entre
-        // el read de pedidoActivo y este UPDATE. Sin guard, este update resucita un
-        // cancelado a 'pendiente' o pisa un despachado. Filas afectadas == 0 → race.
+        // u operador cancelando desde el dashboard) o quedar con mensaje_enviado=true
+        // entre el read de pedidoActivo y este UPDATE. Sin guard, este update resucita
+        // un cancelado a 'pendiente' o pisa un despachado. Filas afectadas == 0 → race.
         const { data: finalData } = await supabaseAdmin
           .from('pedidos')
           .update({ estado: 'pendiente' })
           .eq('id', pedidoActivo.id)
           .eq('estado', 'borrador')
-          .neq('enviado', true)
+          .neq('mensaje_enviado', true)
           .select('*')
           .maybeSingle();
         if (finalData) {
@@ -3300,7 +3303,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         })
           .eq('id', pedidoActivo.id)
           .eq('estado', 'borrador')
-          .neq('enviado', true)
+          .neq('mensaje_enviado', true)
           .select('*')
           .maybeSingle();
 
@@ -3416,6 +3419,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             metodo_pago: pagoFinal,
             estado: 'borrador',
             direccion_de_historial: direccionInyectadaDeHistorial,
+            // Auditoría: los pedidos que entran por WhatsApp no los cargó nadie del staff.
+            creado_por_nombre: 'bot',
           }])
           .select('id')
           .single();
@@ -3503,9 +3508,10 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
         console.log("🔄 El cliente quiere modificar su pedido activo. Actualizando datos...");
         // Guard atómico: pendiente → borrador es un flujo válido (cliente
         // modificando su pedido en cocina), pero entre el read y este UPDATE el
-        // operador pudo haber marcado enviado=true (copió el mensaje al cadete)
-        // o el estado pudo haber pasado a 'enviado'/'cancelado'. Sin guard,
-        // degradaríamos un despachado a 'borrador' con enviado=true colgado.
+        // operador pudo haber marcado mensaje_enviado=true (copió el mensaje al
+        // cadete) o el estado pudo haber pasado a 'enviado'/'cancelado'. Sin
+        // guard, degradaríamos un despachado a 'borrador' con mensaje_enviado=true
+        // colgado.
         const { data: updateData, error: updateError } = await supabaseAdmin
           .from('pedidos')
           .update({
@@ -3521,7 +3527,7 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
           })
           .eq('id', pedidoActivo.id)
           .eq('estado', 'pendiente')
-          .neq('enviado', true)
+          .neq('mensaje_enviado', true)
           .select('*')
           .maybeSingle();
 
@@ -3550,6 +3556,8 @@ export async function procesarMensajesDeCliente(numeroCliente: string) {
             metodo_pago: pagoFinal,
             estado: 'borrador',
             direccion_de_historial: direccionInyectadaDeHistorial,
+            // Auditoría: los pedidos que entran por WhatsApp no los cargó nadie del staff.
+            creado_por_nombre: 'bot',
           }])
           .select('*')
           .single();

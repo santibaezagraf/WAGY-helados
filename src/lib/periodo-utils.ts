@@ -72,6 +72,33 @@ export function esPeriodoActual(periodo: Periodo, fecha: Date, ahora: Date = new
     return ahora >= inicioPeriodo(periodo, fecha) && ahora < finPeriodo(periodo, fecha)
 }
 
+/**
+ * ¿Se puede avanzar al período siguiente?
+ *
+ * Antes la flecha se apagaba en el período actual, con el supuesto de que "no
+ * hay pedidos a futuro". Con los pedidos programados eso dejó de ser cierto: si
+ * hay uno para la semana que viene, tiene que poder llegarse a esa semana.
+ *
+ * El tope es el MÁS TARDÍO entre ahora y la última fecha de entrega cargada, así
+ * que al período actual siempre se puede volver aunque no haya nada programado.
+ *
+ * `finPeriodo` es el fin EXCLUSIVO, o sea el arranque del período siguiente: si
+ * el tope lo alcanza, el período siguiente tiene algo (o es el actual). Esto hace
+ * que la comparación funcione igual para día, semana y mes sin casos especiales
+ * — un pedido para el martes que viene habilita "semana siguiente" completa, no
+ * solo ese día.
+ */
+export function puedeAvanzar(
+    periodo: Periodo,
+    fecha: Date,
+    maxFechaEntrega: Date | null,
+    ahora: Date = new Date(),
+): boolean {
+    if (periodo === 'todos') return false
+    const tope = maxFechaEntrega && maxFechaEntrega > ahora ? maxFechaEntrega : ahora
+    return finPeriodo(periodo, fecha) <= tope
+}
+
 /** Etiqueta legible del período anclado en `fecha` ("Hoy", "29 jun – 5 jul", "junio 2026"…). */
 export function etiquetaPeriodo(periodo: Periodo, fecha: Date, ahora: Date = new Date()): string {
     if (periodo === 'todos') return 'Todos'

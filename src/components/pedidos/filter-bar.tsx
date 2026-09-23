@@ -17,6 +17,8 @@ interface FilterBarProps {
     onFiltersChange?: (filters: Filters) => void
     onAddOrder?: () => void
     currentFilters: Filters
+    /** Última fecha de entrega cargada (ISO): hasta dónde deja navegar hacia adelante. */
+    maxFechaEntregaISO?: string | null
 }
 
 export const FilterBar = React.memo(function FilterBar({
@@ -24,6 +26,7 @@ export const FilterBar = React.memo(function FilterBar({
     onFiltersChange,
     onAddOrder,
     currentFilters,
+    maxFechaEntregaISO = null,
 }: FilterBarProps) {
     // busqueda por texto
     const [searchDireccion, setSearchDireccion] = React.useState(currentFilters.direccion)
@@ -95,15 +98,15 @@ export const FilterBar = React.memo(function FilterBar({
     }, [currentFilters, onFiltersChange])
 
     const toggleMensaje = React.useCallback((estado: boolean) => {
-        const currentEnviado = currentFilters.enviado.filter(v => v !== null) as boolean[];
-        
+        const currentEnviado = currentFilters.mensaje_enviado.filter(v => v !== null) as boolean[];
+
         const newEnviado = currentEnviado.includes(estado)
             ? currentEnviado.filter(e => e !== estado)
             : [...currentEnviado, estado]
 
         onFiltersChange?.({
             ...currentFilters,
-            enviado: newEnviado,
+            mensaje_enviado: newEnviado,
         })
     }, [currentFilters, onFiltersChange])
 
@@ -113,6 +116,7 @@ export const FilterBar = React.memo(function FilterBar({
                 periodo={currentFilters.periodo}
                 ancla={currentFilters.ancla}
                 onChange={handleTemporalChange}
+                maxFechaEntregaISO={maxFechaEntregaISO}
             />
 
             <div className="hidden md:block h-8 w-px bg-gray-300" />
@@ -159,9 +163,9 @@ export const FilterBar = React.memo(function FilterBar({
                         <Filter className="h-4 w-4" />
                         <span className="hidden sm:inline">Filtros</span>
                         <span className="sm:hidden">F</span>
-                        {(currentFilters.estados.length < 3 || currentFilters.pagado.length < 2 || currentFilters.enviado.length < 2) && (
+                        {(currentFilters.estados.length < 3 || currentFilters.pagado.length < 2 || currentFilters.mensaje_enviado.length < 2) && (
                             <span className="ml-1 rounded-full bg-cyan-600 px-2 py-0.5 text-xs text-white">
-                                {3 - currentFilters.estados.length + (2 - currentFilters.pagado.length) + (2 - currentFilters.enviado.length)}
+                                {3 - currentFilters.estados.length + (2 - currentFilters.pagado.length) + (2 - currentFilters.mensaje_enviado.length)}
                             </span>
                         )}
                     </Button>
@@ -266,7 +270,7 @@ export const FilterBar = React.memo(function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-mensaje-enviado"
-                                checked={currentFilters.enviado.includes(true)}
+                                checked={currentFilters.mensaje_enviado.includes(true)}
                                 onCheckedChange={() => toggleMensaje(true)}
                             />
                             <label
@@ -280,7 +284,7 @@ export const FilterBar = React.memo(function FilterBar({
                         <div className="flex items-center space-x-2">
                             <Checkbox
                                 id="filter-mensaje-no-enviado"
-                                checked={currentFilters.enviado.includes(false)}
+                                checked={currentFilters.mensaje_enviado.includes(false)}
                                 onCheckedChange={() => toggleMensaje(false)}
                             />
                             <label
@@ -296,13 +300,16 @@ export const FilterBar = React.memo(function FilterBar({
                 </DropdownMenuContent>
             </DropdownMenu>
         
-            <Button
-                onClick={onAddOrder}
-                className="w-full md:w-auto md:ml-auto bg-cyan-600 hover:bg-cyan-700 text-white font-semibold text-sm"
-            >
-                <span className="hidden sm:inline">+ Agregar Pedido</span>
-                <span className="sm:hidden">+ Agregar</span>
-            </Button>
+            {/* Sin onAddOrder (mensajero) no se muestra: los filtros sí, el alta no. */}
+            {onAddOrder && (
+                <Button
+                    onClick={onAddOrder}
+                    className="w-full md:w-auto md:ml-auto bg-cyan-600 hover:bg-cyan-700 text-white font-semibold text-sm"
+                >
+                    <span className="hidden sm:inline">+ Agregar Pedido</span>
+                    <span className="sm:hidden">+ Agregar</span>
+                </Button>
+            )}
         </div>
     )
 })

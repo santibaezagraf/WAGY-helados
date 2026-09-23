@@ -1,7 +1,7 @@
 'use server'
 
 import { createClient as createServiceClient } from '@supabase/supabase-js'
-import { createClient as createUserClient } from '@/lib/supabase-server'
+import { exigirPermiso } from '@/lib/auth-rol'
 
 // Cliente service-role: lee/escribe `alertas_modelo` bypasseando RLS. La tabla es
 // nueva y todavía no está en src/types/supabase.ts (no corrimos update-types),
@@ -25,12 +25,8 @@ export type AlertaModelo = {
   telefono: string | null
 }
 
-/** Aborta si no hay usuario autenticado (estas actions usan service-role). */
-async function exigirUsuario() {
-  const supabase = await createUserClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('No autenticado')
-}
+// El gate de permiso es la ÚNICA protección: estas actions usan el cliente
+// service-role, que bypassea la RLS. No hay segunda capa.
 
 /**
  * Alertas de fallback SIN resolver de las últimas HORAS_VENTANA, más recientes
@@ -38,7 +34,7 @@ async function exigirUsuario() {
  * mantiene al día. Fail-soft: ante error devuelve [] (el banner no es crítico).
  */
 export async function getAlertasModeloActivas(): Promise<AlertaModelo[]> {
-  await exigirUsuario()
+  await exigirPermiso('modelos.ver')
   const desde = new Date(Date.now() - HORAS_VENTANA * 60 * 60 * 1000).toISOString()
   const { data, error } = await supabaseAdmin
     .from('alertas_modelo')
@@ -59,7 +55,7 @@ export async function getAlertasModeloActivas(): Promise<AlertaModelo[]> {
  * global, no por fila). Devuelve true si salió bien.
  */
 export async function resolverAlertasModelo(): Promise<boolean> {
-  await exigirUsuario()
+  await exigirPermiso('alertas.resolver')
   const { error } = await supabaseAdmin
     .from('alertas_modelo')
     .update({ resuelto: true })

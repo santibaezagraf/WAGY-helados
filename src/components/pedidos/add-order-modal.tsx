@@ -12,6 +12,7 @@ import { PedidoInsert } from "@/types/pedidos"
 import { IceCream, Droplet, Banknote, CreditCard, AlertCircle } from "lucide-react"
 import { Logo } from "@/components/ui/logo"
 import { crearPedido } from "@/lib/actions/pedidos"
+import { rangoFechasEntrega } from "@/lib/entrega"
 import { useRouter } from "next/navigation"
 
 interface AddOrderModalProps {
@@ -54,6 +55,12 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
   const [observaciones, setObservaciones] = React.useState("")
   const [metodoPago, setMetodoPago] = React.useState<"transferencia" | "efectivo">("efectivo")
   const [costoEnvioStr, setCostoEnvioStr] = React.useState("0")
+  // Día de entrega. Vacío = hoy (el caso normal); se puede programar hasta
+  // MAX_MESES_PROGRAMACION meses. Ver lib/entrega.ts.
+  const [fechaEntrega, setFechaEntrega] = React.useState("")
+  // El rango se calcula al abrir el modal, no en cada render: si no, el `max`
+  // cambiaría solo al cruzar la medianoche con el modal abierto.
+  const rangoEntrega = React.useMemo(() => rangoFechasEntrega(), [open])
 
   const costoEnvio = parseInt(costoEnvioStr) || 0
 
@@ -142,6 +149,7 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
     setObservaciones("")
     setMetodoPago("efectivo")
     setCostoEnvioStr("")
+    setFechaEntrega("")
     setTotalAguaManualStr("")
     setTotalCremaManualStr("")
     setTotalAguaEditado(false)
@@ -184,17 +192,19 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
         observaciones: observaciones || null,
         monto_total_agua: parseInt(totalAgua || "0"),
         monto_total_crema: parseInt(totalCrema || "0"),
+        // Vacío o el día de hoy = pedido normal: la DB le pone now().
+        fecha_entrega: fechaEntrega || null,
       })
       resetForm()
       onOpenChange(false)
-      
+
     } catch (error) {
       console.error("Error:", error)
       alert("Error al crear el pedido: " + (error as Error).message)
     } finally {
       setIsSubmitting(false)
     }
-  }, [direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, resetForm, onOpenChange, router])
+  }, [direccion, telefono, cantidadAgua, cantidadCrema, metodoPago, costoEnvio, aclaracion, observaciones, totalAgua, totalCrema, fechaEntrega, resetForm, onOpenChange, router])
 
   
 
@@ -484,6 +494,27 @@ export function AddOrderModal({ open, onOpenChange }: AddOrderModalProps) {
                   className="h-12 text-base"
                   min="0"
                 />
+              </div>
+
+              {/* Pedido programado: vacío = se entrega hoy, que es el caso normal. */}
+              <div className="space-y-2">
+                <Label htmlFor="fechaEntrega" className="text-base font-semibold">
+                  Entregar el{" "}
+                  <span className="text-sm font-normal text-slate-500">(opcional)</span>
+                </Label>
+                <Input
+                  id="fechaEntrega"
+                  type="date"
+                  value={fechaEntrega}
+                  onChange={(e) => setFechaEntrega(e.target.value)}
+                  min={rangoEntrega.min}
+                  max={rangoEntrega.max}
+                  className="h-12 text-base"
+                />
+                <p className="text-xs text-slate-500">
+                  Dejalo vacío si se entrega hoy. Se puede programar hasta el{" "}
+                  {rangoEntrega.max.split("-").reverse().slice(0, 2).join("/")}.
+                </p>
               </div>
 
               <div className="space-y-2">
