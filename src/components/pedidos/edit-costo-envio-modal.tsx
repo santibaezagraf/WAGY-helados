@@ -31,10 +31,10 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
         try {
             await actualizarCostoEnvioPedido(id, newCostoEnvio);
             onOpenChange(false);
-            
+
         } catch (error) {
             console.error("Error al actualizar costo de envío:", error);
-        } 
+        }
     }, [id, newCostoEnvio, onOpenChange, router]);
 
     return (
@@ -49,7 +49,7 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
                 <div className="space-y-4 py-4">
                     <div className="bg-white rounded-xl p-4 sm:p-6 shadow-lg border-2 border-slate-200">
                         <label className="block text-sm font-medium text-slate-700 mb-3">Costo de Envío:</label>
-                        
+
                         <div className="flex items-center gap-2 sm:gap-4">
                             <div className="flex-1 relative">
                                 <span className="absolute left-4 top-1/2 -translate-y-1/2 text-2xl sm:text-3xl font-bold text-slate-700">$</span>
@@ -73,13 +73,6 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
                         <div className="flex gap-2 mt-4 flex-wrap justify-center">
                             <button
                                 type="button"
-                                onClick={() => setNewCostoEnvioStr('2000')}
-                                className="px-4 py-2 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
-                            >
-                                $2000
-                            </button>
-                            <button
-                                type="button"
                                 onClick={() => setNewCostoEnvioStr('2500')}
                                 className="px-4 py-2 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
                             >
@@ -91,6 +84,13 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
                                 className="px-4 py-2 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
                             >
                                 $3000
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setNewCostoEnvioStr('3500')}
+                                className="px-4 py-2 text-sm font-semibold bg-slate-200 hover:bg-slate-300 rounded-lg transition-colors"
+                            >
+                                $3500
                             </button>
                         </div>
                     </div>
@@ -106,7 +106,7 @@ export function EditCostoEnvioModal({ id, costoEnvio, open, onOpenChange }: Edit
                         Cancelar
                     </Button>
                     <Button
-                        type="button"                        
+                        type="button"
                         onClick={handleSave}
                         className="px-4 py-2 bg-cyan-600 text-white rounded-md hover:bg-cyan-700 transition-colors font-semibold"
                         disabled={newCostoEnvio === costoEnvio}
